@@ -1,0 +1,6 @@
+pyside6
+google-genai
+pyautogui
+opencv-python
+pyaudio
+SpeechRecognition
