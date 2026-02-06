@@ -40,6 +40,7 @@ class MainController(QObject):
         self.gui_adapter.screenshot_prep_requested.connect(self.handle_screenshot_prep)
         self.gui_adapter.screenshot_restore_requested.connect(self.handle_screenshot_restore)
         self.gui_adapter.click_through_requested.connect(self.handle_click_through)
+        self.gui_adapter.guidance_next_requested.connect(self.handle_guidance_next)
 
     def init_agent(self):
         # Initialize Agent
@@ -96,6 +97,14 @@ class MainController(QObject):
         except Exception:
             pass
         payload['event'].set()
+
+    @Slot(str, object)
+    def handle_guidance_next(self, label, payload):
+        try:
+            self.main_window.chat_widget.show_guidance_button(label, payload)
+        except Exception:
+            payload["result"] = False
+            payload["event"].set()
 
     def handle_user_command(self, text):
         if not self.agent:

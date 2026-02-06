@@ -23,6 +23,7 @@ from tools.loop import LoopDetector
 from skills import MediaSkill, BrowserSkill, SystemSkill, TimerSkill
 from agent.verify import verify_task_completion
 from agent.brain import plan_task_blind
+from agent.guidance import describe_action, infer_expected_result, verify_guidance_step, wait_for_user_next
 from pydantic import BaseModel, Field
 
 
@@ -891,10 +892,194 @@ class AgentOrchestrator:
 
         return success
 
+    def run_task_guidance(self, user_command: str) -> bool:
+        """
+        Guidance mode: provide step-by-step human instructions without executing actions.
+        """
+        self.log(f"\n{'=' * 60}")
+        self.log(f"NEW TASK: {user_command}")
+        self.log(f"{'=' * 60}")
+
+        if self.chat_window:
+            self.chat_window.set_click_through(False)
+
+        if self.loop_detector:
+            self.loop_detector.clear()
+
+        try:
+            self._stop_event.clear()
+            self.current_task = user_command
+            self.step_count = 0
+            self.task_history = []
+            self.model_history = []
+
+            task_complete = False
+            max_retries = Config.MAX_RETRIES
+            pending_expected_result = None
+            pending_is_last = False
+            pending_action = None
+
+            while not task_complete and self.step_count < self.max_steps:
+                self._check_stop()
+
+                if pending_expected_result:
+                    elements, reference_sheet = self.capture_screen()
+                    if not elements and not reference_sheet:
+                        self.log("Skipping step due to capture failure.")
+                        time.sleep(1)
+                        continue
+
+                    check = verify_guidance_step(
+                        user_command,
+                        pending_expected_result,
+                        elements,
+                        Config.SCREENSHOT_PATH,
+                        Config.DEBUG_PATH,
+                    )
+
+                    if check and check.get("step_complete"):
+                        expected_for_log = pending_expected_result
+                        pending_expected_result = None
+                        if pending_is_last:
+                            task_complete = True
+                            pending_is_last = False
+                        else:
+                            if pending_action:
+                                self.task_history.append(pending_action)
+                            else:
+                                self.task_history.append(
+                                    {
+                                        "action_type": "guided_step",
+                                        "reasoning": expected_for_log,
+                                    }
+                                )
+                        pending_action = None
+                        continue
+
+                    correction = None
+                    if check:
+                        correction = check.get("correction")
+
+                    if not correction:
+                        correction = "Please try the step again, then click Next."
+
+                    if self.chat_window:
+                        self.chat_window.add_final_answer(correction)
+                    else:
+                        print(correction)
+
+                    label = "Done" if pending_is_last else "Next"
+                    wait_for_user_next(self.chat_window, label, self._check_stop)
+                    continue
+
+                self.step_count += 1
+                self.log(f"\n--- Step {self.step_count}/{self.max_steps} ---")
+
+                elements, reference_sheet = self.capture_screen()
+                if not elements and not reference_sheet:
+                    self.log("Skipping step due to capture failure.")
+                    time.sleep(1)
+                    continue
+
+                task_context = (
+                    "\n".join(
+                        [
+                            f"Step {i + 1}: {step['action_type']} - {step.get('reasoning', '')}"
+                            for i, step in enumerate(self.task_history)
+                        ]
+                    )
+                    if self.task_history
+                    else ""
+                )
+
+                self.log("Planning next guidance step...")
+                plan_result = plan_task(
+                    user_command,
+                    elements,
+                    Config.SCREENSHOT_PATH,
+                    Config.DEBUG_PATH,
+                    reference_sheet,
+                    task_context,
+                    None,
+                    self.model_history,
+                    media_resolution="low",
+                )
+
+                if not plan_result:
+                    max_retries -= 1
+                    if max_retries <= 0:
+                        return False
+                    continue
+
+                action, model_response = plan_result
+                self.model_history.append(model_response)
+
+                if action.get("action_sequence"):
+                    seq = action.get("action_sequence") or []
+                    if seq:
+                        action = {
+                            "action_type": seq[0].get("action_type"),
+                            "params": seq[0].get("params", {}),
+                            "reasoning": seq[0].get("reasoning", ""),
+                            "task_complete": False,
+                        }
+
+                if (
+                    self.clarification_manager
+                    and self.clarification_manager.should_ask_clarification(action)
+                ):
+                    answer = self.clarification_manager.ask_question(action, user_command)
+                    if answer is None:
+                        return False
+                    action = self.clarification_manager.integrate_answer(
+                        action, answer, user_command
+                    )
+                    if not action:
+                        continue
+
+                try:
+                    size = PIL.Image.open(Config.SCREENSHOT_PATH).size
+                except Exception:
+                    size = (1920, 1080)
+
+                instruction = describe_action(action, elements, size)
+                if self.chat_window:
+                    self.chat_window.add_final_answer(instruction)
+                else:
+                    print(instruction)
+
+                label = "Done" if action.get("task_complete", False) else "Next"
+                wait_for_user_next(self.chat_window, label, self._check_stop)
+
+                expected_result = action.get("expected_result") or infer_expected_result(action)
+                if expected_result:
+                    pending_expected_result = expected_result
+                    pending_is_last = bool(action.get("task_complete", False))
+                    pending_action = action
+                else:
+                    if action.get("task_complete", False):
+                        task_complete = True
+                    else:
+                        self.task_history.append(action)
+
+            if self.step_count >= self.max_steps:
+                return False
+
+            return task_complete
+
+        except StopRequested:
+            return False
+
+        finally:
+            if self.chat_window:
+                self.chat_window.set_click_through(False)
+
     def run_task(self, user_command: str) -> bool:
         """
         Execute a complete task with multi-step planning and execution.
         """
+        if self.mode == OperationMode.GUIDE:
+            return self.run_task_guidance(user_command)
         self.log(f"\n{'=' * 60}")
         self.log(f"NEW TASK: {user_command}")
         self.log(f"{'=' * 60}")

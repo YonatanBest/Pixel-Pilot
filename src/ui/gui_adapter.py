@@ -8,6 +8,7 @@ class GuiAdapter(QObject):
     error_message_received = Signal(str)
     activity_message_received = Signal(str)
     final_answer_received = Signal(str)
+    guidance_next_requested = Signal(str, object)
     
 
     confirmation_requested = Signal(str, str, object) 
@@ -37,6 +38,9 @@ class GuiAdapter(QObject):
 
     def add_final_answer(self, message: str):
         self.final_answer_received.emit(message)
+
+    def request_guidance_next(self, label: str, payload: dict):
+        self.guidance_next_requested.emit(label, payload)
 
     def ask_confirmation(self, title, text):
         event = threading.Event()

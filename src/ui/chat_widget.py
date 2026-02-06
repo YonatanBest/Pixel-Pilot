@@ -39,6 +39,7 @@ class ChatWidget(QWidget):
         self.send_btn.clicked.connect(self.send_message)
         self.input_field.returnPressed.connect(self.send_message)
         self.mic_btn.clicked.connect(self.toggle_listening)
+        self.guidance_btn.clicked.connect(self._on_guidance_btn_clicked)
         self.mode_combo.currentIndexChanged.connect(self.update_mode_tooltip)
         self.mode_combo.currentIndexChanged.connect(self._emit_mode_changed)
         self.vision_combo.currentIndexChanged.connect(self.update_vision_tooltip)
@@ -51,6 +52,8 @@ class ChatWidget(QWidget):
         self._stream_target_id: str | None = None
         self._stream_full_text: str = ""
         self._stream_pos: int = 0
+        self._guidance_payload: dict | None = None
+        self._guidance_active: bool = False
         self.set_view_mode("full")
         self.update_mode_tooltip()
         self.update_vision_tooltip()
@@ -217,12 +220,18 @@ class ChatWidget(QWidget):
         self.mic_btn.setFixedSize(34, 34)
         self.mic_btn.setToolTip("Start listening")
         
+        self.guidance_btn = QPushButton("Next")
+        self.guidance_btn.setObjectName("guidanceBtn")
+        self.guidance_btn.setFixedHeight(28)
+        self.guidance_btn.setVisible(False)
+
         self.send_btn = QPushButton("→")
         self.send_btn.setObjectName("sendBtn")
         self.send_btn.setFixedSize(28, 28)
         
         i.addWidget(self.input_field)
         i.addWidget(self.mic_btn)
+        i.addWidget(self.guidance_btn)
         i.addWidget(self.send_btn)
         
         layout.addWidget(self.input_frame)
@@ -289,6 +298,16 @@ class ChatWidget(QWidget):
             QPushButton#micBtn:pressed { background: qradialgradient(cx:0.4, cy:0.4, radius:1.1, stop:0 #0a2f45, stop:1 #081a26); }
             QPushButton#sendBtn { background: #057FCA; color: #0d0d0d; border: none; border-radius: 4px; font: 700 14px 'Segoe UI', 'Inter', sans-serif; letter-spacing: 0.2px; }
             QPushButton#sendBtn:hover { background: #059669; }
+            QPushButton#guidanceBtn {
+                background: #0b2a3a;
+                color: #e9f6ff;
+                border: 1px solid rgba(52, 78, 102, 180);
+                border-radius: 6px;
+                font: 700 12px 'Segoe UI', 'Inter', sans-serif;
+                padding: 2px 10px;
+            }
+            QPushButton#guidanceBtn:hover { border-color: #057FCA; color: #ffffff; }
+            QPushButton#guidanceBtn:pressed { background: #08212f; border-color: #0a5f97; }
         """)
 
     def _on_anchor_clicked(self, url: QUrl):
@@ -969,6 +988,7 @@ class ChatWidget(QWidget):
             self.voice_visualizer.hide()
             self.voice_visualizer.set_active(False)
             self.compact_stop_btn.hide()
+            self.guidance_btn.hide()
             if self.header.layout():
                 self.header.layout().invalidate()
                 self.header.layout().activate()
@@ -983,6 +1003,7 @@ class ChatWidget(QWidget):
                 self.voice_visualizer.show()
                 self.voice_visualizer.set_active(True)
                 self.compact_stop_btn.show()
+                self.guidance_btn.hide()
             else:
                 self.chat_display.show()
                 self.input_frame.show()
@@ -993,6 +1014,10 @@ class ChatWidget(QWidget):
                 self.voice_visualizer.hide()
                 self.voice_visualizer.set_active(False)
                 self.compact_stop_btn.hide()
+                if self._guidance_active:
+                    self.guidance_btn.show()
+                else:
+                    self.guidance_btn.hide()
             return
 
         # full
@@ -1004,6 +1029,10 @@ class ChatWidget(QWidget):
             self.input_hint.show()
         self.dropdowns.show()
         self.compact_stop_btn.hide()
+        if self._guidance_active:
+            self.guidance_btn.show()
+        else:
+            self.guidance_btn.hide()
         if listening:
             self.voice_visualizer.show()
             self.voice_visualizer.set_active(True)
@@ -1018,3 +1047,27 @@ class ChatWidget(QWidget):
     def _hide_input_hint(self):
         if self.input_hint.isVisible():
             self.input_hint.hide()
+
+    def show_guidance_button(self, label: str, payload: dict):
+        text = (label or "Next").strip() or "Next"
+        self._guidance_payload = payload
+        self._guidance_active = True
+        self.guidance_btn.setText(text)
+        self.guidance_btn.setEnabled(True)
+        self.guidance_btn.show()
+        self._apply_view_mode()
+
+    def hide_guidance_button(self):
+        self._guidance_payload = None
+        self._guidance_active = False
+        self.guidance_btn.hide()
+        self._apply_view_mode()
+
+    def _on_guidance_btn_clicked(self):
+        payload = self._guidance_payload
+        self._guidance_payload = None
+        self._guidance_active = False
+        self.guidance_btn.hide()
+        if isinstance(payload, dict):
+            payload["result"] = True
+            payload["event"].set()
