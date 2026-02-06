@@ -33,6 +33,20 @@ class STARTUPINFO(ctypes.Structure):
 class PROCESS_INFORMATION(ctypes.Structure):
     _fields_ = [('hProcess', wintypes.HANDLE), ('hThread', wintypes.HANDLE), ('dwProcessId', wintypes.DWORD), ('dwThreadId', wintypes.DWORD)]
 
+class PROCESSENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(wintypes.ULONG)),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260)
+    ]
+
 def enable_privilege(privilege_name):
     try:
         token = wintypes.HANDLE()
@@ -53,18 +67,34 @@ def get_base_path():
         return os.path.dirname(os.path.dirname(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
+def get_winlogon_pid(session_id):
+    TH32CS_SNAPPROCESS = 0x00000002
+    h_snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if h_snapshot == -1: return None
+
+    pe32 = PROCESSENTRY32()
+    pe32.dwSize = ctypes.sizeof(PROCESSENTRY32)
+
+    if not kernel32.Process32FirstW(h_snapshot, ctypes.byref(pe32)):
+        kernel32.CloseHandle(h_snapshot)
+        return None
+
+    found_pid = None
+    while True:
+        if pe32.szExeFile.lower() == "winlogon.exe":
+            curr_pid_session = wintypes.DWORD()
+            if kernel32.ProcessIdToSessionId(pe32.th32ProcessID, ctypes.byref(curr_pid_session)):
+                if curr_pid_session.value == session_id:
+                    found_pid = pe32.th32ProcessID
+                    break
+        if not kernel32.Process32NextW(h_snapshot, ctypes.byref(pe32)):
+            break
+            
+    kernel32.CloseHandle(h_snapshot)
+    return found_pid
+
 def inject_agent_to_winlogon(session_id):
-    winlogon_pid = None
-    cmd = f'tasklist /FI "IMAGENAME eq winlogon.exe" /FI "SESSION eq {session_id}" /FO CSV /NH'
-    try:
-        output = os.popen(cmd).read()
-        if "," in output:
-            parts = output.split(',')
-            if len(parts) > 1:
-                winlogon_pid = int(parts[1].replace('"', ''))
-    except Exception as e:
-        log_debug(f"PID Find Error: {e}")
-        return False
+    winlogon_pid = get_winlogon_pid(session_id)
         
     if not winlogon_pid:
         log_debug(f"Could not find winlogon for session {session_id}")
