@@ -765,15 +765,20 @@ class AgentOrchestrator:
         task_complete = action.get("task_complete", False)
         action_sequence = action.get("action_sequence")
         success = False
+        deferred_execution = False
 
-        if action_sequence and (Config.TURBO_MODE or action.get("action_type") == "sequence"):
-            print(f"\n🚀 EXECUTING SEQUENCE: {len(action_sequence)} actions")
+        if not action_sequence and task_complete and action.get("action_type") == "reply":
+            print("   [INFO] Deferring reply execution until verification completes...")
+            deferred_execution = True
+            success = True
+        elif action_sequence and (Config.TURBO_MODE or action.get("action_type") == "sequence"):
+            print(f"\n EXECUTING SEQUENCE: {len(action_sequence)} actions")
             success = True
             for i, sub_action in enumerate(action_sequence):
                 print(f"\n--- Sequence Step {i + 1}/{len(action_sequence)} ---")
                 step_success = self.execute_action(sub_action, elements)
                 if not step_success:
-                    print(f"⚠️ Sequence failed at step {i + 1}")
+                    print(f" Sequence failed at step {i + 1}")
                     success = False
                     break
                 self.task_history.append(sub_action)
@@ -783,7 +788,8 @@ class AgentOrchestrator:
                 self.task_history.append(action)
 
         if success:
-            print("Action completed")            
+            if not deferred_execution:
+                print("Action completed")
             uac_suspect = False
             
             def check_uac(act):
@@ -828,7 +834,6 @@ class AgentOrchestrator:
                     or action.get("no_verification", False)
                 ):
                     print("\n [INFO] Skipping verification as requested by action plan.")
-                    print(f"\n TASK COMPLETED: {user_command}")
                     action["task_complete"] = True
                 else:
                     try:
@@ -864,11 +869,13 @@ class AgentOrchestrator:
                                     is_actually_complete
                                     and confidence >= Config.VERIFICATION_MIN_CONFIDENCE
                                 ):
-                                    print(f"\n TASK VERIFIED AND COMPLETED: {user_command}")
+                                    print(f"   [SUCCESS] Verification passed (Confidence: {confidence:.0%})")
                                     action["task_complete"] = True
                                 else:
                                     print("\n Task not verified as complete")
                                     action["task_complete"] = False
+                                    action["verification_failed"] = True
+                                    action["verification_reasoning"] = reasoning
                             else:
                                 print("\n Verification returned no result")
                                 print("   Trusting AI's assessment: task complete")
@@ -884,6 +891,16 @@ class AgentOrchestrator:
 
                 if action["task_complete"]:
                     print(f"\n TASK COMPLETED: {user_command}")
+
+            if deferred_execution:
+                if action.get("task_complete", False):
+                    print("   [INFO] Verification passed. Executing deferred reply.")
+                    real_success = self.execute_action(action, elements)
+                    if real_success:
+                        self.task_history.append(action)
+                else:
+                    print("   [INFO] Verification failed. Suppressing reply.")
+                    self.task_history.append(action)
 
         else:
             print("Action failed or skipped")
@@ -1120,6 +1137,11 @@ class AgentOrchestrator:
                         "\n".join(
                             [
                                 f"Step {i + 1}: {step['action_type']} - {step['reasoning']}"
+                                + (
+                                    f" [VERIFICATION FAILED: {step['verification_reasoning']}]"
+                                    if step.get("verification_failed")
+                                    else ""
+                                )
                                 for i, step in enumerate(self.task_history)
                             ]
                         )
@@ -1195,6 +1217,11 @@ class AgentOrchestrator:
                     "\n".join(
                         [
                             f"Step {i + 1}: {step['action_type']} - {step['reasoning']}"
+                            + (
+                                f" [VERIFICATION FAILED: {step['verification_reasoning']}]"
+                                if step.get("verification_failed")
+                                else ""
+                            )
                             for i, step in enumerate(self.task_history)
                         ]
                     )
