@@ -1,8 +1,11 @@
+from typing import Optional
+
 from PySide6.QtWidgets import QMainWindow, QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QCursor
 from .chat_widget import ChatWidget
 from config import Config
+
 
 class MainWindow(QMainWindow):
     FULL_SIZE = (440, 480)
@@ -21,6 +24,9 @@ class MainWindow(QMainWindow):
         self.old_pos = None
 
         self.click_through_enabled = False
+        
+        # Sidecar preview (set by controller)
+        self.sidecar: Optional["SidecarPreview"] = None
         
         self.chat_widget = ChatWidget()
         self.setCentralWidget(self.chat_widget)
@@ -98,3 +104,28 @@ class MainWindow(QMainWindow):
 
     def mouseReleaseEvent(self, event):
         self.old_pos = None
+
+    def moveEvent(self, event):
+        """Reposition sidecar when main window moves."""
+        super().moveEvent(event)
+        if self.sidecar:
+            self.sidecar.reattach()
+
+    def showEvent(self, event):
+        """Show sidecar when main window is shown."""
+        super().showEvent(event)
+        if self.sidecar:
+            self.sidecar.show()
+            self.sidecar.reattach()
+
+    def hideEvent(self, event):
+        """Hide sidecar when main window is hidden."""
+        super().hideEvent(event)
+        if self.sidecar:
+            self.sidecar.hide()
+
+    def closeEvent(self, event):
+        """Clean up sidecar when closing."""
+        if self.sidecar:
+            self.sidecar.close()
+        super().closeEvent(event)

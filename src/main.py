@@ -19,7 +19,6 @@ class GuiStream:
         if not s:
             return logging.INFO
 
-        # Default policy: stdout is treated as debug noise unless it clearly indicates a problem.
         if not self.is_error:
             if "error" in s.lower() or "failed" in s.lower() or s.lower().startswith("exception"):
                 return logging.ERROR
@@ -27,7 +26,6 @@ class GuiStream:
                 return logging.WARNING
             return logging.DEBUG
 
-        # Many backend debug prints use indentation / arrows.
         if s.startswith("->") or s.startswith("   ->") or s.startswith("[") or s.startswith("   ["):
             if "error" in s.lower() or "failed" in s.lower():
                 return logging.ERROR
@@ -48,7 +46,6 @@ class GuiStream:
             line = line.rstrip()
             if not line: continue
 
-            # Avoid spamming GUI with known noise; still goes to file via Qt handler.
             noise = (
                 "Using CPU.",
                 "qt.qpa.window:",
@@ -250,11 +247,18 @@ def main():
     adapter.add_activity_message(f"Logging to: {log_file_path}")
     adapter.add_activity_message(f"Admin: {'YES' if is_admin() else 'NO'}")
     controller.init_agent()
+    
+    try:
+        controller.init_sidecar()
+        if controller.sidecar:
+            adapter.add_activity_message("Agent Desktop ready")
+    except Exception as sidecar_err:
+        logger.debug(f"Sidecar initialization skipped: {sidecar_err}")
+    
     if controller.agent:
         window.chat_widget.set_operation_mode(controller.agent.mode)
         window.chat_widget.set_vision_mode("ROBO" if controller.agent.robotics_eye else "OCR")
 
-    # Flush early Qt messages with best-effort severity classification
     for mode, msg in early_qt_messages:
         mode_name = getattr(mode, "name", "").lower()
         if "QFont::setPointSize: Point size <= 0" in msg:
@@ -275,7 +279,6 @@ def main():
             logger.debug(msg)
     
     window.show()
-    # Close splash screen when main window is visible
     if splash:
         splash.finish(window)
         

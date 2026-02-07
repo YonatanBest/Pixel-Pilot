@@ -90,6 +90,9 @@ class AgentOrchestrator:
         self.visual_memory = {}
         os.makedirs(Config.MEDIA_DIR, exist_ok=True)
 
+        self.desktop_manager = None
+        self.active_workspace = Config.DEFAULT_WORKSPACE
+
         self.log(f"AI Agent initialized in {self.mode.value.upper()} mode")
 
     def request_stop(self):
@@ -120,7 +123,6 @@ class AgentOrchestrator:
             logger.info(clean)
 
         if self.chat_window:
-            # Avoid turning the chat into a debug console.
             if is_trace or clean.startswith("="):
                 return
             self.chat_window.add_system_message(clean)
@@ -134,8 +136,6 @@ class AgentOrchestrator:
         """
         try:
             user32 = ctypes.windll.user32
-            # If a Qt GUI is active, let Qt manage DPI awareness.
-            # Calling SetProcessDPIAware can conflict with Qt's DPI initialization.
             if not self.chat_window:
                 user32.SetProcessDPIAware()
             w_physical = user32.GetSystemMetrics(0)
@@ -227,10 +227,22 @@ class AgentOrchestrator:
     def _capture_raw_image(self) -> PIL.Image.Image:
         """
         Capture raw screen execution-style.
+        
+        If active_workspace is "agent" and desktop_manager is available,
+        captures from the Agent Desktop. Otherwise uses the user desktop.
+        
         Attempts MSS (DXGI/Fast) first.
         If that fails or produces artifacts, falls back to PyAutoGUI (GDI).
         Raises Exception if both fail (likely UAC).
         """
+        if self.active_workspace == "agent" and self.desktop_manager:
+            try:
+                img = self.desktop_manager.capture_desktop()
+                if img is not None:
+                    return img
+            except Exception as e:
+                logging.getLogger("pixelpilot.agent").debug(f"Agent Desktop capture failed: {e}")
+        
         try:
             if not self.chat_window:
                 with mss.mss() as sct:
@@ -614,7 +626,9 @@ class AgentOrchestrator:
         final_y = real_y * scale_y
 
         print(f"Clicking ID {element_id} ('{target['label']}') at ({final_x:.0f}, {final_y:.0f})")
-        mouse.click_at(int(final_x), int(final_y))
+        
+        dm = self.desktop_manager if self.active_workspace == "agent" else None
+        mouse.click_at(int(final_x), int(final_y), desktop_manager=dm)
 
         time.sleep(Config.WAIT_AFTER_CLICK)
         return True
@@ -622,30 +636,30 @@ class AgentOrchestrator:
     def _execute_type_text(self, params: Dict) -> bool:
         text = params.get("text")
         if not text:
-            print("Missing text in type_text params")
             return False
 
-        success = self.keyboard.type_text(text, interval=Config.TYPING_INTERVAL)
+        dm = self.desktop_manager if self.active_workspace == "agent" else None
+        success = self.keyboard.type_text(text, interval=Config.TYPING_INTERVAL, desktop_manager=dm)
         time.sleep(Config.WAIT_AFTER_TYPE)
         return success
 
     def _execute_press_key(self, params: Dict) -> bool:
         key = params.get("key")
         if not key:
-            print("Missing key in press_key params")
             return False
 
-        success = self.keyboard.press_key(key)
+        dm = self.desktop_manager if self.active_workspace == "agent" else None
+        success = self.keyboard.press_key(key, desktop_manager=dm)
         time.sleep(Config.WAIT_AFTER_KEY)
         return success
 
     def _execute_key_combo(self, params: Dict) -> bool:
         keys = params.get("keys", [])
         if not keys:
-            print("Missing keys in key_combo params")
             return False
 
-        success = self.keyboard.key_combo(*keys)
+        dm = self.desktop_manager if self.active_workspace == "agent" else None
+        success = self.keyboard.key_combo(*keys, desktop_manager=dm)
         time.sleep(Config.WAIT_AFTER_KEY)
         return success
 
@@ -684,6 +698,8 @@ class AgentOrchestrator:
 
         print(f"Opening application: {app_name}")
 
+        dm = self.desktop_manager if self.active_workspace == "agent" else None
+
         app_results = self.app_indexer.find_app(app_name, max_results=1)
 
         if app_results:
@@ -694,6 +710,10 @@ class AgentOrchestrator:
 
             if (launch_method == "executable" or launch_method == "startfile") and launch_command:
                 try:
+                    if dm and dm.is_created:
+                        print(f"   Launching on Agent Desktop ({launch_method}): {launch_command}")
+                        return dm.launch_process(launch_command)
+                    
                     if launch_method == "executable":
                         subprocess.Popen(launch_command)
                     else:

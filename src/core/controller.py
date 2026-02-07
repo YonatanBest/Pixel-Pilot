@@ -33,6 +33,9 @@ class MainController(QObject):
         self.agent = None
         self.worker = None
         self._stop_requested = False
+        
+        self.desktop_manager = None
+        self.sidecar = None
 
         # Connect GUI Adapter signals to Main Window actions (blocking support)
         self.gui_adapter.confirmation_requested.connect(self.handle_confirmation)
@@ -42,8 +45,6 @@ class MainController(QObject):
         self.gui_adapter.click_through_requested.connect(self.handle_click_through)
 
     def init_agent(self):
-        # Initialize Agent
-        # Pass gui_adapter as chat_window
         try:
             robotics_eye = None
             if Config.USE_ROBOTICS_EYE:
@@ -60,8 +61,49 @@ class MainController(QObject):
                 robotics_eye=robotics_eye,
             )
             self.gui_adapter.current_mode = self.agent.mode
+            
+            if self.desktop_manager:
+                self.agent.desktop_manager = self.desktop_manager
         except Exception as e:
             self.gui_adapter.add_error_message(f"Failed to initialize agent: {e}")
+
+    def init_sidecar(self):
+        """Initialize the Agent Desktop and sidecar preview."""
+        if not Config.ENABLE_AGENT_DESKTOP:
+            return
+        
+        try:
+            from desktop.desktop_manager import AgentDesktopManager
+            from ui.sidecar_preview import SidecarPreview
+            
+            self.desktop_manager = AgentDesktopManager(Config.AGENT_DESKTOP_NAME)
+            if not self.desktop_manager.create_desktop():
+                logger.warning("Failed to create Agent Desktop")
+                self.desktop_manager = None
+                return
+            
+            self.desktop_manager.initialize_shell()
+            
+            self.sidecar = SidecarPreview(
+                self.main_window,
+                width=Config.SIDECAR_PREVIEW_WIDTH,
+                height=Config.SIDECAR_PREVIEW_HEIGHT,
+                fps=Config.SIDECAR_PREVIEW_FPS,
+            )
+            self.sidecar.set_capture_source(self.desktop_manager)
+            
+            self.main_window.sidecar = self.sidecar
+            
+            if self.agent:
+                self.agent.desktop_manager = self.desktop_manager
+                if hasattr(self.agent, 'keyboard') and hasattr(self.agent.keyboard, 'set_desktop_manager'):
+                    self.agent.keyboard.set_desktop_manager(self.desktop_manager)
+                
+            logger.info("Agent Desktop and sidecar preview initialized")
+        except Exception as e:
+            logger.exception(f"Failed to initialize Agent Desktop: {e}")
+            self.desktop_manager = None
+            self.sidecar = None
 
     @Slot(str, str, object)
     def handle_confirmation(self, title, text, payload):
@@ -81,7 +123,7 @@ class MainController(QObject):
     @Slot(object)
     def handle_screenshot_prep(self, payload):
         self.main_window.hide()
-        QCoreApplication.processEvents() # Process events to ensure hide happens
+        QCoreApplication.processEvents() 
         payload['event'].set()
 
     @Slot(object)
@@ -159,7 +201,6 @@ class MainController(QObject):
         try:
             self.agent.set_mode(mode)
             self.gui_adapter.current_mode = mode
-            # Keep UI clean: do not narrate internal mode changes in chat.
             self.gui_adapter.add_activity_message("Settings updated")
         except Exception as e:
             self.gui_adapter.add_error_message(f"Failed to change mode: {e}")
