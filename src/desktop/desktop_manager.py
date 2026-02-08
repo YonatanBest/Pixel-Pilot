@@ -434,7 +434,39 @@ class AgentDesktopManager:
     def get_cursor_pos(self) -> tuple[int, int]:
         return self._cursor_pos
 
-    def launch_process(self, command: str, working_dir: Optional[str] = None) -> bool:
+    def _split_command_for_shell(self, command: str) -> tuple[str, str]:
+        cmd = command.strip()
+        if not cmd:
+            return "", ""
+        if cmd.startswith('"'):
+            end_quote = cmd.find('"', 1)
+            if end_quote != -1:
+                exe = cmd[1:end_quote]
+                params = cmd[end_quote + 1 :].strip()
+                return exe, params
+        if " " in cmd:
+            exe, params = cmd.split(" ", 1)
+            return exe, params.strip()
+        return cmd, ""
+
+    def _launch_elevated(self, command: str, working_dir: Optional[str] = None) -> bool:
+        exe, params = self._split_command_for_shell(command)
+        if not exe:
+            return False
+        try:
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                exe,
+                params if params else None,
+                working_dir,
+                1,
+            )
+            return rc > 32
+        except Exception:
+            return False
+
+    def launch_process(self, command: str, working_dir: Optional[str] = None, run_as_admin: bool = False) -> bool:
         if not self.is_created:
             return False
 
@@ -458,8 +490,11 @@ class AgentDesktopManager:
         except Exception as e:
             logger.warning(f"Error applying isolation strategies: {e}")
 
-        if command.strip().lower().endswith(".lnk"):
+        if command.strip().lower().endswith(".lnk") and not run_as_admin:
             command = f'cmd.exe /c "{command}"'
+
+        if run_as_admin:
+            return self._launch_elevated(command, working_dir=working_dir)
 
         try:
             class STARTUPINFO(ctypes.Structure):

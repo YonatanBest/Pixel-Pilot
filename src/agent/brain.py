@@ -67,12 +67,12 @@ class ActionResponse(BaseModel):
 class SubAction(BaseModel):
     action_type: str = Field(
         description=(
-            "The type of action: click, type_text, press_key, key_combo, open_app, wait, "
+            "The type of action: click, right_click, type_text, press_key, key_combo, open_app, wait, "
             "magnify, switch_workspace"
         )
     )
     params: Dict[str, Any] = Field(
-        description="Parameters for the action. For 'click', MUST include 'element_id'. For 'type_text', MUST include 'text'."
+        description="Parameters for the action. For 'click'/'right_click', MUST include 'element_id'. For 'type_text', MUST include 'text'."
     )
     reasoning: str = Field(description="Reasoning for this specific sub-action")
 
@@ -303,6 +303,7 @@ AVAILABLE SKILLS (HYBRID MODE):
 
 AVAILABLE ACTIONS:
 - click: Click on a UI element by ID. Params: {{"element_id": <int>}}
+- right_click: Right-click on a UI element by ID (opens context menu). Params: {{"element_id": <int>}}
 - type_text: Type text into focused field. Params: {{"text": "<string>"}}
 - press_key: Press a keyboard key (enter, tab, esc, win, etc.). Params: {{"key": "<string>"}}
 - key_combo: Press key combination. Params: {{"keys": ["ctrl", "c"]}}

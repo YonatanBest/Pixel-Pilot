@@ -566,6 +566,8 @@ class AgentOrchestrator:
         try:
             if action_type == "click":
                 return self._execute_click(params, elements)
+            elif action_type == "right_click":
+                return self._execute_right_click(params, elements)
             elif action_type == "type_text":
                 return self._execute_type_text(params)
             elif action_type == "press_key":
@@ -702,6 +704,49 @@ class AgentOrchestrator:
         
         dm = self.desktop_manager if self.active_workspace == "agent" else None
         mouse.click_at(int(final_x), int(final_y), desktop_manager=dm)
+
+        time.sleep(Config.WAIT_AFTER_CLICK)
+        return True
+
+    def _execute_right_click(self, params: Dict, elements: List[Dict]) -> bool:
+        if "element_id" in params:
+            element_id = params.get("element_id")
+        else:
+            element_id = params.get("target_id")
+        if element_id is None:
+            print(f"Missing element_id in right_click params. Received: {params}")
+            return False
+
+        target = next((el for el in elements if el["id"] == element_id), None)
+        if not target:
+            print(f"Element ID {element_id} not found")
+            return False
+
+        if self.is_magnified:
+            full_w, full_h = pyautogui.size()
+
+            norm_x = target["x"] / full_w
+            norm_y = target["y"] / full_h
+
+            crop_w = full_w / self.zoom_level
+            crop_h = full_h / self.zoom_level
+
+            real_x = self.zoom_offset[0] + (norm_x * crop_w)
+            real_y = self.zoom_offset[1] + (norm_y * crop_h)
+        else:
+            real_x = target["x"]
+            real_y = target["y"]
+
+        scale_x, scale_y = self.get_scale_factor()
+        final_x = real_x * scale_x
+        final_y = real_y * scale_y
+
+        print(
+            f"Right-clicking ID {element_id} ('{target['label']}') at ({final_x:.0f}, {final_y:.0f})"
+        )
+
+        dm = self.desktop_manager if self.active_workspace == "agent" else None
+        mouse.right_click_at(int(final_x), int(final_y), desktop_manager=dm)
 
         time.sleep(Config.WAIT_AFTER_CLICK)
         return True

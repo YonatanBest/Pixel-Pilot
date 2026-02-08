@@ -10,8 +10,8 @@ except ImportError:
 
 from PySide6.QtCore import QTimer, Qt, QPoint, Signal
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, 
-    QPushButton, QLabel, QLineEdit, QListWidget, QListWidgetItem
+    QApplication, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout,
+    QPushButton, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu
 )
 from PySide6.QtGui import QAction, QIcon
 
@@ -72,6 +72,8 @@ class StartMenu(QWidget):
         
         self.list_widget = QListWidget()
         self.list_widget.itemActivated.connect(self.launch_item)
+        self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self.show_context_menu)
         layout.addWidget(self.list_widget)
         
         self.indexer = None
@@ -121,14 +123,23 @@ class StartMenu(QWidget):
         if self.list_widget.currentItem():
             self.launch_item(self.list_widget.currentItem())
 
-    def launch_item(self, item):
+    def launch_item(self, item, run_as_admin: bool = False):
         app_info = item.data(Qt.ItemDataRole.UserRole)
         if app_info and self.dm:
             method, cmd = self.indexer.get_launch_command(app_info) if self.indexer else ("executable", app_info.get('path'))
             cmd = f'cmd.exe /c start "" "{cmd}"'
-                
-            self.dm.launch_process(cmd)
+            self.dm.launch_process(cmd, run_as_admin=run_as_admin)
             self.close()
+
+    def show_context_menu(self, pos):
+        item = self.list_widget.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu(self)
+        run_admin = menu.addAction("Run as administrator")
+        action = menu.exec(self.list_widget.mapToGlobal(pos))
+        if action == run_admin:
+            self.launch_item(item, run_as_admin=True)
             
     def showEvent(self, event):
         self.search_box.setFocus()
@@ -164,6 +175,13 @@ class IconButton(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.dm.launch_process(self.cmd)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        run_admin = menu.addAction("Run as administrator")
+        action = menu.exec(event.globalPos())
+        if action == run_admin:
+            self.dm.launch_process(self.cmd, run_as_admin=True)
 
 class DesktopBackground(QWidget):
     """A simple fullscreen widget to provide a desktop background with icons."""

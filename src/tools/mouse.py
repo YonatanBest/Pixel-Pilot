@@ -111,10 +111,45 @@ def click(desktop_manager=None):
     ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
 
 
+def right_click(desktop_manager=None):
+    if desktop_manager:
+        def _click_on_desktop():
+            extra = ctypes.c_ulong(0)
+            ii_ = Input_I()
+            ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_RIGHTDOWN, 0, ctypes.pointer(extra))
+            x = Input(ctypes.c_ulong(INPUT_MOUSE), ii_)
+            ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+
+            time.sleep(0.05)
+
+            ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_RIGHTUP, 0, ctypes.pointer(extra))
+            x = Input(ctypes.c_ulong(INPUT_MOUSE), ii_)
+            ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+
+        desktop_manager.run_on_desktop(_click_on_desktop)
+        return
+
+    extra = ctypes.c_ulong(0)
+    ii_ = Input_I()
+    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_RIGHTDOWN, 0, ctypes.pointer(extra))
+    x = Input(ctypes.c_ulong(INPUT_MOUSE), ii_)
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+    time.sleep(0.05)
+    ii_.mi = MouseInput(0, 0, 0, MOUSEEVENTF_RIGHTUP, 0, ctypes.pointer(extra))
+    x = Input(ctypes.c_ulong(INPUT_MOUSE), ii_)
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+
+
 def click_at(x: int, y: int, desktop_manager=None):
     move_to(x, y, desktop_manager=desktop_manager)
     time.sleep(0.1)
     click(desktop_manager=desktop_manager)
+
+
+def right_click_at(x: int, y: int, desktop_manager=None):
+    move_to(x, y, desktop_manager=desktop_manager)
+    time.sleep(0.1)
+    right_click(desktop_manager=desktop_manager)
 
 
 if __name__ == "__main__":
