@@ -86,6 +86,27 @@ def install_requirements(python_exe: str, requirements_file: Path = DEFAULT_REQU
         return False
 
 
+def prefetch_ocr_models(python_exe: str) -> bool:
+    """Download EasyOCR models during install to avoid first-run delay."""
+    if not python_exe:
+        print("[-] No Python executable provided for OCR prefetch.")
+        return False
+
+    cmd = [
+        python_exe,
+        "-c",
+        "import easyocr; easyocr.Reader(['en'], gpu=False)",
+    ]
+    try:
+        print("[*] Prefetching EasyOCR models...")
+        subprocess.run(cmd, check=True)
+        print("[+] EasyOCR models downloaded.")
+        return True
+    except subprocess.CalledProcessError as exc:
+        print(f"[!] EasyOCR prefetch failed: {exc}")
+        return False
+
+
 def _try_kill_image(image_name: str) -> None:
     try:
         subprocess.run(["taskkill", "/F", "/IM", image_name], capture_output=True)
@@ -402,6 +423,7 @@ def main() -> None:
             return
         if not install_requirements(venv_python, Path(args.requirements)):
             return
+        prefetch_ocr_models(venv_python)
     else:
         venv_python = None
 
