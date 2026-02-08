@@ -28,6 +28,8 @@ PixelPilot is a Windows desktop automation agent powered by **Gemini (Google Gen
 - **Sidecar preview**: Live, read-only preview of the Agent Desktop attached to the main window.
 - **Workspace switching**: The agent can switch between the user desktop and agent desktop.
 
+> **Note**: Opening the same application instance in both the User and Agent desktops simultaneously might behave weirdly. We have tried our best to isolate the two desktops (e.g., using separate user data directories) and will continue to improve this isolation.
+
 ### UAC / Secure Desktop Integration (Optional)
 - **UAC Orchestrator**: Scheduled task runs a SYSTEM service on startup.
 - **Trigger files**:
