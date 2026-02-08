@@ -87,6 +87,13 @@ class Config:
     SAVE_SCREENSHOTS = True
     VERBOSE_LOGGING = True
 
+    ENABLE_AGENT_DESKTOP = True
+    AGENT_DESKTOP_NAME = "PixelPilotAgent"
+    SIDECAR_PREVIEW_FPS = 5
+    SIDECAR_PREVIEW_WIDTH = 400
+    SIDECAR_PREVIEW_HEIGHT = 300
+    DEFAULT_WORKSPACE = "agent"  # "user" or "agent"
+
     @classmethod
     def get_mode(cls, mode_str: str = None) -> OperationMode:
         """

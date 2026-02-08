@@ -33,8 +33,10 @@ class MainController(QObject):
         self.agent = None
         self.worker = None
         self._stop_requested = False
+        
+        self.desktop_manager = None
+        self.sidecar = None
 
-        # Connect GUI Adapter signals to Main Window actions (blocking support)
         self.gui_adapter.confirmation_requested.connect(self.handle_confirmation)
         self.gui_adapter.input_requested.connect(self.handle_input)
         self.gui_adapter.screenshot_prep_requested.connect(self.handle_screenshot_prep)
@@ -44,8 +46,6 @@ class MainController(QObject):
         self.gui_adapter.guidance_input_requested.connect(self.handle_guidance_input)
 
     def init_agent(self):
-        # Initialize Agent
-        # Pass gui_adapter as chat_window
         try:
             robotics_eye = None
             if Config.USE_ROBOTICS_EYE:
@@ -62,8 +62,50 @@ class MainController(QObject):
                 robotics_eye=robotics_eye,
             )
             self.gui_adapter.current_mode = self.agent.mode
+            
+            if self.desktop_manager:
+                self.agent.desktop_manager = self.desktop_manager
         except Exception as e:
             self.gui_adapter.add_error_message(f"Failed to initialize agent: {e}")
+
+    def init_sidecar(self):
+        """Initialize the Agent Desktop and sidecar preview."""
+        if not Config.ENABLE_AGENT_DESKTOP:
+            return
+        
+        try:
+            from desktop.desktop_manager import AgentDesktopManager
+            from ui.sidecar_preview import SidecarPreview
+            
+            self.desktop_manager = AgentDesktopManager(Config.AGENT_DESKTOP_NAME)
+            if not self.desktop_manager.create_desktop():
+                logger.warning("Failed to create Agent Desktop")
+                self.desktop_manager = None
+                return
+            
+            self.desktop_manager.initialize_shell()
+            
+            self.sidecar = SidecarPreview(
+                self.main_window,
+                width=Config.SIDECAR_PREVIEW_WIDTH,
+                height=Config.SIDECAR_PREVIEW_HEIGHT,
+                fps=Config.SIDECAR_PREVIEW_FPS,
+            )
+            self.sidecar.set_capture_source(self.desktop_manager)
+            
+            self.main_window.sidecar = self.sidecar
+            
+            if self.agent:
+                self.agent.desktop_manager = self.desktop_manager
+                if hasattr(self.agent, 'keyboard') and hasattr(self.agent.keyboard, 'set_desktop_manager'):
+                    self.agent.keyboard.set_desktop_manager(self.desktop_manager)
+                
+            logger.info("Agent Desktop and sidecar preview initialized")
+            self.update_sidecar_visibility()
+        except Exception as e:
+            logger.exception(f"Failed to initialize Agent Desktop: {e}")
+            self.desktop_manager = None
+            self.sidecar = None
 
     @Slot(str, str, object)
     def handle_confirmation(self, title, text, payload):
@@ -83,7 +125,7 @@ class MainController(QObject):
     @Slot(object)
     def handle_screenshot_prep(self, payload):
         self.main_window.hide()
-        QCoreApplication.processEvents() # Process events to ensure hide happens
+        QCoreApplication.processEvents() 
         payload['event'].set()
 
     @Slot(object)
@@ -123,9 +165,10 @@ class MainController(QObject):
 
         self.gui_adapter.add_activity_message(f"Executing: {text}")
         
-        if self.worker and self.worker.isRunning():
-            self.gui_adapter.add_error_message("Agent is busy.")
-            return
+        if self.agent.active_workspace == "user":
+            self.main_window.set_click_through_enabled(True)
+        
+        self.update_sidecar_visibility()
 
         self.worker = AgentWorker(self.agent, text)
         self.worker.finished.connect(self.on_task_finished)
@@ -161,6 +204,9 @@ class MainController(QObject):
             self.gui_adapter.add_activity_message("Done")
         else:
             self.gui_adapter.add_error_message("Task failed or incomplete")
+        
+        self.main_window.set_click_through_enabled(False)
+        self.update_sidecar_visibility()
 
     def toggle_click_through(self):
         """Toggle whether the overlay is interactive (receives input) or click-through."""
@@ -178,7 +224,6 @@ class MainController(QObject):
         try:
             self.agent.set_mode(mode)
             self.gui_adapter.current_mode = mode
-            # Keep UI clean: do not narrate internal mode changes in chat.
             self.gui_adapter.add_activity_message("Settings updated")
         except Exception as e:
             self.gui_adapter.add_error_message(f"Failed to change mode: {e}")
@@ -209,3 +254,19 @@ class MainController(QObject):
             Config.LAZY_VISION = True
             self.agent.robotics_eye = None
             self.gui_adapter.add_activity_message("Settings updated")
+
+    def update_sidecar_visibility(self):
+        """Show or hide the sidecar based on the current workspace context."""
+        if not self.sidecar:
+            return
+            
+        should_show = False
+        if self.agent:
+            if self.agent.active_workspace == "agent":
+                should_show = True
+            
+        if should_show:
+            self.sidecar.show()
+            self.sidecar.reattach()
+        else:
+            self.sidecar.hide()

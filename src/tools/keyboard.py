@@ -31,10 +31,6 @@ def send(keys, do_press: bool = True):
 
 
 class KeyboardController:
-    """
-    Handles all keyboard-related operations for the AI agent.
-    """
-
     KEY_MAPPING = {
         "enter": "enter",
         "return": "enter",
@@ -67,290 +63,193 @@ class KeyboardController:
         **{f"f{i}": f"f{i}" for i in range(1, 13)},
     }
 
+    VK_MAPPING = {
+        "enter": 0x0D,
+        "return": 0x0D,
+        "tab": 0x09,
+        "space": 0x20,
+        "backspace": 0x08,
+        "delete": 0x2E,
+        "esc": 0x1B,
+        "escape": 0x1B,
+        "up": 0x26,
+        "down": 0x28,
+        "left": 0x25,
+        "right": 0x27,
+        "win": 0x5B,
+        "ctrl": 0x11,
+        "alt": 0x12,
+        "shift": 0x10,
+    }
+
     def __init__(self):
-        """Initialize the keyboard controller."""
         self.last_action_time = time.time()
 
-    def type_text(self, text: str, interval: float = 0.05) -> bool:
-        """
-        Type the given text.
-
-        Args:
-            text: The text to type
-            interval: Time delay between keystrokes (default 0.05 seconds)
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
+    def type_text(self, text: str, interval: float = 0.05, desktop_manager=None) -> bool:
+        if desktop_manager:
+            hwnd = desktop_manager.get_focused_window()
+            if not hwnd:
+                x, y = desktop_manager.get_cursor_pos()
+                hwnd = desktop_manager.get_window_at_point(x, y)
+            if hwnd:
+                import ctypes
+                user32 = ctypes.windll.user32
+                for char in text:
+                    user32.PostMessageW(hwnd, 0x0102, ord(char), 0)
+                    if interval > 0:
+                        time.sleep(interval)
+                return True
+            return False
         try:
-            print(f"Typing: '{text}'")
             pyautogui.write(text, interval=interval)
             self.last_action_time = time.time()
             return True
-        except Exception as e:
-            print(f"Error typing text: {e}")
+        except Exception:
             return False
 
-    def press_key(self, key: str, presses: int = 1) -> bool:
-        """
-        Press a single key or special key.
-
-        Args:
-            key: The key to press (e.g., 'enter', 'tab', 'a')
-            presses: Number of times to press the key
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
+    def press_key(self, key: str, presses: int = 1, desktop_manager=None) -> bool:
+        if desktop_manager:
+            hwnd = desktop_manager.get_focused_window()
+            if not hwnd:
+                x, y = desktop_manager.get_cursor_pos()
+                hwnd = desktop_manager.get_window_at_point(x, y)
+            if hwnd:
+                import ctypes
+                user32 = ctypes.windll.user32
+                key_lower = key.lower()
+                vk = self.VK_MAPPING.get(key_lower)
+                if vk:
+                    for _ in range(presses):
+                        user32.PostMessageW(hwnd, 0x0100, vk, 0)
+                        time.sleep(0.05)
+                        user32.PostMessageW(hwnd, 0x0101, vk, 0)
+                    return True
+            return False
         try:
             key_lower = key.lower()
             actual_key = self.KEY_MAPPING.get(key_lower, key_lower)
-
-            print(f"Pressing key: '{actual_key}' ({presses}x)")
             pyautogui.press(actual_key, presses=presses)
             self.last_action_time = time.time()
             return True
-        except Exception as e:
-            print(f"Error pressing key '{key}': {e}")
+        except Exception:
             return False
 
-    def key_combo(self, *keys: str) -> bool:
-        """
-        Press a combination of keys (e.g., Ctrl+C, Alt+Tab).
-
-        Args:
-            *keys: Variable number of keys to press together
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
+    def key_combo(self, *keys: str, desktop_manager=None) -> bool:
+        if desktop_manager:
+            hwnd = desktop_manager.get_focused_window()
+            if hwnd:
+                import ctypes
+                user32 = ctypes.windll.user32
+                vks = []
+                for key in keys:
+                    vk = self.VK_MAPPING.get(key.lower())
+                    if vk:
+                        vks.append(vk)
+                        user32.PostMessageW(hwnd, 0x0100, vk, 0)
+                        time.sleep(0.05)
+                
+                for vk in reversed(vks):
+                    user32.PostMessageW(hwnd, 0x0101, vk, 0)
+                    time.sleep(0.05)
+                return True
+            return False
         try:
             actual_keys = [self.KEY_MAPPING.get(key.lower(), key.lower()) for key in keys]
-
-            print(f"Key combination: {'+'.join(actual_keys)}")
             pyautogui.hotkey(*actual_keys)
             self.last_action_time = time.time()
             return True
-        except Exception as e:
-            print(f"Error with key combo {'+'.join(keys)}: {e}")
+        except Exception:
             return False
 
-    def hold_key(self, key: str, duration: float = 0.5) -> bool:
-        """
-        Hold down a key for a specified duration.
-
-        Args:
-            key: The key to hold
-            duration: How long to hold the key in seconds
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
+    def hold_key(self, key: str, duration: float = 0.5, desktop_manager=None) -> bool:
+        if desktop_manager:
+            return desktop_manager.run_on_desktop(self.hold_key, key, duration)
         try:
             key_lower = key.lower()
             actual_key = self.KEY_MAPPING.get(key_lower, key_lower)
-
-            print(f"Holding key: '{actual_key}' for {duration}s")
             pyautogui.keyDown(actual_key)
             time.sleep(duration)
             pyautogui.keyUp(actual_key)
             self.last_action_time = time.time()
             return True
-        except Exception as e:
-            print(f"Error holding key '{key}': {e}")
+        except Exception:
             return False
 
     def copy_to_clipboard(self, text: str) -> bool:
-        """
-        Copy text to clipboard.
-
-        Args:
-            text: Text to copy
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
         try:
-            print(f"Copying to clipboard: '{text[:50]}...'")
             pyperclip.copy(text)
             return True
-        except Exception as e:
-            print(f"Error copying to clipboard: {e}")
+        except Exception:
             return False
 
-    def paste_from_clipboard(self) -> bool:
-        """
-        Paste text from clipboard using Ctrl+V.
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
+    def paste_from_clipboard(self, desktop_manager=None) -> bool:
         try:
-            clipboard_content = pyperclip.paste()
-            print(f"Pasting from clipboard: '{clipboard_content[:50]}...'")
-            self.key_combo("ctrl", "v")
-            self.last_action_time = time.time()
-            return True
-        except Exception as e:
-            print(f"Error pasting from clipboard: {e}")
+            return self.key_combo("ctrl", "v", desktop_manager=desktop_manager)
+        except Exception:
             return False
 
     def get_clipboard_text(self) -> Optional[str]:
-        """
-        Get current clipboard text.
-
-        Returns:
-            str: Clipboard text or None if error
-        """
         try:
             return pyperclip.paste()
-        except Exception as e:
-            print(f"Error getting clipboard text: {e}")
+        except Exception:
             return None
 
-    def select_all(self) -> bool:
-        """
-        Select all text (Ctrl+A).
+    def select_all(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "a", desktop_manager=desktop_manager)
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "a")
+    def copy(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "c", desktop_manager=desktop_manager)
 
-    def copy(self) -> bool:
-        """
-        Copy selected text (Ctrl+C).
+    def paste(self, desktop_manager=None) -> bool:
+        return self.paste_from_clipboard(desktop_manager=desktop_manager)
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "c")
+    def cut(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "x", desktop_manager=desktop_manager)
 
-    def paste(self) -> bool:
-        """
-        Paste clipboard content (Ctrl+V).
+    def undo(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "z", desktop_manager=desktop_manager)
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.paste_from_clipboard()
+    def redo(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "y", desktop_manager=desktop_manager)
 
-    def cut(self) -> bool:
-        """
-        Cut selected text (Ctrl+X).
+    def save(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "s", desktop_manager=desktop_manager)
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "x")
+    def open_start_menu(self, desktop_manager=None) -> bool:
+        return self.press_key("win", desktop_manager=desktop_manager)
 
-    def undo(self) -> bool:
-        """
-        Undo last action (Ctrl+Z).
+    def alt_tab(self, desktop_manager=None) -> bool:
+        return self.key_combo("alt", "tab", desktop_manager=desktop_manager)
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "z")
+    def close_window(self, desktop_manager=None) -> bool:
+        return self.key_combo("alt", "f4", desktop_manager=desktop_manager)
 
-    def redo(self) -> bool:
-        """
-        Redo last undone action (Ctrl+Y).
+    def new_tab(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "t", desktop_manager=desktop_manager)
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "y")
+    def close_tab(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "w", desktop_manager=desktop_manager)
 
-    def save(self) -> bool:
-        """
-        Save file (Ctrl+S).
+    def refresh_page(self, desktop_manager=None) -> bool:
+        return self.press_key("f5", desktop_manager=desktop_manager)
 
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "s")
-
-    def open_start_menu(self) -> bool:
-        """
-        Open Windows Start menu (Win key).
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.press_key("win")
-
-    def alt_tab(self) -> bool:
-        """
-        Switch windows (Alt+Tab).
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("alt", "tab")
-
-    def close_window(self) -> bool:
-        """
-        Close current window (Alt+F4).
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("alt", "f4")
-
-    def new_tab(self) -> bool:
-        """
-        Open new browser tab (Ctrl+T).
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "t")
-
-    def close_tab(self) -> bool:
-        """
-        Close current browser tab (Ctrl+W).
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "w")
-
-    def refresh_page(self) -> bool:
-        """
-        Refresh page (F5 or Ctrl+R).
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.press_key("f5")
-
-    def search(self) -> bool:
-        """
-        Open search (Ctrl+F).
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        return self.key_combo("ctrl", "f")
+    def search(self, desktop_manager=None) -> bool:
+        return self.key_combo("ctrl", "f", desktop_manager=desktop_manager)
 
 
 keyboard_controller = KeyboardController()
 
 
-def type_text(text: str, interval: float = 0.05) -> bool:
-    """Type text using the global keyboard controller."""
-    return keyboard_controller.type_text(text, interval)
+def type_text(text: str, interval: float = 0.05, desktop_manager=None) -> bool:
+    return keyboard_controller.type_text(text, interval, desktop_manager=desktop_manager)
 
 
-def press_key(key: str, presses: int = 1) -> bool:
-    """Press a key using the global keyboard controller."""
-    return keyboard_controller.press_key(key, presses)
+def press_key(key: str, presses: int = 1, desktop_manager=None) -> bool:
+    return keyboard_controller.press_key(key, presses, desktop_manager=desktop_manager)
 
 
-def key_combo(*keys: str) -> bool:
-    """Press a key combination using the global keyboard controller."""
-    return keyboard_controller.key_combo(*keys)
+def key_combo(*keys: str, desktop_manager=None) -> bool:
+    return keyboard_controller.key_combo(*keys, desktop_manager=desktop_manager)
 
 
 if __name__ == "__main__":
