@@ -763,6 +763,45 @@ class AgentOrchestrator:
         time.sleep(2)
         return True
 
+    def _find_app_path_smart(self, app_name: str) -> Optional[str]:
+        """Deep search for an application executable in common paths."""
+        potential_names = [app_name, f"{app_name}.exe"]
+        
+        for name in potential_names:
+            found = shutil.which(name)
+            if found: return found
+
+        search_dirs = [
+             os.environ.get("APPDATA"),
+             os.environ.get("LOCALAPPDATA"),
+             os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+             os.environ.get("ProgramFiles"),
+             os.environ.get("ProgramFiles(x86)")
+        ]
+        search_dirs = [d for d in search_dirs if d and os.path.exists(d)]
+
+        app_name_lower = app_name.lower()
+        
+        for base_dir in search_dirs:
+            try:
+                for root, dirs, files in os.walk(base_dir):
+                    if root.count(os.sep) - base_dir.count(os.sep) > 3:
+                        del dirs[:] # Stop recursing here
+                        continue
+                        
+                    for file in files:
+                        f_lower = file.lower()
+                        if f_lower == f"{app_name_lower}.exe":
+                            return os.path.join(root, file)
+                        
+                        if app_name_lower in f_lower and f_lower.endswith(".exe"):
+                            if len(app_name_lower) > 3:
+                                return os.path.join(root, file)
+            except Exception:
+                continue
+                
+        return None
+
     def _execute_open_app(self, params: Dict) -> bool:
         app_name = params.get("app_name")
         if not app_name:
@@ -797,6 +836,26 @@ class AgentOrchestrator:
                     return True
                 except Exception as e:
                     print(f"   Failed to launch directly ({launch_method}): {e}")
+
+        if dm and dm.is_created:
+            print(f"   [Agent Desktop] App not in index. Attempting smart deep search...")
+            
+            found_path = self._find_app_path_smart(app_name)
+            if found_path:
+                print(f"   [Agent Desktop] Found executable via smart search: {found_path}")
+                if dm.launch_process(found_path):
+                    time.sleep(4)
+                    return True
+            
+            print(f"   [Agent Desktop] Trying shell execution as fallback: {app_name}")
+            cmd = f'cmd.exe /c start "" "{app_name}"'
+            if dm.launch_process(cmd):
+                time.sleep(3)
+                print(f"   [Agent Desktop] Launched via shell: {cmd}")
+                return True
+            
+            print("   [Agent Desktop] Failed to launch app via deep search or shell command.")
+            return False
 
         print("   Using Start Menu search...")
         self.keyboard.press_key("win")

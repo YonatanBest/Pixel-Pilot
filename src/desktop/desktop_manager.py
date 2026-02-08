@@ -328,6 +328,8 @@ class AgentDesktopManager:
         logger.info(f"Initializing custom shell on {self.desktop_name}...")
         self._cleanup_legacy_shells()
         
+        self._ensure_agent_data_dir()
+        
         try:
             from config import Config
             project_root = str(getattr(Config, "PROJECT_ROOT", os.getcwd()))
@@ -343,6 +345,44 @@ class AgentDesktopManager:
             logger.error("Failed to launch custom minimal taskbar")
             
         return success
+
+    def _ensure_agent_data_dir(self):
+        try:
+            from config import Config
+            project_root = getattr(Config, "PROJECT_ROOT", os.getcwd())
+            self.agent_data_dir = os.path.join(str(project_root), "agent_data")
+            os.makedirs(self.agent_data_dir, exist_ok=True)
+            self.chrome_profile_dir = os.path.join(self.agent_data_dir, "chrome_profile")
+            os.makedirs(self.chrome_profile_dir, exist_ok=True)
+            logger.info(f"Agent data directory ready: {self.agent_data_dir}")
+        except Exception as e:
+            logger.error(f"Failed to create agent data dir: {e}")
+
+    def _ensure_excel_isolation(self):
+        """
+        Sets the DisableMergeInstance registry key for Excel to force new instances.
+        """
+        try:
+            import winreg
+            base_path = r"Software\Microsoft\Office"
+            
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base_path) as office_key:
+                i = 0
+                while True:
+                    try:
+                        ver = winreg.EnumKey(office_key, i)
+                        i += 1
+                        options_path = f"{base_path}\\{ver}\\Excel\\Options"
+                        try:
+                            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, options_path) as key:
+                                winreg.SetValueEx(key, "DisableMergeInstance", 0, winreg.REG_DWORD, 1)
+                                logger.debug(f"Set DisableMergeInstance for Excel {ver}")
+                        except Exception as e:
+                            logger.debug(f"Could not set registry for Excel {ver}: {e}")
+                    except OSError:
+                        break
+        except Exception as e:
+            logger.warning(f"Failed to configure Excel isolation: {e}")
 
     def _cleanup_legacy_shells(self):
         """Attempts to close lingering explorer windows from previous failed shell startups."""
@@ -397,6 +437,30 @@ class AgentDesktopManager:
     def launch_process(self, command: str, working_dir: Optional[str] = None) -> bool:
         if not self.is_created:
             return False
+
+        try:
+            lower_cmd = command.lower()
+            
+            if "chrome" in lower_cmd and "--user-data-dir" not in lower_cmd:
+                if not hasattr(self, 'chrome_profile_dir'):
+                    self._ensure_agent_data_dir()
+                if hasattr(self, 'chrome_profile_dir'):
+                    extra_args = f' --user-data-dir="{self.chrome_profile_dir}"'
+                    if "--new-window" not in lower_cmd:
+                        extra_args += ' --new-window'
+                    command += extra_args
+                    logger.info("Applied Chrome isolation arguments")
+
+            if "excel" in lower_cmd:
+                self._ensure_excel_isolation()
+                if "/x" not in lower_cmd:
+                    command += " /x"
+        except Exception as e:
+            logger.warning(f"Error applying isolation strategies: {e}")
+
+        if command.strip().lower().endswith(".lnk"):
+            command = f'cmd.exe /c "{command}"'
+
         try:
             class STARTUPINFO(ctypes.Structure):
                 _fields_ = [

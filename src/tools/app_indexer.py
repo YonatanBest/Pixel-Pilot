@@ -82,8 +82,71 @@ class AppIndexer:
             self._index_running_processes()
 
         self._index_registry()
+        self._index_common_executables()
 
         print(f"App index built: {len(self.index)} applications found")
+
+    def _index_common_executables(self):
+        """Index executables from common installation directories (Smart Scan)."""
+        include_dirs = [
+             os.environ.get("LOCALAPPDATA"),
+             os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+             os.environ.get("ProgramFiles"),
+             os.environ.get("ProgramFiles(x86)")
+        ]
+        include_dirs = [d for d in include_dirs if d and os.path.exists(d)]
+
+        # Common service/helper executables to ignore to reduce noise
+        ignore_names = {
+            "uninstall.exe", "update.exe", "updater.exe", "helper.exe", 
+            "setup.exe", "installer.exe", "config.exe", "report.exe",
+            "crashpad_handler.exe", "notification_helper.exe", "service.exe"
+        }
+
+        for base_dir in include_dirs:
+            try:
+                # Walk with limited depth
+                for root, dirs, files in os.walk(base_dir):
+                    # Depth check: roughly 3 levels deep from base 
+                    # (e.g. Program Files/Vendor/App/app.exe)
+                    rel_depth = root.count(os.sep) - base_dir.count(os.sep)
+                    if rel_depth > 3:
+                        del dirs[:] # Stop deeper recursion
+                        continue
+                    
+                    for file in files:
+                        if not file.lower().endswith(".exe"):
+                            continue
+                        
+                        f_lower = file.lower()
+                        if f_lower in ignore_names:
+                            continue
+
+                        app_name = f_lower[:-4] # remove .exe
+                        
+                        # Heuristic: If executable name matches folder name, it's likely the main app
+                        # e.g. "Spotify.exe" inside "Spotify" folder
+                        folder_name = os.path.basename(root).lower()
+                        
+                        # Assign a confidence boost if folder matches app name
+                        is_likely_main = (app_name == folder_name) or (app_name in folder_name)
+                        
+                        if not is_likely_main:
+                            # Skip obscure exes deep in subfolders
+                            continue
+
+                        # Only index if we haven't found it via Start Menu (which is better source)
+                        # or if we want to overwrite/augment
+                        if app_name not in self.index:
+                            self.index[app_name] = {
+                                "name": file[:-4].title(), # Capitalized name
+                                "path": os.path.join(root, file),
+                                "type": "executable_scan",
+                                "launch_method": "executable",
+                                "search_terms": self._generate_search_terms(app_name)
+                            }
+            except Exception:
+                pass
 
     def _index_start_menu(self):
         """Index applications from Start Menu shortcuts."""

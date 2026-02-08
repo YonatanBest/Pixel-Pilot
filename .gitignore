@@ -13,3 +13,4 @@ uac_trigger.txt
 .pytest_cache
 *.log
 logs/
+agent_data/
