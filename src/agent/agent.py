@@ -764,7 +764,6 @@ class AgentOrchestrator:
         return True
 
     def _find_app_path_smart(self, app_name: str) -> Optional[str]:
-        """Deep search for an application executable in common paths."""
         potential_names = [app_name, f"{app_name}.exe"]
         
         for name in potential_names:
@@ -854,14 +853,13 @@ class AgentOrchestrator:
                 print(f"   [Agent Desktop] Launched via shell: {cmd}")
                 return True
             
-            print("   [Agent Desktop] Failed to launch app via deep search or shell command.")
-            return False
+            print("   [Agent Desktop] Direct/Shell launch failed. Attempting visual Start Menu interaction...")
 
         print("   Using Start Menu search...")
         self.keyboard.press_key("win")
-        time.sleep(0.5)
+        time.sleep(1.0)
         self.keyboard.type_text(app_name)
-        time.sleep(1)
+        time.sleep(1.0)
         self.keyboard.press_key("enter")
         time.sleep(2)
         return True

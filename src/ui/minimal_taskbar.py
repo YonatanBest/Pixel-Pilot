@@ -1,14 +1,140 @@
 import sys
 import logging
+import os
 from typing import TYPE_CHECKING, List, Dict
 
-from PySide6.QtCore import QTimer, Qt, QPoint
-from PySide6.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, QPushButton, QLabel
+try:
+    import keyboard
+except ImportError:
+    keyboard = None
+
+from PySide6.QtCore import QTimer, Qt, QPoint, Signal
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, 
+    QPushButton, QLabel, QLineEdit, QListWidget, QListWidgetItem
+)
+from PySide6.QtGui import QAction, QIcon
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+try:
+    from tools.app_indexer import AppIndexer
+except ImportError:
+    AppIndexer = None
 
 if TYPE_CHECKING:
     from desktop.desktop_manager import AgentDesktopManager
 
 logger = logging.getLogger("pixelpilot.shell")
+
+class StartMenu(QWidget):
+    """A functional Start Menu replacement."""
+    
+    def __init__(self, parent=None, desktop_manager=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.dm = desktop_manager
+        self.setFixedWidth(300)
+        self.setFixedHeight(400)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #1a1a2e;
+                border: 1px solid #4a4a6a;
+                color: white;
+            }
+            QLineEdit {
+                background-color: #0f0f1b;
+                border: 1px solid #4a4a6a;
+                padding: 5px;
+                color: white;
+                selection-background-color: #4e4e8a;
+            }
+            QListWidget {
+                background-color: transparent;
+                border: none;
+                outline: none;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QListWidget::item:selected {
+                background-color: #4e4e8a;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search apps...")
+        self.search_box.textChanged.connect(self.filter_apps)
+        self.search_box.returnPressed.connect(self.launch_selected)
+        layout.addWidget(self.search_box)
+        
+        self.list_widget = QListWidget()
+        self.list_widget.itemActivated.connect(self.launch_item)
+        layout.addWidget(self.list_widget)
+        
+        self.indexer = None
+        if AppIndexer:
+            try:
+                self.indexer = AppIndexer(auto_refresh=False, include_processes=False)
+                self.all_apps = self._get_sorted_apps()
+            except Exception as e:
+                logger.error(f"Failed to init AppIndexer: {e}")
+                self.all_apps = []
+        else:
+            self.all_apps = []
+            
+        self.populate_list(self.all_apps)
+        
+    def _get_sorted_apps(self):
+        if not self.indexer: return []
+        apps = []
+        for key, info in self.indexer.index.items():
+            if info.get('type') != 'running_process':
+                apps.append(info)
+        return sorted(apps, key=lambda x: x['name'])
+
+    def populate_list(self, apps):
+        self.list_widget.clear()
+        for app in apps:
+            item = QListWidgetItem(app['name'])
+            item.setData(Qt.ItemDataRole.UserRole, app)
+            self.list_widget.addItem(item)
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+
+    def filter_apps(self, text):
+        text = text.lower()
+        filtered = []
+        for app in self.all_apps:
+            if text in app['name'].lower() or text in app.get('key', ''):
+                filtered.append(app)
+        
+        if len(filtered) == 0 and self.indexer and text:
+             matches = self.indexer.find_app(text, max_results=5)
+             filtered = matches
+             
+        self.populate_list(filtered)
+
+    def launch_selected(self):
+        if self.list_widget.currentItem():
+            self.launch_item(self.list_widget.currentItem())
+
+    def launch_item(self, item):
+        app_info = item.data(Qt.ItemDataRole.UserRole)
+        if app_info and self.dm:
+            method, cmd = self.indexer.get_launch_command(app_info) if self.indexer else ("executable", app_info.get('path'))
+            cmd = f'cmd.exe /c start "" "{cmd}"'
+                
+            self.dm.launch_process(cmd)
+            self.close()
+            
+    def showEvent(self, event):
+        self.search_box.setFocus()
+        self.search_box.clear()
+        self.populate_list(self.all_apps)
+        super().showEvent(event)
 
 class IconButton(QWidget):
     """A desktop icon with a label."""
@@ -144,37 +270,31 @@ class MinimalTaskbar(QWidget):
         self.timer.timeout.connect(self.update_windows)
         self.timer.start(2000) # Refresh every 2 seconds
         
+        self.start_menu = StartMenu(desktop_manager=self.desktop_manager)
+        
+        if keyboard:
+            try:
+                keyboard.add_hotkey('win', self.toggle_start_menu, suppress=False)
+            except Exception as e:
+                logger.error(f"Failed to register hotkey: {e}")
+
         self._update_geometry()
+
+    def toggle_start_menu(self):
+        if self.start_menu.isVisible():
+            self.start_menu.hide()
+        else:
+            self.show_launcher()
         
     def show_launcher(self):
-        from PySide6.QtWidgets import QMenu
-        from PySide6.QtGui import QAction
-        
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu { background-color: #1a1a2e; border: 1px solid #4a4a6a; color: white; padding: 5px; }
-            QMenu::item:selected { background-color: #4a4a8a; }
-        """)
-        
-        apps = [
-            ("Command Prompt", "cmd.exe"),
-            ("Notepad", "notepad.exe"),
-            ("Task Manager", "taskmgr.exe"),
-            ("Calculator", "calc.exe"),
-            ("File Explorer", "explorer.exe")
-        ]
-        
-        for name, cmd in apps:
-            action = QAction(name, self)
-            action.triggered.connect(lambda checked=False, c=cmd: self.desktop_manager.launch_process(c))
-            menu.addAction(action)
-            
-        # Position menu above the start button
         menu_pos = self.mapToGlobal(self.start_btn.rect().topLeft())
-        menu.exec(menu_pos - QPoint(0, menu.sizeHint().height()))
+        self.start_menu.move(menu_pos - QPoint(0, self.start_menu.height()))
+        self.start_menu.show()
+        self.start_menu.raise_()
+        self.start_menu.activateWindow()
+        self.start_menu.search_box.setFocus()
 
     def _update_geometry(self):
-        # Position at the bottom of the screen
         screen = QApplication.primaryScreen().geometry()
         self.setGeometry(0, screen.height() - 40, screen.width(), 40)
 
