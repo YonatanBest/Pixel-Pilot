@@ -328,8 +328,14 @@ class AgentDesktopManager:
         logger.info(f"Initializing custom shell on {self.desktop_name}...")
         self._cleanup_legacy_shells()
         
-        taskbar_path = f'"{sys.executable}" "{os.path.join(os.getcwd(), "src", "ui", "minimal_taskbar.py")}"'
-        success = self.launch_process(taskbar_path)
+        try:
+            from config import Config
+            project_root = str(getattr(Config, "PROJECT_ROOT", os.getcwd()))
+        except Exception:
+            project_root = os.getcwd()
+
+        taskbar_path = f'"{sys.executable}" "{os.path.join(project_root, "src", "ui", "minimal_taskbar.py")}"'
+        success = self.launch_process(taskbar_path, working_dir=project_root)
         
         if success:
             logger.info("Custom minimal taskbar launched successfully")
