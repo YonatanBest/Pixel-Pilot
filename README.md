@@ -6,6 +6,12 @@
 
 PixelPilot is a Windows desktop automation agent powered by **Gemini (Google GenAI SDK)** plus computer vision. It turns natural language commands into real mouse and keyboard actions, mixes in native OS skills where possible, and can bridge Secure Desktop (UAC) prompts with an optional helper service.
 
+## Architecture
+
+![High-Level Design View](src/logos/System-Architecture.png)
+
+> [View Detailed Architecture Diagram](src/logos/System-Architecture_Detailed.png)
+
 ## Features
 
 ### Multimodal Planning and Vision
