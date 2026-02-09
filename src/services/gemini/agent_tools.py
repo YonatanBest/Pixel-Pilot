@@ -402,6 +402,9 @@ def parse_tool_result(result: Dict[str, Any]) -> Dict[str, Any]:
 def get_action_from_tool_calls(tool_records: List[Dict]) -> Optional[Dict[str, Any]]:
     """Extract the primary action from a list of tool call records.
     
+    If multiple 'emit_action' calls are found, they are aggregated into a 
+    single 'sequence' action to ensure all steps are executed.
+    
     Args:
         tool_records: List of tool call records from generate_with_tools
     
@@ -411,10 +414,46 @@ def get_action_from_tool_calls(tool_records: List[Dict]) -> Optional[Dict[str, A
     if not tool_records:
         return None
     
-    for record in reversed(tool_records):
+    actions = []
+    
+    # Iterate through all records in order to capture the full sequence
+    for record in tool_records:
         if record.get("result") and not record.get("error"):
             result = record["result"]
             if isinstance(result, dict) and "action_type" in result:
-                return parse_tool_result(result)
+                parsed = parse_tool_result(result)
+                actions.append(parsed)
+                
+    if not actions:
+        return None
+        
+    # If there's only one action, return it directly
+    if len(actions) == 1:
+        return actions[0]
+        
+    # If multiple actions, aggregate them into a sequence
+    # Use the last action's meta-parameters (reasoning, confidence, etc.)
+    last_action = actions[-1]
     
-    return None
+    # Flatten any nested sequences just in case
+    flat_sequence = []
+    for action in actions:
+        if action["action_type"] == "sequence" and action.get("action_sequence"):
+            flat_sequence.extend(action["action_sequence"])
+        else:
+            flat_sequence.append(action)
+            
+    combined_action = {
+        "action_type": "sequence",
+        "action_sequence": flat_sequence,
+        "reasoning": last_action.get("reasoning", "Aggregated sequence from multiple tool calls"),
+        "confidence": last_action.get("confidence", 1.0),
+        "clarification_needed": last_action.get("clarification_needed", False),
+        "clarification_question": last_action.get("clarification_question"),
+        "task_complete": last_action.get("task_complete", False),
+        "skip_verification": last_action.get("skip_verification", False),
+        "needs_vision": last_action.get("needs_vision", False),
+        "expected_result": last_action.get("expected_result"),
+    }
+    
+    return combined_action
