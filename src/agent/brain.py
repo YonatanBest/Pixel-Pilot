@@ -1,17 +1,16 @@
 import io
+import json
+import base64
 from typing import Any, Dict, List, Optional
-from google import genai
-from google.genai import types
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 from config import Config
+from backend_client import BackendClient
 
-api_key = Config.GEMINI_API_KEY
+# client = genai.Client(api_key=api_key) -> Removed
+client = BackendClient()
+
 model = Config.GEMINI_MODEL
-if not api_key:
-    raise ValueError("Missing API Key! Set GEMINI_API_KEY in your .env or environment.")
-
-client = genai.Client(api_key=api_key)
 
 
 class ModelWrapper:
@@ -19,7 +18,7 @@ class ModelWrapper:
         self.model_name = model_name
 
     def generate_content(self, contents, config=None):
-        return client.models.generate_content(
+        return client.generate_content(
             model=self.model_name, contents=contents, config=config
         )
 
@@ -64,6 +63,50 @@ class ActionResponse(BaseModel):
     reasoning: str = Field(description="Reasoning for choosing this specific element.")
 
 
+class SkillArgs(BaseModel):
+    query: Optional[str] = Field(None, description="For search/media")
+    url: Optional[str] = Field(None, description="For browser open")
+    action: Optional[str] = Field(None, description="For volume control")
+    page: Optional[str] = Field(None, description="For settings")
+
+
+class ActionParams(BaseModel):
+    element_id: Optional[int] = Field(None, description="ID of UI element")
+    target_id: Optional[int] = Field(None, description="Alias for element_id")
+    text: Optional[str] = Field(None, description="Text to type or reply")
+    key: Optional[str] = Field(None, description="Key to press")
+    keys: Optional[List[str]] = Field(None, description="Keys for combo")
+    seconds: Optional[float] = Field(None, description="Time to wait")
+    app_name: Optional[str] = Field(None, description="App to open")
+    zoom_level: Optional[float] = Field(None, description="Magnification level")
+    skill: Optional[str] = Field(None, description="Skill name")
+    method: Optional[str] = Field(None, description="Skill method")
+    args: Optional[SkillArgs] = Field(None, description="Arguments for skill method")
+    workspace: Optional[str] = Field(None, description="Target workspace")
+
+
+class SkillArgs(BaseModel):
+    query: Optional[str] = Field(None, description="For search/media")
+    url: Optional[str] = Field(None, description="For browser open")
+    action: Optional[str] = Field(None, description="For volume control")
+    page: Optional[str] = Field(None, description="For settings")
+
+
+class ActionParams(BaseModel):
+    element_id: Optional[int] = Field(None, description="ID of UI element")
+    target_id: Optional[int] = Field(None, description="Alias for element_id")
+    text: Optional[str] = Field(None, description="Text to type or reply")
+    key: Optional[str] = Field(None, description="Key to press")
+    keys: Optional[List[str]] = Field(None, description="Keys for combo")
+    seconds: Optional[float] = Field(None, description="Time to wait")
+    app_name: Optional[str] = Field(None, description="App to open")
+    zoom_level: Optional[float] = Field(None, description="Magnification level")
+    skill: Optional[str] = Field(None, description="Skill name")
+    method: Optional[str] = Field(None, description="Skill method")
+    args: Optional[SkillArgs] = Field(None, description="Arguments for skill method")
+    workspace: Optional[str] = Field(None, description="Target workspace")
+
+
 class SubAction(BaseModel):
     action_type: str = Field(
         description=(
@@ -71,9 +114,7 @@ class SubAction(BaseModel):
             "magnify, switch_workspace"
         )
     )
-    params: Dict[str, Any] = Field(
-        description="Parameters for the action. For 'click', MUST include 'element_id'. For 'type_text', MUST include 'text'."
-    )
+    params: ActionParams = Field(description="Parameters for the action.")
     reasoning: str = Field(description="Reasoning for this specific sub-action")
 
 
@@ -81,10 +122,14 @@ class PlannedAction(BaseModel):
     action_type: str = Field(
         description="The primary action type (or 'sequence' if using action_sequence)"
     )
-    params: Dict[str, Any] = Field(description="Parameters for the action")
+    params: ActionParams = Field(description="Parameters for the action")
     reasoning: str = Field(description="Detailed logic for this decision")
-    confidence: float = Field(description="Score between 0.0 and 1.0 indicating AI certainty")
-    clarification_needed: bool = Field(description="True if the AI needs more info from user")
+    confidence: float = Field(
+        description="Score between 0.0 and 1.0 indicating AI certainty"
+    )
+    clarification_needed: bool = Field(
+        description="True if the AI needs more info from user"
+    )
     clarification_question: Optional[str] = Field(
         description="Question to ask user if clarification_needed is True"
     )
@@ -97,9 +142,12 @@ class PlannedAction(BaseModel):
         default=False,
         description="True if you cannot complete the task without seeing the screen (e.g. need to click buttons, find icons).",
     )
-    expected_result: Optional[str] = Field(description="What should happen after this action")
+    expected_result: Optional[str] = Field(
+        description="What should happen after this action"
+    )
     action_sequence: Optional[List[SubAction]] = Field(
-        default=None, description="A sequence of actions to execute at once (Turbo Mode)"
+        default=None,
+        description="A sequence of actions to execute at once (Turbo Mode)",
     )
 
 
@@ -151,19 +199,32 @@ def ask_brain(
     Return JSON: {{ "element_id": <int>, "reasoning": "<string>" }}
     """
 
-    contents = [prompt_text, clean_image, annotated_image]
+    def img_to_dict(img):
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format="PNG")
+        return {
+            "mime_type": "image/png",
+            "data": base64.b64encode(img_byte_arr.getvalue()).decode("utf-8"),
+        }
+
+    contents = [
+        {"text": prompt_text},
+        img_to_dict(clean_image),
+        img_to_dict(annotated_image),
+    ]
 
     try:
-        response = client.models.generate_content(
+        # BackendClient.generate_content returns dict: {"text": "..."}
+        response_data = client.generate_content(
             model=model,
-            contents=contents,
+            contents=[{"role": "user", "parts": contents}],
             config={
                 "response_mime_type": "application/json",
                 "response_json_schema": ActionResponse.model_json_schema(),
-                "tools": [types.Tool(google_search=types.GoogleSearch())],
+                "tools": [{"google_search": {}}],
             },
         )
-        return ActionResponse.model_validate_json(response.text).model_dump()
+        return ActionResponse.model_validate_json(response_data["text"]).model_dump()
     except Exception as e:
         print(f"Gemini Error: {e}")
         return None
@@ -224,7 +285,9 @@ def plan_task(
     turbo_status = "ENABLED" if Config.TURBO_MODE else "DISABLED"
     workspace_section = f"CURRENT WORKSPACE: {current_workspace}"
     agent_desktop_section = (
-        "AGENT DESKTOP AVAILABLE: YES" if agent_desktop_available else "AGENT DESKTOP AVAILABLE: NO"
+        "AGENT DESKTOP AVAILABLE: YES"
+        if agent_desktop_available
+        else "AGENT DESKTOP AVAILABLE: NO"
     )
     guidance_section = ""
     if guidance_mode:
@@ -344,46 +407,50 @@ CRITICAL GUIDELINES:
 
 """
 
-    def pil_to_part(img, res="low"):
-        res_map = {"low": "MEDIA_RESOLUTION_LOW", "high": "MEDIA_RESOLUTION_HIGH"}
-        res_enum = res_map.get(res.lower(), "MEDIA_RESOLUTION_LOW")
-
+    def pil_to_dict(img):
         img_byte_arr = io.BytesIO()
         img.save(img_byte_arr, format="PNG")
-        return types.Part.from_bytes(
-            data=img_byte_arr.getvalue(), mime_type="image/png", media_resolution=res_enum
-        )
+        return {
+            "mime_type": "image/png",
+            "data": base64.b64encode(img_byte_arr.getvalue()).decode("utf-8"),
+        }
 
     contents = [
-        types.Part(text=prompt_text),
-        pil_to_part(clean_image, res=media_resolution),
-        pil_to_part(annotated_image, res=media_resolution),
+        {"text": prompt_text},
+        pil_to_dict(clean_image),
+        pil_to_dict(annotated_image),
     ]
     if reference_sheet:
-        contents.append(pil_to_part(reference_sheet, res=media_resolution))
+        contents.append(pil_to_dict(reference_sheet))
 
+    # We need to process history to ensure it uses dicts too if it was storing types.Part
+    # but based on agent usage, history usually contains strings/dicts for text.
+    # We will assume history is cleaner or manageable by backend_client.
     contents_to_send = history[-10:] if history else []
     contents_to_send.append({"role": "user", "parts": contents})
 
     try:
-        response = client.models.generate_content(
+        response_data = client.generate_content(
             model=model,
             contents=contents_to_send,
             config={
                 "response_mime_type": "application/json",
                 "response_json_schema": PlannedAction.model_json_schema(),
                 "thinking_config": {"thinking_level": "high"},
-                "tools": [
-                    types.Tool(google_search=types.GoogleSearch()),
-                    types.Tool(code_execution=types.ToolCodeExecution()),
-                ],
+                "tools": [{"google_search": {}}, {"code_execution": {}}],
             },
         )
 
-        model_part = response.candidates[0].content
-        action_dict = PlannedAction.model_validate_json(response.text).model_dump()
+        # response_data is {"text": "..."}
+        response_text = response_data["text"]
 
-        return action_dict, model_part
+        # Original code returned (action_dict, model_part).
+        # We'll just return text as model_part.
+        action_dict = PlannedAction.model_validate_json(response_text).model_dump(
+            exclude_none=True
+        )
+
+        return action_dict, response_text
     except Exception as e:
         print(f"Error in plan_task: {e}")
         return None
@@ -409,7 +476,9 @@ def plan_task_blind(
     turbo_status = "ENABLED" if Config.TURBO_MODE else "DISABLED"
     workspace_section = f"CURRENT WORKSPACE: {current_workspace}"
     agent_desktop_section = (
-        "AGENT DESKTOP AVAILABLE: YES" if agent_desktop_available else "AGENT DESKTOP AVAILABLE: NO"
+        "AGENT DESKTOP AVAILABLE: YES"
+        if agent_desktop_available
+        else "AGENT DESKTOP AVAILABLE: NO"
     )
 
     prompt_text = f"""
@@ -480,12 +549,12 @@ RESPONSE FORMAT:
     "skip_verification": false
 }}
 """
-    contents = [types.Part(text=prompt_text)]
+    contents = [{"text": prompt_text}]
     contents_to_send = history[-10:] if history else []
     contents_to_send.append({"role": "user", "parts": contents})
 
     try:
-        response = client.models.generate_content(
+        response_data = client.generate_content(
             model=model,
             contents=contents_to_send,
             config={
@@ -493,9 +562,11 @@ RESPONSE FORMAT:
                 "response_json_schema": PlannedAction.model_json_schema(),
             },
         )
-        model_part = response.candidates[0].content
-        action_dict = PlannedAction.model_validate_json(response.text).model_dump()
-        return action_dict, model_part
+        response_text = response_data["text"]
+        action_dict = PlannedAction.model_validate_json(response_text).model_dump(
+            exclude_none=True
+        )
+        return action_dict, response_text
     except Exception as e:
         print(f"Error in plan_task_blind: {e}")
         return None
@@ -514,7 +585,9 @@ def plan_task_blind_first_step(
 
     workspace_section = f"CURRENT WORKSPACE: {current_workspace}"
     agent_desktop_section = (
-        "AGENT DESKTOP AVAILABLE: YES" if agent_desktop_available else "AGENT DESKTOP AVAILABLE: NO"
+        "AGENT DESKTOP AVAILABLE: YES"
+        if agent_desktop_available
+        else "AGENT DESKTOP AVAILABLE: NO"
     )
 
     prompt_text = f"""
@@ -547,12 +620,12 @@ RESPONSE FORMAT:
 }}
 """
 
-    contents = [types.Part(text=prompt_text)]
+    contents = [{"text": prompt_text}]
     contents_to_send = history[-10:] if history else []
     contents_to_send.append({"role": "user", "parts": contents})
 
     try:
-        response = client.models.generate_content(
+        response_data = client.generate_content(
             model=model,
             contents=contents_to_send,
             config={
@@ -560,9 +633,11 @@ RESPONSE FORMAT:
                 "response_json_schema": PlannedAction.model_json_schema(),
             },
         )
-        model_part = response.candidates[0].content
-        action_dict = PlannedAction.model_validate_json(response.text).model_dump()
-        return action_dict, model_part
+        response_text = response_data["text"]
+        action_dict = PlannedAction.model_validate_json(response_text).model_dump(
+            exclude_none=True
+        )
+        return action_dict, response_text
     except Exception as e:
         print(f"Error in plan_task_blind_first_step: {e}")
         return None

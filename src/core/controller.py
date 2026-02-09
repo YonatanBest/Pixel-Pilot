@@ -11,12 +11,12 @@ logger = logging.getLogger("pixelpilot.controller")
 
 class AgentWorker(QThread):
     finished = Signal(bool)
-    
+
     def __init__(self, agent, command):
         super().__init__()
         self.agent = agent
         self.command = command
-        
+
     def run(self):
         try:
             success = self.agent.run_task(self.command)
@@ -33,7 +33,7 @@ class MainController(QObject):
         self.agent = None
         self.worker = None
         self._stop_requested = False
-        
+
         self.desktop_manager = None
         self.sidecar = None
 
@@ -51,11 +51,14 @@ class MainController(QObject):
             robotics_eye = None
             if Config.USE_ROBOTICS_EYE:
                 try:
-                    robotics_eye = GeminiRoboticsEye(api_key=Config.GEMINI_API_KEY)
+                    # API Key is now handled by backend/service
+                    robotics_eye = GeminiRoboticsEye()
                 except Exception as e:
                     Config.USE_ROBOTICS_EYE = False
                     Config.LAZY_VISION = True
-                    self.gui_adapter.add_error_message(f"Robotics vision unavailable, falling back to OCR: {e}")
+                    self.gui_adapter.add_error_message(
+                        f"Robotics vision unavailable, falling back to OCR: {e}"
+                    )
 
             self.agent = AgentOrchestrator(
                 mode=Config.DEFAULT_MODE,
@@ -71,7 +74,7 @@ class MainController(QObject):
                     )
             except Exception:
                 pass
-            
+
             if self.desktop_manager:
                 self.agent.desktop_manager = self.desktop_manager
         except Exception as e:
@@ -81,19 +84,19 @@ class MainController(QObject):
         """Initialize the Agent Desktop and sidecar preview."""
         if not Config.ENABLE_AGENT_DESKTOP:
             return
-        
+
         try:
             from desktop.desktop_manager import AgentDesktopManager
             from ui.sidecar_preview import SidecarPreview
-            
+
             self.desktop_manager = AgentDesktopManager(Config.AGENT_DESKTOP_NAME)
             if not self.desktop_manager.create_desktop():
                 logger.warning("Failed to create Agent Desktop")
                 self.desktop_manager = None
                 return
-            
+
             self.desktop_manager.initialize_shell()
-            
+
             self.sidecar = SidecarPreview(
                 self.main_window,
                 width=Config.SIDECAR_PREVIEW_WIDTH,
@@ -101,14 +104,16 @@ class MainController(QObject):
                 fps=Config.SIDECAR_PREVIEW_FPS,
             )
             self.sidecar.set_capture_source(self.desktop_manager)
-            
+
             self.main_window.sidecar = self.sidecar
-            
+
             if self.agent:
                 self.agent.desktop_manager = self.desktop_manager
-                if hasattr(self.agent, 'keyboard') and hasattr(self.agent.keyboard, 'set_desktop_manager'):
+                if hasattr(self.agent, "keyboard") and hasattr(
+                    self.agent.keyboard, "set_desktop_manager"
+                ):
                     self.agent.keyboard.set_desktop_manager(self.desktop_manager)
-                
+
             logger.info("Agent Desktop and sidecar preview initialized")
             self.update_sidecar_visibility()
         except Exception as e:
@@ -118,29 +123,31 @@ class MainController(QObject):
 
     @Slot(str, str, object)
     def handle_confirmation(self, title, text, payload):
-        res = QMessageBox.question(self.main_window, title, text, QMessageBox.Yes | QMessageBox.No)
-        payload['result'] = (res == QMessageBox.Yes)
-        payload['event'].set()
+        res = QMessageBox.question(
+            self.main_window, title, text, QMessageBox.Yes | QMessageBox.No
+        )
+        payload["result"] = res == QMessageBox.Yes
+        payload["event"].set()
 
     @Slot(str, str, object)
     def handle_input(self, title, question, payload):
         text, ok = QInputDialog.getText(self.main_window, title, question)
         if ok:
-            payload['result'] = text
+            payload["result"] = text
         else:
-            payload['result'] = None
-        payload['event'].set()
+            payload["result"] = None
+        payload["event"].set()
 
     @Slot(object)
     def handle_screenshot_prep(self, payload):
         self.main_window.hide()
-        QCoreApplication.processEvents() 
-        payload['event'].set()
+        QCoreApplication.processEvents()
+        payload["event"].set()
 
     @Slot(object)
     def handle_screenshot_restore(self, payload):
         self.main_window.show()
-        payload['event'].set()
+        payload["event"].set()
 
     @Slot(bool, object)
     def handle_click_through(self, enable, payload):
@@ -148,7 +155,7 @@ class MainController(QObject):
             self.main_window.set_click_through_enabled(bool(enable))
         except Exception:
             pass
-        payload['event'].set()
+        payload["event"].set()
 
     @Slot(str, object)
     def handle_guidance_next(self, label, payload):
@@ -173,10 +180,10 @@ class MainController(QObject):
             return
 
         self.gui_adapter.add_activity_message(f"Executing: {text}")
-        
+
         if self.agent.active_workspace == "user":
             self.main_window.set_click_through_enabled(True)
-        
+
         self.update_sidecar_visibility()
 
         self.worker = AgentWorker(self.agent, text)
@@ -213,7 +220,7 @@ class MainController(QObject):
             self.gui_adapter.add_activity_message("Done")
         else:
             self.gui_adapter.add_error_message("Task failed or incomplete")
-        
+
         self.main_window.set_click_through_enabled(False)
         self.update_sidecar_visibility()
 
@@ -303,7 +310,7 @@ class MainController(QObject):
             Config.USE_ROBOTICS_EYE = True
             Config.LAZY_VISION = False
             try:
-                self.agent.robotics_eye = GeminiRoboticsEye(api_key=Config.GEMINI_API_KEY)
+                self.agent.robotics_eye = GeminiRoboticsEye()
                 self.gui_adapter.add_activity_message("Settings updated")
             except Exception as e:
                 Config.USE_ROBOTICS_EYE = False
@@ -313,7 +320,9 @@ class MainController(QObject):
                     self.main_window.chat_widget.set_vision_mode("OCR")
                 except Exception:
                     pass
-                self.gui_adapter.add_error_message(f"Failed to enable ROBO vision (using OCR): {e}")
+                self.gui_adapter.add_error_message(
+                    f"Failed to enable ROBO vision (using OCR): {e}"
+                )
         else:
             Config.USE_ROBOTICS_EYE = False
             Config.LAZY_VISION = True

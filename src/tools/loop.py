@@ -118,7 +118,9 @@ class LoopDetector:
 
             all_similar = True
             for i in range(len(recent_screens) - 1):
-                similarity = self._compare_hashes(recent_screens[i], recent_screens[i + 1])
+                similarity = self._compare_hashes(
+                    recent_screens[i], recent_screens[i + 1]
+                )
                 if similarity < self.similarity_threshold:
                     all_similar = False
                     break
@@ -141,7 +143,9 @@ class LoopDetector:
             if len(unique_actions) <= 3:
                 screen_hashes_extended = [a["screen_hash"] for a in recent_extended]
                 avg_similarity = sum(
-                    self._compare_hashes(screen_hashes_extended[i], screen_hashes_extended[0])
+                    self._compare_hashes(
+                        screen_hashes_extended[i], screen_hashes_extended[0]
+                    )
                     for i in range(1, len(screen_hashes_extended))
                 ) / (len(screen_hashes_extended) - 1)
 
@@ -162,7 +166,9 @@ class LoopDetector:
             stall_count = 0
             for i in range(len(screen_hashes_stall) - 1):
                 if (
-                    self._compare_hashes(screen_hashes_stall[i], screen_hashes_stall[i + 1])
+                    self._compare_hashes(
+                        screen_hashes_stall[i], screen_hashes_stall[i + 1]
+                    )
                     >= self.similarity_threshold
                 ):
                     stall_count += 1
@@ -187,7 +193,9 @@ class LoopDetector:
         """
         return self.loop_info
 
-    def suggest_alternatives(self, user_command: str, current_action: Dict[str, Any]) -> List[str]:
+    def suggest_alternatives(
+        self, user_command: str, current_action: Dict[str, Any]
+    ) -> List[str]:
         """
         Use AI to suggest alternative approaches when stuck in a loop.
 
@@ -230,7 +238,14 @@ Return a JSON array of suggestions:
                 [prompt], config={"response_mime_type": "application/json"}
             )
 
-            result = json.loads(response.text)
+            # The backend client returns a dict {"text": "..."}
+            if isinstance(response, dict):
+                text_content = response.get("text", "{}")
+            else:
+                # Fallback if it's somehow an object
+                text_content = getattr(response, "text", "{}")
+
+            result = json.loads(text_content)
             return result.get("suggestions", [])
 
         except Exception as e:
@@ -250,4 +265,6 @@ Return a JSON array of suggestions:
         self.loop_info = None
 
     def __repr__(self):
-        return f"LoopDetector(threshold={self.threshold}, detected={self.loop_detected})"
+        return (
+            f"LoopDetector(threshold={self.threshold}, detected={self.loop_detected})"
+        )

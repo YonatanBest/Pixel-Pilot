@@ -14,7 +14,7 @@ import subprocess
 import tools.mouse as mouse
 from typing import Any, Dict, List, Optional
 from tools.app_indexer import AppIndexer
-from agent.brain import create_reference_sheet, get_model, plan_task, get_model, types
+from agent.brain import create_reference_sheet, get_model, plan_task, get_model
 from agent.clarification import ClarificationManager
 from config import Config, OperationMode
 from tools.eye import LocalCVEye
@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 class StopRequested(Exception):
     pass
+
 
 class AgentOrchestrator:
     """
@@ -182,7 +183,9 @@ class AgentOrchestrator:
         if not clean:
             return
 
-        is_trace = raw.startswith(" ") or clean.startswith("[") or clean.startswith("->")
+        is_trace = (
+            raw.startswith(" ") or clean.startswith("[") or clean.startswith("->")
+        )
         if is_trace:
             logger.debug(clean)
         else:
@@ -235,19 +238,35 @@ class AgentOrchestrator:
                 "Respond with JSON: { 'decision': 'ALLOW'|'DENY', 'reasoning': '...' }"
             )
 
+            # Helper to convert PIL to dict for backend
+            def img_to_dict(img_obj):
+                import io
+                import base64
+
+                img_byte_arr = io.BytesIO()
+                img_obj.save(img_byte_arr, format="PNG")
+                return {
+                    "mime_type": "image/png",
+                    "data": base64.b64encode(img_byte_arr.getvalue()).decode("utf-8"),
+                }
+
             model = get_model()
             img = PIL.Image.open(image_path)
 
-            response = model.generate_content(
-                [prompt, img],
+            # Construct structured content for BackendClient
+            contents = [{"role": "user", "parts": [{"text": prompt}, img_to_dict(img)]}]
+
+            response_data = model.generate_content(
+                contents,
                 config={
                     "response_mime_type": "application/json",
                     "response_json_schema": UACDecision.model_json_schema(),
                 },
             )
 
+            # response_data is {"text": "..."}
             try:
-                result = json.loads(response.text)
+                result = json.loads(response_data["text"])
                 decision = result.get("decision", "DENY").upper()
                 reasoning = result.get("reasoning", "No reasoning provided")
                 print(f"   [UAC Reasoning] {reasoning}")
@@ -256,7 +275,7 @@ class AgentOrchestrator:
                     return "ALLOW"
                 return "DENY"
             except Exception:
-                text = response.text.upper()
+                text = response_data["text"].upper()
                 if "ALLOW" in text:
                     return "ALLOW"
                 return "DENY"
@@ -293,10 +312,10 @@ class AgentOrchestrator:
     def _capture_raw_image(self) -> PIL.Image.Image:
         """
         Capture raw screen execution-style.
-        
+
         If active_workspace is "agent" and desktop_manager is available,
         captures from the Agent Desktop. Otherwise uses the user desktop.
-        
+
         Attempts MSS (DXGI/Fast) first.
         If that fails or produces artifacts, falls back to PyAutoGUI (GDI).
         Raises Exception if both fail (likely UAC).
@@ -307,20 +326,26 @@ class AgentOrchestrator:
                 if img is not None:
                     return img
             except Exception as e:
-                logging.getLogger("pixelpilot.agent").debug(f"Agent Desktop capture failed: {e}")
-        
+                logging.getLogger("pixelpilot.agent").debug(
+                    f"Agent Desktop capture failed: {e}"
+                )
+
         try:
             if not self.chat_window:
                 with mss.mss() as sct:
                     monitor = sct.monitors[1]
                     sct_img = sct.grab(monitor)
-                    img = PIL.Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                    img = PIL.Image.frombytes(
+                        "RGB", sct_img.size, sct_img.bgra, "raw", "BGRX"
+                    )
                     return img
         except Exception:
             pass
         return pyautogui.screenshot()
 
-    def capture_screen(self, force_robotics: bool = False) -> tuple[List[Dict], Optional[Any]]:
+    def capture_screen(
+        self, force_robotics: bool = False
+    ) -> tuple[List[Dict], Optional[Any]]:
         """
         Capture and analyze the current screen.
         Implements Lazy Vision: OCR first, fallback to Robotics if ambiguous.
@@ -371,7 +396,9 @@ class AgentOrchestrator:
                     self.zoom_offset = (left, top)
                     zoom_crop = full_img.crop((left, top, right, bottom))
 
-                    magnified_img = zoom_crop.resize((w, h), PIL.Image.Resampling.LANCZOS)
+                    magnified_img = zoom_crop.resize(
+                        (w, h), PIL.Image.Resampling.LANCZOS
+                    )
                     magnified_img.save(Config.SCREENSHOT_PATH)
                 else:
                     full_img.save(Config.SCREENSHOT_PATH)
@@ -405,9 +432,15 @@ class AgentOrchestrator:
 
                     self._check_and_trigger_uac()
 
-                    print("   [WAITING] allowing UAC Agent to run on Secure Desktop (5s)...")
+                    print(
+                        "   [WAITING] allowing UAC Agent to run on Secure Desktop (5s)..."
+                    )
 
-                    uac_snap_path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Temp", "uac_snapshot.bmp")
+                    uac_snap_path = os.path.join(
+                        os.environ.get("SystemRoot", r"C:\Windows"),
+                        "Temp",
+                        "uac_snapshot.bmp",
+                    )
                     found_snapshot = False
                     for _ in range(10):
                         if os.path.exists(uac_snap_path):
@@ -422,7 +455,11 @@ class AgentOrchestrator:
                             decision = self._ask_uac_brain(uac_snap_path)
                             print(f"   [UAC DECISION] AI says: {decision}")
 
-                            resp_path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Temp", "uac_response.txt")
+                            resp_path = os.path.join(
+                                os.environ.get("SystemRoot", r"C:\Windows"),
+                                "Temp",
+                                "uac_response.txt",
+                            )
                             with open(resp_path, "w") as f:
                                 f.write(decision)
 
@@ -462,11 +499,17 @@ class AgentOrchestrator:
 
         needs_robotics = force_robotics
         if Config.LAZY_VISION and not force_robotics:
-            has_unknown_icons = any(el.get("label") == "unknown_icon" for el in elements)
+            has_unknown_icons = any(
+                el.get("label") == "unknown_icon" for el in elements
+            )
             text_count = sum(1 for el in elements if el["type"] == "text")
 
-            if (text_count < 3 and len(elements) < 8) or (has_unknown_icons and text_count < 2):
-                print("   [LAZY] Results are ambiguous or sparse, falling back to Robotics...")
+            if (text_count < 3 and len(elements) < 8) or (
+                has_unknown_icons and text_count < 2
+            ):
+                print(
+                    "   [LAZY] Results are ambiguous or sparse, falling back to Robotics..."
+                )
                 needs_robotics = True
 
         if Config.USE_ROBOTICS_EYE and (needs_robotics or not Config.LAZY_VISION):
@@ -475,12 +518,15 @@ class AgentOrchestrator:
             current_step = None
             if self.task_history:
                 last_action = self.task_history[-1]
-                current_step = f"{last_action['action_type']}: {last_action['reasoning']}"
+                current_step = (
+                    f"{last_action['action_type']}: {last_action['reasoning']}"
+                )
 
             if self.robotics_eye:
                 if Config.ROBOTICS_USE_BOUNDING_BOXES:
                     elements = self.robotics_eye.get_screen_elements_with_boxes(
-                        Config.SCREENSHOT_PATH, max_elements=Config.ROBOTICS_MAX_ELEMENTS
+                        Config.SCREENSHOT_PATH,
+                        max_elements=Config.ROBOTICS_MAX_ELEMENTS,
                     )
                 else:
                     elements = self.robotics_eye.get_screen_elements(
@@ -491,16 +537,24 @@ class AgentOrchestrator:
                     )
                 vision_method = "Gemini Robotics-ER"
             else:
-                print("   [WARNING] Robotics Eye requested but not initialized. Falling back to OCR.")
+                print(
+                    "   [WARNING] Robotics Eye requested but not initialized. Falling back to OCR."
+                )
                 if not elements:
-                     elements = self.local_eye.get_screen_elements(Config.SCREENSHOT_PATH)
-                     vision_method = "OCR+Edge (Fallback)"
+                    elements = self.local_eye.get_screen_elements(
+                        Config.SCREENSHOT_PATH
+                    )
+                    vision_method = "OCR+Edge (Fallback)"
 
-        self._create_annotated_image(Config.SCREENSHOT_PATH, elements, Config.DEBUG_PATH)
+        self._create_annotated_image(
+            Config.SCREENSHOT_PATH, elements, Config.DEBUG_PATH
+        )
 
         reference_sheet = None
         if Config.ENABLE_REFERENCE_SHEET:
-            crops = self.local_eye.get_crops_for_context(Config.SCREENSHOT_PATH, elements)
+            crops = self.local_eye.get_crops_for_context(
+                Config.SCREENSHOT_PATH, elements
+            )
             reference_sheet = create_reference_sheet(crops)
             if reference_sheet and Config.SAVE_SCREENSHOTS:
                 reference_sheet.save(Config.REF_PATH)
@@ -521,12 +575,24 @@ class AgentOrchestrator:
                 h = int(el.get("h", 20))
 
                 cv2.rectangle(
-                    img, (x - w // 2, y - h // 2), (x + w // 2, y + h // 2), (0, 255, 0), 2
+                    img,
+                    (x - w // 2, y - h // 2),
+                    (x + w // 2, y + h // 2),
+                    (0, 255, 0),
+                    2,
                 )
 
                 label = str(el["id"])
                 cv2.rectangle(img, (x, y - 25), (x + 30, y), (0, 0, 0), -1)
-                cv2.putText(img, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(
+                    img,
+                    label,
+                    (x, y - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2,
+                )
 
             cv2.imwrite(output_path, img)
         except ImportError:
@@ -549,7 +615,9 @@ class AgentOrchestrator:
             if self.mode == OperationMode.GUIDE:
                 print(f"[GUIDE MODE] Suggestion: {action_type} with {params}")
                 return False
-            elif self.mode == OperationMode.SAFE or Config.is_dangerous_action(action["reasoning"]):
+            elif self.mode == OperationMode.SAFE or Config.is_dangerous_action(
+                action["reasoning"]
+            ):
                 if self.chat_window:
                     confirm = self.chat_window.ask_confirmation(
                         "Action Review",
@@ -632,9 +700,13 @@ class AgentOrchestrator:
                 return False
             result = "Unknown method"
             if method == "open":
-                result = self.browser_skill.open_url(args.get("url"), desktop_manager=dm)
+                result = self.browser_skill.open_url(
+                    args.get("url"), desktop_manager=dm
+                )
             elif method == "search":
-                result = self.browser_skill.search(args.get("query"), desktop_manager=dm)
+                result = self.browser_skill.search(
+                    args.get("query"), desktop_manager=dm
+                )
             self.log(f"Browser Skill Result: {result}")
             return True
 
@@ -649,7 +721,9 @@ class AgentOrchestrator:
             elif method == "minimize":
                 result = self.system_skill.minimize_all()
             elif method == "settings":
-                result = self.system_skill.open_settings(args.get("page"), desktop_manager=dm)
+                result = self.system_skill.open_settings(
+                    args.get("page"), desktop_manager=dm
+                )
             self.log(f"System Skill Result: {result}")
             return True
 
@@ -700,8 +774,10 @@ class AgentOrchestrator:
         final_x = real_x * scale_x
         final_y = real_y * scale_y
 
-        print(f"Clicking ID {element_id} ('{target['label']}') at ({final_x:.0f}, {final_y:.0f})")
-        
+        print(
+            f"Clicking ID {element_id} ('{target['label']}') at ({final_x:.0f}, {final_y:.0f})"
+        )
+
         dm = self.desktop_manager if self.active_workspace == "agent" else None
         mouse.click_at(int(final_x), int(final_y), desktop_manager=dm)
 
@@ -714,7 +790,9 @@ class AgentOrchestrator:
             return False
 
         dm = self.desktop_manager if self.active_workspace == "agent" else None
-        success = self.keyboard.type_text(text, interval=Config.TYPING_INTERVAL, desktop_manager=dm)
+        success = self.keyboard.type_text(
+            text, interval=Config.TYPING_INTERVAL, desktop_manager=dm
+        )
         time.sleep(Config.WAIT_AFTER_TYPE)
         return success
 
@@ -779,16 +857,24 @@ class AgentOrchestrator:
 
         if app_results:
             app_info = app_results[0]
-            print(f"   Found via app index: {app_info['name']} (confidence: {app_info['score']}%)")
+            print(
+                f"   Found via app index: {app_info['name']} (confidence: {app_info['score']}%)"
+            )
 
-            launch_method, launch_command = self.app_indexer.get_launch_command(app_info)
+            launch_method, launch_command = self.app_indexer.get_launch_command(
+                app_info
+            )
 
-            if (launch_method == "executable" or launch_method == "startfile") and launch_command:
+            if (
+                launch_method == "executable" or launch_method == "startfile"
+            ) and launch_command:
                 try:
                     if dm and dm.is_created:
-                        print(f"   Launching on Agent Desktop ({launch_method}): {launch_command}")
+                        print(
+                            f"   Launching on Agent Desktop ({launch_method}): {launch_command}"
+                        )
                         return dm.launch_process(launch_command)
-                    
+
                     if launch_method == "executable":
                         subprocess.Popen(launch_command)
                     else:
@@ -844,7 +930,9 @@ class AgentOrchestrator:
 
     def _execute_reply(self, params: Dict) -> bool:
         """Reply to the user's question without taking action on screen."""
-        text = params.get("text") or params.get("message") or params.get("content") or ""
+        text = (
+            params.get("text") or params.get("message") or params.get("content") or ""
+        )
         if self.chat_window:
             add_final = getattr(self.chat_window, "add_final_answer", None)
             if callable(add_final):
@@ -892,11 +980,17 @@ class AgentOrchestrator:
         success = False
         deferred_execution = False
 
-        if not action_sequence and task_complete and action.get("action_type") == "reply":
+        if (
+            not action_sequence
+            and task_complete
+            and action.get("action_type") == "reply"
+        ):
             print("   [INFO] Deferring reply execution until verification completes...")
             deferred_execution = True
             success = True
-        elif action_sequence and (Config.TURBO_MODE or action.get("action_type") == "sequence"):
+        elif action_sequence and (
+            Config.TURBO_MODE or action.get("action_type") == "sequence"
+        ):
             print(f"\n EXECUTING SEQUENCE: {len(action_sequence)} actions")
             success = True
             for i, sub_action in enumerate(action_sequence):
@@ -916,12 +1010,15 @@ class AgentOrchestrator:
             if not deferred_execution:
                 print("Action completed")
             uac_suspect = False
-            
+
             def check_uac(act):
                 if act.get("action_type") == "key_combo":
-                    keys = [str(k).lower() for k in act.get("params", {}).get("keys", [])]
-                    if ("alt" in keys and "y" in keys) or \
-                       ("ctrl" in keys and "shift" in keys and "enter" in keys):
+                    keys = [
+                        str(k).lower() for k in act.get("params", {}).get("keys", [])
+                    ]
+                    if ("alt" in keys and "y" in keys) or (
+                        "ctrl" in keys and "shift" in keys and "enter" in keys
+                    ):
                         return True
                 return False
 
@@ -933,7 +1030,9 @@ class AgentOrchestrator:
                 uac_suspect = True
 
             if uac_suspect:
-                print("   [UAC CHECK] Action may have triggered UAC. Forcing screen check...")
+                print(
+                    "   [UAC CHECK] Action may have triggered UAC. Forcing screen check..."
+                )
                 time.sleep(2.0)
                 self.capture_screen()
 
@@ -958,7 +1057,9 @@ class AgentOrchestrator:
                     or action.get("skip_verification", False)
                     or action.get("no_verification", False)
                 ):
-                    print("\n [INFO] Skipping verification as requested by action plan.")
+                    print(
+                        "\n [INFO] Skipping verification as requested by action plan."
+                    )
                     action["task_complete"] = True
                 else:
                     try:
@@ -967,7 +1068,9 @@ class AgentOrchestrator:
                         verify_elements, verify_ref = self.capture_screen()
 
                         if not verify_elements:
-                            print("Verification screenshot failed. Trusting task completion.")
+                            print(
+                                "Verification screenshot failed. Trusting task completion."
+                            )
                             action["task_complete"] = True
                         else:
                             verification = verify_task_completion(
@@ -981,7 +1084,9 @@ class AgentOrchestrator:
                             )
 
                             if verification:
-                                is_actually_complete = verification.get("is_complete", False)
+                                is_actually_complete = verification.get(
+                                    "is_complete", False
+                                )
                                 confidence = verification.get("confidence", 0.0)
                                 reasoning = verification.get("reasoning", "")
 
@@ -994,7 +1099,9 @@ class AgentOrchestrator:
                                     is_actually_complete
                                     and confidence >= Config.VERIFICATION_MIN_CONFIDENCE
                                 ):
-                                    print(f"   [SUCCESS] Verification passed (Confidence: {confidence:.0%})")
+                                    print(
+                                        f"   [SUCCESS] Verification passed (Confidence: {confidence:.0%})"
+                                    )
                                     action["task_complete"] = True
                                 else:
                                     print("\n Task not verified as complete")
@@ -1037,7 +1144,7 @@ class AgentOrchestrator:
     def run_task_guidance(self, user_command: str) -> bool:
         """
         Interactive Guidance Mode: step-by-step tutorial with conversational interaction.
-        
+
         The AI watches the screen and provides instructions while the user
         performs actions themselves. Supports clarification questions mid-step.
         """
@@ -1051,7 +1158,7 @@ class AgentOrchestrator:
         try:
             self._stop_event.clear()
             self.current_task = user_command
-            
+
             # Create and run the guidance session
             session = create_guidance_session(
                 user_goal=user_command,
@@ -1059,17 +1166,17 @@ class AgentOrchestrator:
                 capture_func=self.capture_screen,
                 stop_check_func=self._check_stop,
             )
-            
+
             return session.run()
-            
+
         except StopRequested:
             self.log("Guidance session stopped by user")
             return False
-            
+
         except Exception as e:
             self.log(f"Guidance session error: {e}")
             return False
-            
+
         finally:
             if self.chat_window:
                 self.chat_window.set_click_through(False)
@@ -1078,7 +1185,6 @@ class AgentOrchestrator:
     def _record_guidance_feedback(self, feedback: str) -> bool:
         """Legacy method - kept for compatibility."""
         return False
-
 
     def run_task(self, user_command: str) -> bool:
         """
@@ -1187,7 +1293,9 @@ class AgentOrchestrator:
                             action["needs_vision"] = False
 
                         if action.get("needs_vision", False):
-                            print(f"   [BLIND] Vision requested: {action.get('reasoning')}")
+                            print(
+                                f"   [BLIND] Vision requested: {action.get('reasoning')}"
+                            )
                             print("   [MODE SWITCH] Activating Vision System...")
                             vision_active = True
                             self.step_count -= 1
@@ -1211,14 +1319,20 @@ class AgentOrchestrator:
                         continue
 
                 use_cache = False
-                if Config.INCREMENTAL_SCREENSHOTS and last_screen_hash and self.task_history:
+                if (
+                    Config.INCREMENTAL_SCREENSHOTS
+                    and last_screen_hash
+                    and self.task_history
+                ):
                     last_action = self.task_history[-1]
 
                     if last_action["action_type"] in ["type_text", "wait"]:
                         temp_path = Config.TEMP_SCREEN_PATH
                         pyautogui.screenshot(temp_path)
                         if not self._is_screen_changed(temp_path, last_screen_hash):
-                            self.log("   [INCREMENTAL] Screen unchanged, using cached elements.")
+                            self.log(
+                                "   [INCREMENTAL] Screen unchanged, using cached elements."
+                            )
                             use_cache = True
                         try:
                             os.remove(temp_path)
@@ -1272,8 +1386,13 @@ class AgentOrchestrator:
                 media_res = "low"
                 if self.is_magnified:
                     media_res = "high"
-                    self.log("   [Smart Res] Magnified view active. Switching to HIGH resolution.")
-                elif self.task_history and self.task_history[-1].get("confidence", 1.0) < 0.8:
+                    self.log(
+                        "   [Smart Res] Magnified view active. Switching to HIGH resolution."
+                    )
+                elif (
+                    self.task_history
+                    and self.task_history[-1].get("confidence", 1.0) < 0.8
+                ):
                     media_res = "high"
                     self.log(
                         "   [Smart Res] Low confidence in previous step. Switching to HIGH resolution."
@@ -1290,7 +1409,9 @@ class AgentOrchestrator:
                     mag_hint,
                     self.model_history,
                     current_workspace=self.active_workspace,
-                    agent_desktop_available=bool(self.desktop_manager and self.desktop_manager.is_created),
+                    agent_desktop_available=bool(
+                        self.desktop_manager and self.desktop_manager.is_created
+                    ),
                     media_resolution=media_res,
                 )
 
@@ -1305,21 +1426,33 @@ class AgentOrchestrator:
                 action, model_response = plan_result
 
                 if not action.get("needs_vision", True):
-                    print(f"   [VISION] Agent requested Blind Mode: {action.get('reasoning')}")
-                    print("   [MODE SWITCH] Switching to Blind Mode (No Screenshots)...")
+                    print(
+                        f"   [VISION] Agent requested Blind Mode: {action.get('reasoning')}"
+                    )
+                    print(
+                        "   [MODE SWITCH] Switching to Blind Mode (No Screenshots)..."
+                    )
                     vision_active = False
 
                 self.model_history.append(model_response)
 
-                if self.loop_detector and self.loop_detector.track_action(action, screen_hash):
+                if self.loop_detector and self.loop_detector.track_action(
+                    action, screen_hash
+                ):
                     loop_info = self.loop_detector.get_loop_info()
-                    print(f"\n LOOP DETECTED: {loop_info.get('pattern', 'unknown pattern')}")
+                    print(
+                        f"\n LOOP DETECTED: {loop_info.get('pattern', 'unknown pattern')}"
+                    )
 
-                    suggestions = self.loop_detector.suggest_alternatives(user_command, action)
+                    suggestions = self.loop_detector.suggest_alternatives(
+                        user_command, action
+                    )
 
                     if self.clarification_manager:
-                        user_response = self.clarification_manager.handle_loop_clarification(
-                            loop_info, user_command, suggestions
+                        user_response = (
+                            self.clarification_manager.handle_loop_clarification(
+                                loop_info, user_command, suggestions
+                            )
                         )
 
                         if user_response is None:
@@ -1346,7 +1479,9 @@ class AgentOrchestrator:
                         f"\n AI confidence is low ({action.get('confidence', 0.0):.0%}) - asking for clarification..."
                     )
 
-                    answer = self.clarification_manager.ask_question(action, user_command)
+                    answer = self.clarification_manager.ask_question(
+                        action, user_command
+                    )
 
                     if answer is None:
                         print("User cancelled clarification")

@@ -13,7 +13,8 @@ class OperationMode(Enum):
 
 
 class Config:
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    # GEMINI_API_KEY removed for security; using backend.
+    BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
     DEFAULT_MODE = OperationMode(os.getenv("DEFAULT_MODE", OperationMode.AUTO.value))
@@ -169,10 +170,6 @@ class Config:
     @classmethod
     def validate(cls):
         """Validate configuration and raise errors if misconfigured."""
-        if not cls.GEMINI_API_KEY:
-            raise ValueError(
-                "Missing GEMINI_API_KEY! Set it in your .env file or environment variables."
-            )
 
         print("Configuration validated successfully")
         print(f"   Model: {cls.GEMINI_MODEL}")

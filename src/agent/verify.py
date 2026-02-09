@@ -1,10 +1,10 @@
 import json
+import base64
+import io
 from typing import Any, Dict, List, Optional
 from PIL import Image
-from agent.brain import client, model
+from agent.brain import get_model
 from pydantic import BaseModel, Field
-from google import genai
-from google.genai import types
 
 
 def verify_task_completion(
@@ -18,24 +18,6 @@ def verify_task_completion(
 ) -> Optional[Dict[str, Any]]:
     """
     Verify that a task was actually completed by analyzing the current screen state.
-
-    Args:
-        user_command: Original user command
-        expected_result: What the AI expected to happen
-        screen_elements: Current UI elements detected
-        original_path: Path to screenshot
-        debug_path: Path to annotated screenshot
-        reference_sheet: Reference sheet image
-        task_history: List of actions taken
-
-    Returns:
-        Dict with verification result:
-        {
-            "is_complete": bool,
-            "confidence": float (0-1),
-            "reasoning": str,
-            "next_action": Optional[str]
-        }
     """
     try:
         clean_image = Image.open(original_path)
@@ -96,13 +78,27 @@ RESPONSE FORMAT:
 Return a JSON object satisfying the VerificationResult schema.
 """
 
-    contents = [prompt_text, clean_image, annotated_image]
+    def img_to_dict(img):
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format="PNG")
+        return {
+            "mime_type": "image/png",
+            "data": base64.b64encode(img_byte_arr.getvalue()).decode("utf-8"),
+        }
+
+    parts = [
+        {"text": prompt_text},
+        img_to_dict(clean_image),
+        img_to_dict(annotated_image),
+    ]
     if reference_sheet:
-        contents.append(reference_sheet)
+        parts.append(img_to_dict(reference_sheet))
+
+    contents = [{"role": "user", "parts": parts}]
 
     try:
-        response = client.models.generate_content(
-            model=model,
+        model = get_model()
+        response_data = model.generate_content(
             contents=contents,
             config={
                 "response_mime_type": "application/json",
@@ -110,7 +106,7 @@ Return a JSON object satisfying the VerificationResult schema.
             },
         )
 
-        result_obj = VerificationResult.model_validate_json(response.text)
+        result_obj = VerificationResult.model_validate_json(response_data["text"])
         return result_obj.model_dump()
 
     except Exception as e:
