@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from google.genai import types
 from PIL import Image, ImageDraw, ImageFont
+from pydantic import BaseModel, Field
 
 from config import Config
 from services.gemini import ConversationHistory, GeminiClient
@@ -390,6 +391,22 @@ def plan_task_blind_first_step(
         else "AGENT DESKTOP AVAILABLE: NO"
     )
 
+    class FirstStepDecision(BaseModel):
+        intent: str = Field(
+            description="Either 'conversational' for pure small talk, or 'actionable' for tasks needing actions"
+        )
+        workspace: str = Field(
+            description="Target workspace choice: 'user' or 'agent'"
+        )
+        reply_text: str = Field(
+            default="",
+            description="If intent is conversational, provide the reply text. Otherwise leave empty.",
+        )
+        reasoning: str = Field(description="Why this intent/workspace was chosen")
+        confidence: float = Field(
+            default=1.0, description="Confidence score from 0.0 to 1.0"
+        )
+
     prompt_text = f"""
 You are Pixel Pilot inside the Pixel Pilot application. This is the FIRST STEP ONLY.
 
@@ -398,8 +415,9 @@ USER COMMAND: "{user_command}"
 {agent_desktop_section}
 
 YOUR ONLY JOB ON THIS STEP:
-- Decide the correct workspace ("user" or "agent").
-- If a switch is needed, output ONLY the action `switch_workspace`.
+- Decide whether the message is PURELY conversational or an actionable task.
+- If conversational, draft a short reply and do not switch workspaces.
+- If actionable, select the correct workspace ("user" or "agent").
 - Do NOT request vision on this step.
 
 WORKSPACE RULES:
@@ -407,35 +425,56 @@ WORKSPACE RULES:
 - Examples for agent desktop: installs, downloads, background tasks, browsing, long-running tasks.
 - Use the user desktop for tasks tied to the user's active apps or when they must see or interact with the result directly.
 - If the user explicitly mentions a desktop/workspace, follow it.
-- If the task is conversational or informational (greeting, small talk, "who are you", "what can you do", help questions, general facts) and can be answered with a `reply` without any UI action, keep the user desktop.
+- If the task is conversational or informational (greeting, small talk, "who are you", "what can you do", help questions, general facts) and can be answered without UI action, mark intent as conversational.
+- If the command contains any action intent (open, launch, run, click, type, search, install, play, open app, switch workspace, etc.), mark intent as actionable.
+- If you are unsure, choose the safer workspace (agent for background/browsing/automation, user for their active apps or visibility).
 
-FUNCTION CALLING:
-- Use the tool `emit_action` to return your decision.
-- Do NOT output JSON text directly.
-- The action_type must be "switch_workspace".
+RESPONSE FORMAT:
+Return JSON that matches the schema. Set:
+- intent: "conversational" or "actionable"
+- workspace: "user" or "agent"
+- reply_text: only if intent is conversational, otherwise empty
+- reasoning: concise rationale
+- confidence: 0.0 to 1.0
 """
     parts = [{"text": prompt_text}]
 
     history_manager = history if isinstance(history, ConversationHistory) else ConversationHistory()
     history_manager.add_user_message(parts)
 
-    tool_registry = create_planning_registry()
-
     try:
-        response, tool_records = get_gemini_client().generate_with_tools(
+        response = get_gemini_client().generate_structured(
             contents=history_manager.get_messages_for_api(),
-            tool_registry=tool_registry,
-            response_schema=None,
+            response_schema=FirstStepDecision.model_json_schema(),
         )
-        model_part = response.candidates[0].content if response.candidates else None
-        if model_part:
-            history_manager.add_model_response(model_part.parts)
+        result = FirstStepDecision.model_validate_json(response.text)
+        intent = (result.intent or "").strip().lower()
+        workspace = (result.workspace or current_workspace).strip().lower()
 
-        action = get_action_from_tool_calls(tool_records)
-        if action is None:
-            return None
+        if intent == "conversational":
+            action = {
+                "action_type": "reply",
+                "params": {"text": result.reply_text or ""},
+                "reasoning": result.reasoning,
+                "confidence": result.confidence,
+                "task_complete": True,
+                "skip_verification": True,
+                "needs_vision": False,
+            }
+        else:
+            if workspace not in {"user", "agent"}:
+                workspace = current_workspace
+            action = {
+                "action_type": "switch_workspace",
+                "params": {"workspace": workspace},
+                "reasoning": result.reasoning,
+                "confidence": result.confidence,
+                "task_complete": False,
+                "skip_verification": True,
+                "needs_vision": False,
+            }
 
-        return action, model_part
+        return action, None
     except Exception:
         logger.exception("Error in plan_task_blind_first_step")
         return None

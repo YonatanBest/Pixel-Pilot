@@ -1051,7 +1051,16 @@ class AgentOrchestrator:
         success = False
         deferred_execution = False
 
-        if not action_sequence and task_complete and action.get("action_type") == "reply":
+        if action.get("action_type") == "reply":
+            action["task_complete"] = True
+            action["skip_verification"] = True
+
+        if (
+            not action_sequence
+            and task_complete
+            and action.get("action_type") == "reply"
+            and not action.get("skip_verification", False)
+        ):
             self.log_thinking("Deferring reply execution until verification completes...")
             deferred_execution = True
             success = True
@@ -1262,8 +1271,8 @@ class AgentOrchestrator:
             except Exception:
                 pass
 
-        if self.chat_window and self.active_workspace == "user":
-            self.chat_window.set_click_through(True)
+        if self.chat_window:
+            self.chat_window.set_click_through(False)
 
         if self.loop_detector:
             self.loop_detector.clear()
@@ -1283,22 +1292,37 @@ class AgentOrchestrator:
             reflexion_context = ""
 
             vision_active = not Config.ENABLE_BLIND_MODE
-            first_step_interactive = False
+
+            # First step planning (workspace decision) - chat is interactive
+            pre_plan = plan_task_blind_first_step(
+                user_command,
+                self.model_history,
+                current_workspace=self.active_workspace,
+                agent_desktop_available=bool(
+                    self.desktop_manager and self.desktop_manager.is_created
+                ),
+            )
+            if pre_plan:
+                action, _ = pre_plan
+                action["needs_vision"] = False
+                self.execute_action(action, [])
+                self.task_history.append(action)
+                if action.get("task_complete", False):
+                    self.log_main(f"TASK COMPLETED: {user_command}")
+                    return True
+            else:
+                self.log_internal("Workspace pre-step planning failed; continuing.")
+
+            if self.chat_window:
+                if self.active_workspace == "user":
+                    self.chat_window.set_click_through(True)
+                else:
+                    self.chat_window.set_click_through(False)
 
             while not task_complete and self.step_count < self.max_steps:
                 self._check_stop()
                 self.step_count += 1
                 self.log(f"\n--- Step {self.step_count}/{self.max_steps} ---")
-
-                if self.chat_window and self.step_count == 1:
-                    self.chat_window.set_click_through(False)
-                    first_step_interactive = True
-                elif (
-                    self.chat_window
-                    and first_step_interactive
-                    and self.active_workspace == "user"
-                ):
-                    self.chat_window.set_click_through(True)
 
                 self._ensure_workspace_active()
 
@@ -1352,6 +1376,15 @@ class AgentOrchestrator:
                             action["needs_vision"] = False
 
                         if action.get("needs_vision", False):
+                            action_type = action.get("action_type", "")
+                            non_executable = {"reply", "switch_workspace", ""}
+                            
+                            if action_type and action_type not in non_executable:
+                                self.log_thinking(
+                                    f"Executing blind action before vision switch: {action_type}"
+                                )
+                                self._process_action_result(action, [], user_command)
+                            
                             self.log_thinking(
                                 f"Blind requested vision: {action.get('reasoning')}"
                             )
@@ -1549,7 +1582,7 @@ class AgentOrchestrator:
             return False
 
         finally:
-            if self.chat_window and self.active_workspace == "user":
+            if self.chat_window:
                 self.chat_window.set_click_through(False)
             self._restore_default_workspace("Task finished")
 

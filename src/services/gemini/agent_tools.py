@@ -66,7 +66,23 @@ def create_planning_registry() -> ToolRegistry:
                     "switch_workspace",
                     "sequence",
                 ],
-            }
+            },
+            "action_sequence": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action_type": {"type": "string"},
+                        "params": {"type": "object"},
+                        "reasoning": {"type": "string"},
+                        "confidence": {"type": "number"},
+                        "needs_vision": {"type": "boolean"},
+                        "expected_result": {"type": "string"},
+                    },
+                    "required": ["action_type"],
+                },
+                "description": "List of action objects for turbo mode execution",
+            },
         },
     )
     return registry

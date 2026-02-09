@@ -1,13 +1,46 @@
 import logging
+import random
 from typing import Any, Optional
 
 from google import genai
 from google.genai import types
+from google.genai.errors import ServerError
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential_jitter,
+    retry_if_exception,
+    before_sleep_log,
+)
 
 from services.gemini.tools import ToolRegistry, ToolExecutionError, ToolValidationError
 from services.gemini.types import GenerationConfig
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration for transient server errors
+MAX_RETRIES = 5
+MIN_WAIT_SECONDS = 1
+MAX_WAIT_SECONDS = 32
+
+
+def is_retryable_error(exception: BaseException) -> bool:
+    """Check if an exception is a retryable server error (500, 502, 503, 504)."""
+    if isinstance(exception, ServerError):
+        # ServerError contains status_code attribute
+        status_code = getattr(exception, "status_code", 0)
+        return status_code in (500, 502, 503, 504)
+    return False
+
+
+# Retry decorator for API calls
+api_retry = retry(
+    retry=retry_if_exception(is_retryable_error),
+    stop=stop_after_attempt(MAX_RETRIES),
+    wait=wait_exponential_jitter(initial=MIN_WAIT_SECONDS, max=MAX_WAIT_SECONDS, jitter=2),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 
 
 class GeminiError(Exception):
@@ -75,6 +108,35 @@ class GeminiClient:
         """Get the default model name."""
         return self._default_model
 
+    @api_retry
+    def _generate_with_retry(
+        self,
+        model_name: str,
+        contents: list,
+        config: Optional[dict] = None,
+    ) -> Any:
+        """Internal method that wraps generate_content with retry logic.
+
+        This method is decorated with @api_retry to automatically handle
+        transient server errors (500, 502, 503, 504) with exponential backoff.
+
+        Args:
+            model_name: The model to use for generation
+            contents: Conversation contents
+            config: Optional generation config
+
+        Returns:
+            Gemini API response object
+
+        Raises:
+            ServerError: If all retries are exhausted
+        """
+        return self.client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+
     def generate(
         self,
         contents: list[dict],
@@ -102,8 +164,8 @@ class GeminiClient:
         api_config = config or {}
 
         try:
-            response = self.client.models.generate_content(
-                model=model_name,
+            response = self._generate_with_retry(
+                model_name=model_name,
                 contents=contents,
                 config=api_config if api_config else None,
             )
@@ -149,8 +211,8 @@ class GeminiClient:
             config["tools"] = tools
 
         try:
-            response = self.client.models.generate_content(
-                model=model_name,
+            response = self._generate_with_retry(
+                model_name=model_name,
                 contents=contents,
                 config=config,
             )
@@ -208,8 +270,8 @@ class GeminiClient:
                 config["response_json_schema"] = response_schema
 
             try:
-                response = self.client.models.generate_content(
-                    model=model_name,
+                response = self._generate_with_retry(
+                    model_name=model_name,
                     contents=current_contents,
                     config=config if config else None,
                 )
