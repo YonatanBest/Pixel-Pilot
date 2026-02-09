@@ -6,6 +6,9 @@ from io import BytesIO
 from typing import List, Dict, Any, Optional
 from PIL import Image
 from config import Config
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class RateLimitError(Exception):

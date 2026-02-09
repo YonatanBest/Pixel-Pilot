@@ -6,15 +6,20 @@ Handles login, logout, token storage, and session management.
 import os
 import json
 import requests
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class AuthManager:
     """Manages user authentication state and token storage."""
 
-    def __init__(self, backend_url: str = "http://localhost:8000"):
-        self.backend_url = backend_url
+    def __init__(self, backend_url: Optional[str] = None):
+        self.backend_url = backend_url or os.getenv(
+            "BACKEND_URL", "http://localhost:8000"
+        )
         self._token: Optional[str] = None
         self._user_id: Optional[str] = None
         self._email: Optional[str] = None

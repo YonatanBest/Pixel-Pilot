@@ -7,6 +7,9 @@ from PySide6.QtCore import qInstallMessageHandler, Qt
 from PySide6.QtGui import QPixmap, QShortcut, QKeySequence, QPainter, QColor
 from PySide6.QtWidgets import QMessageBox
 from PySide6.QtSvg import QSvgRenderer
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class GuiStream:
