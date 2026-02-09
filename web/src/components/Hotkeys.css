@@ -1,0 +1,53 @@
+.hotkeys-section {
+    padding: 10rem 0;
+    perspective: 1000px;
+}
+
+.hotkeys-grid {
+    display: flex;
+    justify-content: center;
+    gap: 3rem;
+    flex-wrap: wrap;
+}
+
+.tilt-card {
+    background: rgba(20, 20, 20, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    padding: 3rem 2rem;
+    width: 300px;
+    text-align: center;
+    cursor: default;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+}
+
+.hk-card-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2rem;
+}
+
+.keys-row {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.key-cap {
+    background: #000;
+    border: 1px solid #333;
+    border-bottom: 4px solid #333;
+    color: #fff;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    min-width: 3rem;
+    font-size: 0.9rem;
+}
+
+.hk-action {
+    font-size: 1.1rem;
+    color: var(--color-text-muted);
+    font-weight: 500;
+}

@@ -1,0 +1,85 @@
+.features-section {
+    height: 300vh;
+    /* Determines length of scroll */
+    position: relative;
+    background: var(--color-surface);
+}
+
+.sticky-wrapper {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+}
+
+.features-track {
+    display: flex;
+    gap: 4rem;
+    padding-left: 5vw;
+}
+
+.feature-intro {
+    min-width: 30vw;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.feature-intro h2 {
+    font-size: 4rem;
+    font-weight: 800;
+    margin-bottom: 1rem;
+    letter-spacing: -0.02em;
+}
+
+.feature-intro p {
+    font-size: 1.25rem;
+    color: var(--color-text-muted);
+    margin-bottom: 2rem;
+}
+
+.scroll-hint {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    color: var(--color-secondary);
+}
+
+.feature-panel {
+    min-width: 40vw;
+    height: 60vh;
+    background: #111;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 3rem;
+    position: relative;
+    transition: background 0.3s ease;
+}
+
+.feature-panel:hover {
+    background: #161616;
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.feature-id {
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    color: var(--color-primary);
+    opacity: 0.5;
+}
+
+.feature-title {
+    font-size: 3rem;
+    font-weight: 700;
+    line-height: 1.1;
+    margin-bottom: 1rem;
+}
+
+.feature-desc {
+    font-size: 1.125rem;
+    color: var(--color-text-muted);
+    max-width: 300px;
+}

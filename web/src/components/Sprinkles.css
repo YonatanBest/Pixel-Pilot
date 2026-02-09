@@ -1,0 +1,23 @@
+.sprinkles-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 0;
+    overflow: hidden;
+}
+
+.sprinkle-dot {
+    position: absolute;
+    border-radius: 50%;
+}
+
+.sprinkle-primary {
+    background-color: var(--color-primary);
+}
+
+.sprinkle-secondary {
+    background-color: var(--color-secondary);
+}
