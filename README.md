@@ -87,10 +87,6 @@ DEFAULT_WORKSPACE=user
 - **Desktop Manager (`src/desktop/desktop_manager.py`)**: Manages isolated desktops and Win32 process injection.
 - **UAC Service (`src/uac/`)**: SYSTEM-level bridging for Secure Desktop interaction.
 
-## Development & Maintenance
-
-This project uses **Ruff** for linting and formatting. It is recommended to run `ruff check --fix` frequently.
-
 ### Uninstall
 To remove all components, including scheduled tasks and the virtual environment:
 ```powershell
