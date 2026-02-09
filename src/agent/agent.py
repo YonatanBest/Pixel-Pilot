@@ -14,6 +14,7 @@ import subprocess
 import tools.mouse as mouse
 from typing import Any, Dict, List, Optional
 from tools.app_indexer import AppIndexer
+from tools.window_ops import get_open_windows
 from agent.brain import create_reference_sheet, get_model, plan_task, get_model, types
 from agent.clarification import ClarificationManager
 from config import Config, OperationMode
@@ -195,6 +196,20 @@ class AgentOrchestrator:
             return
 
         print(message)
+
+    def get_system_state(self) -> Optional[List[str]]:
+        """Returns list of open apps based on active workspace."""
+        if self.active_workspace == "agent" and self.desktop_manager:
+            try:
+                return self.desktop_manager.get_open_windows()
+            except Exception:
+                return []
+        
+        # User workspace
+        try:
+            return get_open_windows()
+        except Exception:
+            return []
 
     def get_scale_factor(self):
         """
@@ -1395,6 +1410,7 @@ class AgentOrchestrator:
                     current_workspace=self.active_workspace,
                     agent_desktop_available=bool(self.desktop_manager and self.desktop_manager.is_created),
                     media_resolution=media_res,
+                    open_apps=self.get_system_state(),
                 )
 
                 if not plan_result:

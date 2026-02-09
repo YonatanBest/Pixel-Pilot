@@ -1,4 +1,5 @@
 import io
+import json
 from typing import Any, Dict, List, Optional
 from google import genai
 from google.genai import types
@@ -83,8 +84,12 @@ class PlannedAction(BaseModel):
     )
     params: Dict[str, Any] = Field(description="Parameters for the action")
     reasoning: str = Field(description="Detailed logic for this decision")
-    confidence: float = Field(description="Score between 0.0 and 1.0 indicating AI certainty")
-    clarification_needed: bool = Field(description="True if the AI needs more info from user")
+    confidence: float = Field(
+        description="Score between 0.0 and 1.0 indicating AI certainty"
+    )
+    clarification_needed: bool = Field(
+        description="True if the AI needs more info from user"
+    )
     clarification_question: Optional[str] = Field(
         description="Question to ask user if clarification_needed is True"
     )
@@ -97,9 +102,12 @@ class PlannedAction(BaseModel):
         default=False,
         description="True if you cannot complete the task without seeing the screen (e.g. need to click buttons, find icons).",
     )
-    expected_result: Optional[str] = Field(description="What should happen after this action")
+    expected_result: Optional[str] = Field(
+        description="What should happen after this action"
+    )
     action_sequence: Optional[List[SubAction]] = Field(
-        default=None, description="A sequence of actions to execute at once (Turbo Mode)"
+        default=None,
+        description="A sequence of actions to execute at once (Turbo Mode)",
     )
 
 
@@ -182,6 +190,7 @@ def plan_task(
     current_workspace: str = "user",
     agent_desktop_available: bool = False,
     media_resolution: str = "low",
+    open_apps: Optional[List[str]] = None,
 ) -> Optional[tuple[Dict[str, Any], Any]]:
     """
     Enhanced brain function for multi-step task planning.
@@ -224,7 +233,9 @@ def plan_task(
     turbo_status = "ENABLED" if Config.TURBO_MODE else "DISABLED"
     workspace_section = f"CURRENT WORKSPACE: {current_workspace}"
     agent_desktop_section = (
-        "AGENT DESKTOP AVAILABLE: YES" if agent_desktop_available else "AGENT DESKTOP AVAILABLE: NO"
+        "AGENT DESKTOP AVAILABLE: YES"
+        if agent_desktop_available
+        else "AGENT DESKTOP AVAILABLE: NO"
     )
     guidance_section = ""
     if guidance_mode:
@@ -352,7 +363,9 @@ CRITICAL GUIDELINES:
         img_byte_arr = io.BytesIO()
         img.save(img_byte_arr, format="PNG")
         return types.Part.from_bytes(
-            data=img_byte_arr.getvalue(), mime_type="image/png", media_resolution=res_enum
+            data=img_byte_arr.getvalue(),
+            mime_type="image/png",
+            media_resolution=res_enum,
         )
 
     contents = [
@@ -410,7 +423,9 @@ def plan_task_blind(
     turbo_status = "ENABLED" if Config.TURBO_MODE else "DISABLED"
     workspace_section = f"CURRENT WORKSPACE: {current_workspace}"
     agent_desktop_section = (
-        "AGENT DESKTOP AVAILABLE: YES" if agent_desktop_available else "AGENT DESKTOP AVAILABLE: NO"
+        "AGENT DESKTOP AVAILABLE: YES"
+        if agent_desktop_available
+        else "AGENT DESKTOP AVAILABLE: NO"
     )
 
     prompt_text = f"""
@@ -515,7 +530,9 @@ def plan_task_blind_first_step(
 
     workspace_section = f"CURRENT WORKSPACE: {current_workspace}"
     agent_desktop_section = (
-        "AGENT DESKTOP AVAILABLE: YES" if agent_desktop_available else "AGENT DESKTOP AVAILABLE: NO"
+        "AGENT DESKTOP AVAILABLE: YES"
+        if agent_desktop_available
+        else "AGENT DESKTOP AVAILABLE: NO"
     )
 
     prompt_text = f"""
