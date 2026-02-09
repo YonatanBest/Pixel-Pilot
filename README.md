@@ -17,8 +17,8 @@ PixelPilot is a Windows desktop automation agent powered by **Gemini (Google Gen
 ### Multimodal Planning and Vision
 - **Gemini planning model**: Uses `GEMINI_MODEL` (default `gemini-3-flash-preview`).
 - **Two vision modes** (switch in UI):
-    - **ROBO (default)**: Gemini Robotics-ER for semantic UI understanding (optionally uses bounding boxes).
-    - **OCR**: Local EasyOCR + OpenCV (OCR + edge based detection).
+    - **OCR (default)**: Local EasyOCR + OpenCV (OCR + edge based detection).
+    - **ROBO**: Gemini Robotics-ER for semantic UI understanding (optionally uses bounding boxes).
 - **Lazy vision fallback**: If Robotics is unavailable or ambiguous, it falls back to OCR.
 - **Magnification**: Zoom into dense UI regions before selecting an element.
 - **Reference sheets**: Optional grid of cropped UI elements to help with small icons.
@@ -28,6 +28,10 @@ PixelPilot is a Windows desktop automation agent powered by **Gemini (Google Gen
 - **SAFE**: Confirms only potentially dangerous actions (like delete, shutdown).
 - **AUTO**: Runs fully autonomously without requiring confirmation.
 - **Blind mode**: When vision is not needed, PixelPilot can plan and act without screenshots and switch back to vision when required.
+
+### Smart Interaction
+- **Active Clarification**: When unsure about an action or element, PixelPilot asks the user for clarification instead of guessing or failing.
+- **Turbo Mode**: Enabled by default, optimizes the context window and planning prompts for faster execution sequences.
 
 ### Agent Desktop and Sidecar
 - **Agent Desktop**: Optional isolated desktop workspace for safer background tasks.
@@ -102,6 +106,8 @@ Notes:
 - `DEFAULT_MODE` selects the initial UI mode.
 - `AGENT_MODE` overrides `DEFAULT_MODE` when present.
 - `VISION_MODE` is `robo` (Gemini Robotics-ER) or `ocr` (local OCR + CV).
+- `ENABLE_CLARIFICATION=true` enables the agent to ask questions when uncertain (default: true).
+- `TURBO_MODE=true` enables faster execution optimization (default: true).
 
 ### 3. Run
 
