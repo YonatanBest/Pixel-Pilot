@@ -18,7 +18,7 @@ class Config:
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
     DEFAULT_MODE = OperationMode(os.getenv("DEFAULT_MODE", OperationMode.AUTO.value))
-    VISION_MODE = os.getenv("VISION_MODE", "robo").strip().lower()
+    VISION_MODE = os.getenv("VISION_MODE", "ocr").strip().lower()
 
     USE_ROBOTICS_EYE = VISION_MODE in {"robo", "robotics", "er", "robotics-er"}
     ROBOTICS_USE_BOUNDING_BOXES = True
