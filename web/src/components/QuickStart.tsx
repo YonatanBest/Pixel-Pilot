@@ -3,9 +3,10 @@ import './QuickStart.css';
 import { Magnetic } from './Magnetic';
 
 const commands = [
-    { text: "git clone https://github.com/pixelpilot/agent", output: "Cloning into 'agent'..." },
-    { text: "cd agent && python install.py", output: "Installing dependencies... Done." },
-    { text: "python src/main.py", output: "PixelPilot v1.0.0 Online. Listening..." }
+    { text: "git clone https://github.com/birukabza/Pixel-Pilot.git", output: "Cloning into 'Pixel-Pilot'..." },
+    { text: "cd Pixel-Pilot && python install.py", output: "Installing dependencies... Done." },
+    { text: "Open the PixelPilot Desktop shortcut", output: "Launching PixelPilot..." },
+    { text: "(Optional) .\\venv\\Scripts\\python.exe .\\src\\main.py", output: "PixelPilot Online. Listening..." }
 ];
 
 export const QuickStart = () => {

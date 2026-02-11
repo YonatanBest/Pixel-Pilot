@@ -41,7 +41,7 @@ export const Navbar = () => {
                         <button onClick={() => scrollToSection('hotkeys')} className="nav-link">Controls</button>
                     </Magnetic>
                     <Magnetic>
-                        <a href="https://github.com" target="_blank" className="nav-link">GitHub</a>
+                        <a href="https://github.com/birukabza/Pixel-Pilot" target="_blank" className="nav-link">GitHub</a>
                     </Magnetic>
                 </div>
             </motion.nav>
