@@ -71,6 +71,7 @@ class ActionResponse(BaseModel):
 class SkillArgs(BaseModel):
     query: Optional[str] = Field(None, description="For search/media")
     url: Optional[str] = Field(None, description="For browser open")
+    browser: Optional[str] = Field(None, description="Preferred browser (e.g., 'chrome', 'edge')")
     action: Optional[str] = Field(None, description="For volume control")
     page: Optional[str] = Field(None, description="For settings")
 
@@ -187,6 +188,14 @@ def plan_task(
     )
 
     context_section = ""
+    if history and not task_context:
+        debug_steps = []
+        for h in history:
+            if isinstance(h, dict) and "step" in h:
+                debug_steps.append(f"Step {h['step']}: {h.get('action_type')} - {h.get('reasoning')} - success: {h.get('success')}")
+        if debug_steps:
+            task_context = "PREVIOUS STEPS:\n" + "\n".join(debug_steps)
+
     if task_context:
         context_section = f"\nTASK CONTEXT (previous steps):\n{task_context}\n"
 
@@ -264,6 +273,14 @@ def plan_task_blind(
     """
 
     context_section = ""
+    if history and not task_context:
+        debug_steps = []
+        for h in history:
+            if isinstance(h, dict) and "step" in h:
+                debug_steps.append(f"Step {h['step']}: {h.get('action_type')} - {h.get('reasoning')} - success: {h.get('success')}")
+        if debug_steps:
+            task_context = "PREVIOUS STEPS:\n" + "\n".join(debug_steps)
+
     if task_context:
         context_section = f"\nTASK CONTEXT (previous steps):\n{task_context}\n"
 

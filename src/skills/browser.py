@@ -10,7 +10,7 @@ class BrowserSkill(BaseSkill):
         self.register_method("open_url", self.open_url)
         self.register_method("search", self.search)
 
-    def open_url(self, url=None, desktop_manager=None):
+    def open_url(self, url=None, browser=None, desktop_manager=None):
         if not url:
             return "No URL provided"
         if not url.startswith("http"):
@@ -19,6 +19,15 @@ class BrowserSkill(BaseSkill):
             if desktop_manager and desktop_manager.is_created:
                 success = desktop_manager.launch_process(f'cmd /c start "" "{url}"')
                 return f"Opened {url}" if success else f"Failed to open {url}"
+            
+            if browser:
+                try:
+                    b = webbrowser.get(browser)
+                    b.open(url)
+                    return f"Opened {url} in {browser}"
+                except Exception:
+                    pass
+            
             webbrowser.open(url)
             return f"Opened {url}"
         except Exception as e:

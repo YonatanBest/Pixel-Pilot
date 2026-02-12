@@ -183,7 +183,8 @@ class AgentOrchestrator:
                             return False
                     
                     current_hash = self.screen_capture.last_hash
-                    if self.task_history and self.task_history[-1].get("action_type") == "wait":
+                    last_meta = next((h for h in reversed(self.task_history) if isinstance(h, dict) and "action_type" in h), {})
+                    if last_meta.get("action_type") == "wait":
                         if getattr(self, "_last_run_hash", None) == current_hash:
                             self.log("Screen unchanged after wait. Extending wait...")
                             time.sleep(1)
@@ -219,6 +220,11 @@ class AgentOrchestrator:
 
             action, model_part = action_data
             self.log(f"AI Reasoning: {action.get('reasoning', 'N/A')}")
+
+            if self.loop_detector and action.get("action_type") != "wait":
+                current_hash = self.screen_capture.last_hash if needs_vision else "blind"
+                if self.loop_detector.track_action(action, current_hash):
+                    self.log("LOOP WARNING: Repeating pattern detected!")
             
             if action.get("action_type") == "switch_workspace":
                 params = action.get("params", {})
@@ -240,15 +246,31 @@ class AgentOrchestrator:
                 self._set_workspace(self.active_workspace)
 
             self._check_stop()
-            success = self.execute_action(action, elements)
+            
+            if action.get("action_type") == "sequence":
+                sequence = action.get("action_sequence", [])
+                self.log(f"Executing sequence of {len(sequence)} actions...")
+                success = True
+                for i, sub_action in enumerate(sequence):
+                    self._check_stop()
+                    self.log(f"Sequence Step {i+1}/{len(sequence)}: {sub_action.get('action_type')}")
+                    if not self.execute_action(sub_action, elements):
+                        success = False
+                        self.log(f"Sequence failed at step {i+1}")
+                        break
+            else:
+                success = self.execute_action(action, elements)
             
             self.task_history.append({
                 "step": self.step_count,
                 "action_type": action.get("action_type"),
                 "params": action.get("params"),
                 "reasoning": action.get("reasoning"),
-                "success": success
+                "success": success,
+                "sequence": action.get("action_sequence") if action.get("action_type") == "sequence" else None
             })
+            if model_part:
+                self.task_history.append(model_part)
 
             if action.get("task_complete"):
                 if not needs_vision and not action.get("skip_verification"):

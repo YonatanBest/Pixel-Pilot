@@ -52,7 +52,7 @@ AVAILABLE SKILLS (HYBRID MODE):
   - method: "previous" -> Previous track.
   - method: "status" -> Gets current media status.
 - Skill: "browser"
-  - method: "open" (params: {{"url": "google.com"}}) -> Opens URL in default browser.
+  - method: "open" (params: {{"url": "google.com", "browser": "chrome"|"edge"}}) -> Opens URL in specified or default browser.
   - method: "search" (params: {{"query": "search term"}}) -> Opens Google search.
 - Skill: "system"
   - method: "volume" (params: {{"action": "up"|"down"|"mute"}}) -> Controls volume.
@@ -99,7 +99,7 @@ RESPONSE FORMAT:
 CRITICAL GUIDELINES:
 0. **WORKSPACE AWARENESS**: You are currently interacting with the {workspace_section} desktop. Do NOT confuse the "user's desktop" (live environment) with the "agent's desktop" (sandboxed environment). Ensure your actions (like opening apps) happen on the desktop where you intend to work.
 1. **ID Precision**: You MUST use the `element_id` from the [Annotated Screen] or the provided list. Do not hallucinate IDs.
-2. **Launch First**: If the user wants to open an app (e.g., "Open Notepad"), always use `open_app` first. Do not try to find the icon manually unless `open_app` failed previously.
+2. **Launch First**: If the user wants to open an app (e.g., "Open Notepad"), always use `open_app` first. Do not try to find the icon manually unless `open_app` failed previously. **NOTE**: If using `call_skill("browser", "open", ...)`, you do NOT need to call `open_app` for the browser.
 3. **Verification**: Set `task_complete` to true ONLY if you are sure the user's goal is fully achieved.
 4. **Efficiency**: For trivial actions (like 'reply', 'wait', or simple confirmations) where a screenshot verification is overkill, SET `skip_verification: true`.
 5. **Magnification**: If you cannot see an element clearly or the text is too small, use `magnify` on the approximate area.

@@ -85,10 +85,7 @@ class ActionExecutor:
             elif action_type == "switch_workspace":
                 return self._execute_switch_workspace(params)
             elif action_type == "sequence":
-                logger.warning(
-                    "sequence type passed to execute_action. This should be handled in run_task."
-                )
-                return False
+                return True
             else:
                 logger.error(f"Unknown action type: {action_type}")
                 return False

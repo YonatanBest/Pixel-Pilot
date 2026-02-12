@@ -357,8 +357,8 @@ class ScreenCapture:
             )
             text_count = sum(1 for el in elements if el["type"] == "text")
 
-            if (text_count < 3 and len(elements) < 8) or (
-                has_unknown_icons and text_count < 2
+            if (text_count < 1 and len(elements) < 2) or (
+                has_unknown_icons and text_count < 1
             ):
                 self.log(
                     "Lazy vision fallback to Robotics (sparse context)..."
