@@ -245,11 +245,7 @@ class ActionExecutor:
             return False
 
         self.log(f"Reply: {text}")
-        if self.agent.chat_window:
-            try:
-                self.agent.chat_window.add_final_answer(text)
-            except Exception as e:
-                logger.error(f"Failed to add final answer to chat: {e}")
+        self.agent.deferred_reply = text
         return True
 
     def _execute_switch_workspace(self, params: Dict) -> bool:

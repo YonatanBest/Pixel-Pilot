@@ -97,6 +97,7 @@ class AgentOrchestrator:
         self.screen_capture = ScreenCapture(self)
 
         self.log(f"AI Agent initialized in {self.mode.value.upper()} mode")
+        self.deferred_reply = None
 
     def request_stop(self):
         self._stop_event.set()
@@ -118,6 +119,7 @@ class AgentOrchestrator:
         self.current_task = user_command
         self.task_history = []
         self.step_count = 0
+        self.deferred_reply = None
         self._check_stop()
 
         if self.chat_window:
@@ -238,6 +240,13 @@ class AgentOrchestrator:
                     needs_vision = True
                     continue
                 
+                if self.deferred_reply and self.chat_window:
+                    try:
+                        self.chat_window.add_final_answer(self.deferred_reply)
+                        self.deferred_reply = None
+                    except Exception as e:
+                        self.log(f"Error displaying final answer: {e}")
+
                 self.log("Task marked as complete by AI.")
                 return True
 
