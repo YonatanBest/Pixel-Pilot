@@ -7,11 +7,15 @@ export const Hero = () => {
     const y1 = useTransform(scrollY, [0, 500], [0, 200]);
     const y2 = useTransform(scrollY, [0, 500], [0, -100]);
 
+    const scrollToQuickStart = () => {
+        document.getElementById('quickstart')?.scrollIntoView({ behavior: 'smooth' });
+    };
+
     return (
         <section className="hero-container">
             <div className="hero-content">
                 <motion.div style={{ y: y1 }} className="hero-header">
-                    <motion.h1 
+                    <motion.h1
                         initial={{ opacity: 0, y: 100 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ duration: 1, ease: [0.16, 1, 0.3, 1] }}
@@ -19,7 +23,7 @@ export const Hero = () => {
                     >
                         PIXEL
                     </motion.h1>
-                    <motion.h1 
+                    <motion.h1
                         initial={{ opacity: 0, y: 100 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ duration: 1, delay: 0.1, ease: [0.16, 1, 0.3, 1] }}
@@ -29,7 +33,7 @@ export const Hero = () => {
                     </motion.h1>
                 </motion.div>
 
-                <motion.div 
+                <motion.div
                     style={{ y: y2 }}
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
@@ -41,26 +45,26 @@ export const Hero = () => {
                         <br />
                         It sees what you see. It does what you say.
                     </p>
-                    
+
                     <div className="hero-actions">
                         <Magnetic strength={0.3}>
-                            <button className="btn-mag-primary">
+                            <button className="btn-mag-primary" onClick={scrollToQuickStart}>
                                 Initialize Agent
                             </button>
                         </Magnetic>
                     </div>
                 </motion.div>
             </div>
-            
-            <motion.div 
+
+            <motion.div
                 className="scroll-indicator"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ delay: 1, duration: 1 }}
             >
                 <span>SCROLL TO EXPLORE</span>
-                <motion.div 
-                    className="scroll-line" 
+                <motion.div
+                    className="scroll-line"
                     animate={{ height: [0, 60, 0], y: [0, 0, 60] }}
                     transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
                 />

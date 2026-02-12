@@ -58,9 +58,7 @@ export const DocsPage = () => {
                     <article className="docs-card">
                         <h2>Install</h2>
                         <p>Run the installer to create the virtual environment and scheduled tasks.</p>
-                        <pre>$ git clone https://github.com/birukabza/Pixel-Pilot.git
-                            $ cd Pixel-Pilot
-                            $ python install.py</pre>
+                        <pre>{`$ git clone https://github.com/birukabza/Pixel-Pilot.git\n$ cd Pixel-Pilot\n$ python install.py`}</pre>
                         <div className="docs-note">Optional: <code>python install.py --no-tasks</code></div>
                         <ul>
                             <li>Builds UAC helpers and scheduled tasks.</li>
