@@ -88,6 +88,7 @@ class Config:
     CLARIFICATION_TIMEOUT = 60
 
     ENABLE_BLIND_MODE = True
+    APP_LAUNCH_WAIT = 3
 
     SAVE_SCREENSHOTS = True
     VERBOSE_LOGGING = True
