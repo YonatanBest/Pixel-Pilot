@@ -2,7 +2,7 @@ import io
 import json
 import base64
 import logging
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 from config import Config
@@ -83,6 +83,10 @@ class SkillArgs(BaseModel):
 class ActionParams(BaseModel):
     element_id: Optional[int] = Field(None, description="ID of UI element")
     target_id: Optional[int] = Field(None, description="Alias for element_id")
+    ui_element_id: Optional[str] = Field(
+        None,
+        description="Stable UI Automation element id for blind-mode interaction",
+    )
     text: Optional[str] = Field(None, description="Text to type or reply")
     key: Optional[str] = Field(None, description="Key to press")
     keys: Optional[List[str]] = Field(None, description="Keys for combo")
@@ -93,13 +97,21 @@ class ActionParams(BaseModel):
     method: Optional[str] = Field(None, description="Skill method")
     args: Optional[SkillArgs] = Field(None, description="Arguments for skill method")
     workspace: Optional[str] = Field(None, description="Target workspace")
+    target: Optional[str] = Field(
+        None,
+        description="read_ui_text target: auto, focused, window, or element",
+    )
+    max_chars: Optional[int] = Field(
+        None,
+        description="Maximum characters for read_ui_text responses",
+    )
 
 
 class SubAction(BaseModel):
     action_type: str = Field(
         description=(
             "The type of action: click, type_text, press_key, key_combo, open_app, wait, "
-            "magnify, switch_workspace"
+            "magnify, switch_workspace, read_ui_text"
         )
     )
     params: ActionParams = Field(description="Parameters for the action.")
@@ -148,16 +160,90 @@ def pil_to_dict(img: Image.Image) -> Dict[str, str]:
     }
 
 
-def _normalize_history(history: Optional[List]) -> List[Dict[str, Any]]:
+def _normalize_history(
+    history: Optional[List],
+    *,
+    include_blind_only: bool = True,
+    include_uia_only: bool = True,
+) -> List[Dict[str, Any]]:
     if not history:
         return []
     normalized = []
     for item in history:
+        if (
+            isinstance(item, dict)
+            and item.get("blind_only")
+            and not include_blind_only
+        ):
+            continue
+        if (
+            isinstance(item, dict)
+            and item.get("uia_only")
+            and not include_uia_only
+        ):
+            continue
         if isinstance(item, dict) and "role" in item and "parts" in item:
             normalized.append(item)
         elif isinstance(item, str):
             normalized.append({"role": "model", "parts": [{"text": item}]})
     return normalized
+
+
+def _history_to_task_context(history: Optional[List], task_context: Optional[str]) -> str:
+    if task_context:
+        return task_context
+
+    debug_steps = []
+    for item in history or []:
+        if isinstance(item, dict) and "step" in item:
+            debug_steps.append(
+                f"Step {item['step']}: {item.get('action_type')} - "
+                f"{item.get('reasoning')} - success: {item.get('success')}"
+            )
+    if not debug_steps:
+        return ""
+    return "PREVIOUS STEPS:\n" + "\n".join(debug_steps)
+
+
+def _truncate_text(value: Any, limit: int = 120) -> str:
+    text = str(value or "").strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _format_uia_state_section(ui_snapshot: Optional[Dict[str, Any]]) -> str:
+    if not ui_snapshot:
+        return "UI AUTOMATION STATE:\n- unavailable: no snapshot captured\n"
+
+    if not ui_snapshot.get("available", False):
+        reason = ui_snapshot.get("error", "unknown error")
+        return f"UI AUTOMATION STATE:\n- unavailable: {reason}\n"
+
+    lines = [
+        "UI AUTOMATION STATE:",
+        (
+            f"- workspace={ui_snapshot.get('workspace', '')} "
+            f"window='{_truncate_text(ui_snapshot.get('active_window_title', ''), 90)}' "
+            f"class='{_truncate_text(ui_snapshot.get('active_window_class', ''), 60)}'"
+        ),
+        f"- visible_elements={ui_snapshot.get('elements_count', 0)}",
+    ]
+
+    for element in (ui_snapshot.get("elements") or [])[:50]:
+        rect = element.get("rect") or {}
+        lines.append(
+            "  - "
+            f"{element.get('ui_element_id', '')}: "
+            f"{_truncate_text(element.get('control_type', ''), 24)} "
+            f"name='{_truncate_text(element.get('name', ''), 50)}' "
+            f"automation_id='{_truncate_text(element.get('automation_id', ''), 40)}' "
+            f"class='{_truncate_text(element.get('class_name', ''), 30)}' "
+            f"patterns={element.get('patterns', [])} "
+            f"rect=({rect.get('left', '?')},{rect.get('top', '?')},"
+            f"{rect.get('right', '?')},{rect.get('bottom', '?')})"
+        )
+    return "\n".join(lines) + "\n"
 
 def plan_task(
     user_command: str,
@@ -192,15 +278,8 @@ def plan_task(
         ]
     )
 
+    task_context = _history_to_task_context(history, task_context)
     context_section = ""
-    if history and not task_context:
-        debug_steps = []
-        for h in history:
-            if isinstance(h, dict) and "step" in h:
-                debug_steps.append(f"Step {h['step']}: {h.get('action_type')} - {h.get('reasoning')} - success: {h.get('success')}")
-        if debug_steps:
-            task_context = "PREVIOUS STEPS:\n" + "\n".join(debug_steps)
-
     if task_context:
         context_section = f"\nTASK CONTEXT (previous steps):\n{task_context}\n"
 
@@ -236,7 +315,11 @@ def plan_task(
     if reference_sheet:
         contents[0]["parts"].append(pil_to_dict(reference_sheet))
 
-    contents_to_send = _normalize_history(history)
+    contents_to_send = _normalize_history(
+        history,
+        include_blind_only=False,
+        include_uia_only=False,
+    )
     contents_to_send.append(contents[0])
 
     try:
@@ -270,6 +353,7 @@ def plan_task_blind(
     history: Optional[List] = None,
     current_workspace: str = "user",
     agent_desktop_available: bool = False,
+    ui_snapshot: Optional[Dict[str, Any]] = None,
     callback: Optional[Callable[[str], None]] = None,
 ) -> Optional[tuple[Dict[str, Any], Any]]:
     """
@@ -278,15 +362,8 @@ def plan_task_blind(
     If it realizes it needs to see the screen (e.g. to click a button), it returns needs_vision=True.
     """
 
+    task_context = _history_to_task_context(history, task_context)
     context_section = ""
-    if history and not task_context:
-        debug_steps = []
-        for h in history:
-            if isinstance(h, dict) and "step" in h:
-                debug_steps.append(f"Step {h['step']}: {h.get('action_type')} - {h.get('reasoning')} - success: {h.get('success')}")
-        if debug_steps:
-            task_context = "PREVIOUS STEPS:\n" + "\n".join(debug_steps)
-
     if task_context:
         context_section = f"\nTASK CONTEXT (previous steps):\n{task_context}\n"
 
@@ -300,10 +377,15 @@ def plan_task_blind(
         user_command=user_command,
         context_section=context_section,
         workspace_section=workspace_section,
-        agent_desktop_section=agent_desktop_section
+        agent_desktop_section=agent_desktop_section,
+        uia_state_section=_format_uia_state_section(ui_snapshot),
     )
 
-    contents_to_send = _normalize_history(history)
+    contents_to_send = _normalize_history(
+        history,
+        include_blind_only=True,
+        include_uia_only=True,
+    )
     contents_to_send.append({"role": "user", "parts": [{"text": prompt_text}]})
 
     try:
@@ -316,8 +398,14 @@ def plan_task_blind(
             },
         )
         response_text = response_data["text"]
-        action_dict = PlannedAction.model_validate_json(response_text).model_dump()
-        model_part = {"role": "model", "parts": [{"text": response_text}]}
+        action_dict = PlannedAction.model_validate_json(response_text).model_dump(
+            exclude_none=True
+        )
+        model_part = {
+            "role": "model",
+            "parts": [{"text": response_text}],
+            "blind_only": True,
+        }
         return action_dict, model_part
     except RateLimitError:
         raise
@@ -349,7 +437,11 @@ def plan_task_blind_first_step(
         agent_desktop_section=agent_desktop_section
     )
 
-    contents_to_send = _normalize_history(history)
+    contents_to_send = _normalize_history(
+        history,
+        include_blind_only=True,
+        include_uia_only=False,
+    )
     contents_to_send.append({"role": "user", "parts": [{"text": prompt_text}]})
 
     try:
@@ -362,8 +454,14 @@ def plan_task_blind_first_step(
             },
         )
         response_text = response_data["text"]
-        action_dict = PlannedAction.model_validate_json(response_text).model_dump()
-        model_part = {"role": "model", "parts": [{"text": response_text}]}
+        action_dict = PlannedAction.model_validate_json(response_text).model_dump(
+            exclude_none=True
+        )
+        model_part = {
+            "role": "model",
+            "parts": [{"text": response_text}],
+            "blind_only": True,
+        }
         return action_dict, model_part
     except RateLimitError:
         raise

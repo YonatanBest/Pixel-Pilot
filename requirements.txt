@@ -16,4 +16,5 @@ pyinstaller==6.18.0
 psutil==7.2.2
 winsdk==1.0.0b10
 imagehash==4.3.2
+uiautomation==2.0.29
 

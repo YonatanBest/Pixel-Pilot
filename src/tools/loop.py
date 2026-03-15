@@ -115,8 +115,9 @@ class LoopDetector:
 
         recent_actions = list(self.action_history)[-self.threshold :]
 
+        action_hashes = [a["action_hash"] for a in recent_actions]
         action_types = [a["action"]["action_type"] for a in recent_actions]
-        if len(set(action_types)) == 1:
+        if len(set(action_hashes)) == 1:
             recent_screens = [a["screen_hash"] for a in recent_actions]
 
             all_similar = True

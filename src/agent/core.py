@@ -2,6 +2,7 @@ import os
 import ctypes
 import pyautogui
 import logging
+import re
 import time
 import threading
 from typing import Any, Dict, List, Optional
@@ -17,6 +18,8 @@ from tools.mouse import click_at
 from agent.actions import ActionExecutor
 from agent.capture import ScreenCapture
 from agent.guidance import GuidanceSession
+from agent.verify import verify_task_blind
+import tools.ui_automation as ui_automation
 
 class StopRequested(Exception):
     pass
@@ -100,6 +103,7 @@ class AgentOrchestrator:
 
         self.log(f"AI Agent initialized in {self.mode.value.upper()} mode")
         self.deferred_reply = None
+        self.current_blind_snapshot = None
 
     def request_stop(self):
         self._stop_event.set()
@@ -113,11 +117,96 @@ class AgentOrchestrator:
         if self._stop_event.is_set():
             raise StopRequested()
 
-    def execute_action(self, action: Dict[str, Any], elements: List[Dict]) -> bool:
+    def execute_action(self, action: Dict[str, Any], elements: List[Dict]) -> Dict[str, Any]:
         """
         Execute a single action via ActionExecutor.
         """
         return self.action_executor.execute(action, elements)
+
+    def _goal_terms(self) -> List[str]:
+        words = re.findall(r"[a-zA-Z0-9]+", (self.current_task or "").lower())
+        stop = {
+            "open",
+            "the",
+            "a",
+            "an",
+            "in",
+            "on",
+            "to",
+            "my",
+            "of",
+            "and",
+            "for",
+            "please",
+        }
+        return [word for word in words if len(word) >= 3 and word not in stop]
+
+    def _capture_blind_snapshot(self) -> Dict[str, Any]:
+        self._ensure_workspace_active()
+        snapshot = ui_automation.get_snapshot(
+            self.active_workspace,
+            self.desktop_manager,
+            Config.UIA_MAX_ELEMENTS,
+            self._goal_terms(),
+        )
+        self.current_blind_snapshot = snapshot
+        if not snapshot.get("available", False):
+            self.log(
+                f"UI Automation unavailable on {self.active_workspace} workspace: "
+                f"{snapshot.get('error', 'unknown error')}"
+            )
+        return snapshot
+
+    def _append_history_message(
+        self,
+        text: str,
+        *,
+        blind_only: bool = False,
+        uia_only: bool = False,
+    ) -> None:
+        clean = str(text or "").strip()
+        if not clean:
+            return
+        entry = {"role": "user", "parts": [{"text": clean}]}
+        if blind_only:
+            entry["blind_only"] = True
+        if uia_only:
+            entry["uia_only"] = True
+        self.task_history.append(entry)
+
+    def _append_blind_observation(self, action: Dict[str, Any], result: Dict[str, Any]) -> None:
+        payload = result.get("payload") if isinstance(result, dict) else None
+        if not isinstance(payload, dict):
+            return
+
+        if action.get("action_type") == "read_ui_text":
+            text = str(payload.get("text") or "").strip()
+            if text:
+                source = payload.get("seed_source") or payload.get("target") or "uia"
+                message = f"BLIND OBSERVATION ({source}): {text}"
+                self._append_history_message(message, blind_only=True, uia_only=True)
+                return
+
+            source = payload.get("seed_source") or payload.get("target") or "uia"
+            reason = str(payload.get("reason") or result.get("message") or "unknown").strip()
+            window_title = str(payload.get("active_window_title") or "").strip()
+            window_class = str(payload.get("active_window_class") or "").strip()
+            message = f"BLIND OBSERVATION ({source}): read_ui_text failed reason={reason}"
+            if window_title:
+                message += f" window='{window_title}'"
+            if window_class:
+                message += f" class='{window_class}'"
+            self._append_history_message(message, blind_only=True, uia_only=True)
+
+    def _finalize_success(self) -> bool:
+        if self.deferred_reply and self.chat_window:
+            try:
+                self.chat_window.add_final_answer(self.deferred_reply)
+                self.deferred_reply = None
+            except Exception as e:
+                self.log(f"Error displaying final answer: {e}")
+        self.log("Task marked as complete by AI.")
+        return True
 
     def run_task(self, user_command: str) -> bool:
         """
@@ -127,6 +216,7 @@ class AgentOrchestrator:
         self.task_history = []
         self.step_count = 0
         self.deferred_reply = None
+        self.current_blind_snapshot = None
         self._check_stop()
 
         if self.chat_window:
@@ -177,6 +267,7 @@ class AgentOrchestrator:
                 needs_vision = False
             else:
                 if needs_vision:
+                    self.current_blind_snapshot = None
                     elements, ref_sheet = self.capture_screen()
                     screenshot_path = Config.SCREENSHOT_PATH
                     
@@ -213,12 +304,14 @@ class AgentOrchestrator:
                         callback=ai_status_callback
                     )
                 else:
+                    blind_snapshot = self._capture_blind_snapshot()
                     from agent.brain import plan_task_blind
                     action_data = plan_task_blind(
                         user_command,
                         history=self.task_history,
                         current_workspace=self.active_workspace,
                         agent_desktop_available=(self.desktop_manager is not None and self.desktop_manager.is_created),
+                        ui_snapshot=blind_snapshot,
                         callback=ai_status_callback
                     )
 
@@ -240,17 +333,25 @@ class AgentOrchestrator:
                         action = refined_action
 
             if self.loop_detector and action.get("action_type") != "wait":
-                current_hash = self.screen_capture.last_hash if needs_vision else "blind"
+                current_hash = (
+                    self.screen_capture.last_hash
+                    if needs_vision
+                    else ui_automation.snapshot_signature(self.current_blind_snapshot)
+                )
                 if self.loop_detector.track_action(action, current_hash):
                     self.log("LOOP WARNING: Repeating pattern detected!")
                     
                     if self.clarification_manager:
+                        loop_info = self.loop_detector.get_loop_info() or {
+                            "count": 0,
+                            "pattern": "repeated_action",
+                        }
                         suggestions = self.clarification_manager.generate_loop_suggestions(
-                            action, user_command, {"count": self.loop_detector.counter, "pattern": "repeated_action"}
+                            action, user_command, loop_info
                         )
                         
                         user_help = self.clarification_manager.handle_loop_clarification(
-                            {"count": self.loop_detector.counter, "pattern": "repeated_action"},
+                            loop_info,
                             user_command,
                             suggestions
                         )
@@ -272,15 +373,19 @@ class AgentOrchestrator:
                 target = params.get("workspace")
                 if target:
                     self._set_workspace(target, reason=action.get("reasoning"))
-                    needs_vision = True 
+                    self.current_blind_snapshot = None
+                    needs_vision = action.get("needs_vision", needs_vision)
                     
                     self.task_history.append({
                         "step": self.step_count,
                         "action_type": action.get("action_type"),
                         "params": action.get("params"),
                         "reasoning": action.get("reasoning"),
-                        "success": True
+                        "success": True,
+                        "result_message": f"Switched workspace to {target}",
                     })
+                    if model_part:
+                        self.task_history.append(model_part)
                     continue
             
             if self.step_count == 1:
@@ -292,15 +397,31 @@ class AgentOrchestrator:
                 sequence = action.get("action_sequence", [])
                 self.log(f"Executing sequence of {len(sequence)} actions...")
                 success = True
+                sequence_results = []
                 for i, sub_action in enumerate(sequence):
                     self._check_stop()
                     self.log(f"Sequence Step {i+1}/{len(sequence)}: {sub_action.get('action_type')}")
-                    if not self.execute_action(sub_action, elements):
+                    sub_result = self.execute_action(sub_action, elements)
+                    sequence_results.append(sub_result)
+                    if not needs_vision:
+                        self._append_blind_observation(sub_action, sub_result)
+                    if not sub_result.get("success"):
                         success = False
+                        self.log(f"Sequence failure: {sub_result.get('message')}")
                         self.log(f"Sequence failed at step {i+1}")
                         break
+                action_result = {
+                    "success": success,
+                    "message": "Sequence completed" if success else "Sequence failed",
+                    "payload": {"sequence_results": sequence_results},
+                }
             else:
-                success = self.execute_action(action, elements)
+                action_result = self.execute_action(action, elements)
+                success = bool(action_result.get("success"))
+                if not success:
+                    self.log(f"Action failed: {action_result.get('message')}")
+                if not needs_vision:
+                    self._append_blind_observation(action, action_result)
             
             self.task_history.append({
                 "step": self.step_count,
@@ -308,18 +429,49 @@ class AgentOrchestrator:
                 "params": action.get("params"),
                 "reasoning": action.get("reasoning"),
                 "success": success,
-                "sequence": action.get("action_sequence") if action.get("action_type") == "sequence" else None
+                "sequence": action.get("action_sequence") if action.get("action_type") == "sequence" else None,
+                "result_message": action_result.get("message"),
+                "result_payload": action_result.get("payload"),
             })
             if model_part:
                 self.task_history.append(model_part)
 
             if action.get("task_complete"):
                 if not needs_vision and not action.get("skip_verification"):
-                    self.log("Task marked complete in blind mode. Requesting vision for final verification.")
-                    needs_vision = True
+                    self.log("Task marked complete in blind mode. Running blind verification.")
+                    blind_snapshot = self._capture_blind_snapshot()
+                    blind_verification = verify_task_blind(
+                        user_command=user_command,
+                        expected_result=str(action.get("expected_result") or ""),
+                        ui_snapshot=blind_snapshot,
+                        task_history=self.task_history,
+                        current_workspace=self.active_workspace,
+                    )
+                    if blind_verification and blind_verification.get("is_complete"):
+                        self.log(
+                            "Blind verification confirmed completion: "
+                            f"{blind_verification.get('reason', '')}"
+                        )
+                        return self._finalize_success()
+
+                    if blind_verification:
+                        reason = blind_verification.get("reason", "Blind verification could not confirm completion")
+                        self.log(f"Blind verification blocked completion: {reason}")
+                        hint = blind_verification.get("next_action_hint")
+                        observation = f"BLIND VERIFIER: {reason}"
+                        if hint:
+                            observation += f" Next action hint: {hint}"
+                        self._append_history_message(observation, blind_only=True, uia_only=True)
+                        needs_vision = bool(blind_verification.get("needs_vision", True))
+                    else:
+                        self.log("Blind verification failed; requesting vision verification.")
+                        needs_vision = True
+
+                    if needs_vision:
+                        self.current_blind_snapshot = None
                     continue
                 
-                if not action.get("skip_verification") and not self.verifying_completion:
+                if needs_vision and not action.get("skip_verification") and not self.verifying_completion:
                     self.log("Intercepting completion for MANDATORY visual verification.")
                     self.verifying_completion = True
                     needs_vision = True
@@ -329,17 +481,11 @@ class AgentOrchestrator:
                     })
                     continue
 
-                if self.deferred_reply and self.chat_window:
-                    try:
-                        self.chat_window.add_final_answer(self.deferred_reply)
-                        self.deferred_reply = None
-                    except Exception as e:
-                        self.log(f"Error displaying final answer: {e}")
-
-                self.log("Task marked as complete by AI.")
-                return True
+                return self._finalize_success()
 
             needs_vision = action.get("needs_vision", True)
+            if needs_vision:
+                self.current_blind_snapshot = None
             
             if action.get("action_type") == "magnify":
                 self.is_magnified = True

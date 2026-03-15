@@ -34,11 +34,13 @@ This is useful for operations teams, power users, accessibility workflows, QA/te
 
 ### Hybrid Planning + Execution
 - **Blind-first planning**: every task starts with a blind step to choose `user` vs `agent` workspace before vision.
+- **UIA-powered blind mode**: after workspace selection, regular blind turns can inspect UI Automation state and act through the existing keyboard, mouse, skills, and app indexer.
 - **Turbo sequences**: Gemini can batch stable sub-actions into one sequence (`action_sequence`) for faster execution.
 - **Deferred final replies**: completion responses are buffered until verification passes.
 
 ### Vision Stack
 - **Lazy vision pipeline**: local OCR + CV first (EasyOCR/OpenCV), Robotics-ER fallback for sparse/ambiguous UI context.
+- **Strict modality boundary**: vision uses screenshot/OCR/robotics context only; UI Automation data is reserved for regular blind mode.
 - **Incremental screenshots**: screen hash tracking avoids unnecessary recapture/reanalysis when state is unchanged.
 - **Reference sheet generation**: cropped element context is assembled for stronger multimodal reasoning.
 
@@ -52,12 +54,14 @@ This is useful for operations teams, power users, accessibility workflows, QA/te
 
 ### Workspace Isolation
 - **Agent Desktop**: dedicated hidden desktop with custom minimal shell.
+- **Dual-workspace UIA observation**: blind mode can inspect both the live `user` desktop and the isolated `agent` desktop.
 - **Sidecar preview**: real-time capture preview when working in agent workspace.
 - **Process tracking**: spawned processes on agent desktop are tracked and cleaned up on shutdown.
 
 ### Skills + OS Integration
 - **Skills**: `media`, `browser`, `system`, `timer`.
 - **Smart app indexing**: Start Menu + running processes + registry + modern apps for robust `open_app`.
+- **UI Automation targeting**: blind mode can target stable `ui_element_id` controls and read UIA-exposed text before escalating to vision.
 - **Global hotkeys**: work even when overlay is click-through/unfocused.
 - **Voice input**: microphone STT with live level visualization.
 
@@ -77,6 +81,7 @@ Transport layers:
 
 - **Desktop app**: Python, PySide6
 - **Automation/control**: pyautogui, keyboard, ctypes/Win32 APIs
+- **Blind UI state**: Windows UI Automation (`uiautomation`)
 - **Vision**: EasyOCR, OpenCV, PIL, Gemini Robotics-ER
 - **AI SDK**: google-genai
 - **Backend (optional)**: FastAPI, MongoDB (auth/users), Redis (rate limit), JWT
@@ -123,6 +128,10 @@ AGENT_MODE=auto
 
 # Vision mode: ocr | robo
 VISION_MODE=ocr
+
+# Blind-mode UIA knobs live in src/config.py
+# ENABLE_UIA_BLIND_MODE=True
+# UIA_MAX_ELEMENTS=120
 
 # backend override (already set in the codebase)
 BACKEND_URL=your_backend_url
@@ -212,11 +221,12 @@ Expected message shape:
 ## System Capabilities
 
 - Gemini 3 planning and execution: the agent plans with typed JSON outputs, then executes concrete actions (`click`, `type_text`, `press_key`, `key_combo`, `open_app`, `call_skill`, `sequence`).
+- Blind mode routing: step 1 stays workspace-only, while later blind turns can use UI Automation snapshots, `read_ui_text`, and `ui_element_id` targets before requesting vision.
 - OCR mode (`VISION_MODE=ocr`): runs local EasyOCR + OpenCV to detect on-screen text and icon candidates with low latency.
 - ROBO mode (`VISION_MODE=robo`): uses Gemini Robotics-ER for semantic UI understanding and robust element localization in harder/ambiguous screens.
-- Lazy vision routing: starts with local OCR/CV, then escalates to ROBO when context is sparse or uncertain; screenshot hash checks avoid redundant analysis.
+- Lazy vision routing: starts with blind tools/UIA when they are sufficient, then uses OCR/CV and finally ROBO only when the task cannot be completed safely without vision; screenshot hash checks avoid redundant analysis.
 - Workspace-aware automation: starts with blind-first workspace selection, then runs tasks on `user` or isolated `agent` desktop depending on context.
-- Reliability and safety: includes UAC secure desktop handling, loop detection/recovery, clarification prompts, and final visual verification before completion.
+- Reliability and safety: includes UAC secure desktop handling, loop detection/recovery, clarification prompts, blind-first completion verification, and final visual verification when UIA cannot prove completion.
 - User control model: supports `GUIDANCE`, `SAFE`, and `AUTO` modes for different autonomy/safety preferences.
 - Demo readiness: includes architecture diagrams, explicit Gemini 3 integration points, global hotkeys, gateway payload format, and end-to-end task examples.
 
