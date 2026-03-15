@@ -250,6 +250,14 @@ class PlannedAction(BaseModel):
     )
 
 
+class CompletionReply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(
+        description="User-facing completion reply summarizing what was completed."
+    )
+
+
 def pil_to_dict(img: Image.Image) -> Dict[str, str]:
     img_byte_arr = io.BytesIO()
     img.save(img_byte_arr, format="PNG")
@@ -490,6 +498,102 @@ def _finalize_planned_response(
             "source": source,
             "error": str(exc),
         }
+
+
+def generate_completion_reply(
+    *,
+    user_command: str,
+    action: Optional[Dict[str, Any]] = None,
+    action_result: Optional[Dict[str, Any]] = None,
+    verification: Optional[Dict[str, Any]] = None,
+    task_history: Optional[List[Dict[str, Any]]] = None,
+    callback: Optional[Callable[[str], None]] = None,
+) -> str:
+    action = action if isinstance(action, dict) else {}
+    action_result = action_result if isinstance(action_result, dict) else {}
+    verification = verification if isinstance(verification, dict) else {}
+    safe_history = task_history if isinstance(task_history, list) else []
+
+    params = action.get("params") if isinstance(action.get("params"), dict) else {}
+    if str(action.get("action_type") or "").strip().lower() == "reply":
+        reply_text = str(params.get("text") or "").strip()
+        if reply_text:
+            return reply_text
+
+    expected_result = str(action.get("expected_result") or "").strip()
+    result_message = str(action_result.get("message") or "").strip()
+    verifier_reason = str(
+        verification.get("reason")
+        or verification.get("reasoning")
+        or ""
+    ).strip()
+
+    recent_steps: list[str] = []
+    for item in reversed(safe_history):
+        if not isinstance(item, dict) or "step" not in item:
+            continue
+        if not item.get("success"):
+            continue
+        step = item.get("step")
+        action_type = str(item.get("action_type") or "")
+        msg = str(item.get("result_message") or "")
+        recent_steps.append(f"Step {step}: {action_type} -> {msg}")
+        if len(recent_steps) >= 4:
+            break
+    recent_steps.reverse()
+    recent_steps_text = "\n".join(recent_steps) or "(no successful steps recorded)"
+
+    prompt = (
+        "You are Pixel Pilot. Write the final completion message to the user.\n"
+        "The task is already verified complete.\n"
+        "Rules:\n"
+        "1) Output must be user-facing and natural.\n"
+        "2) 1-2 short sentences.\n"
+        "3) Do NOT include internal details (blind/vision/verifier/model/element IDs).\n"
+        "4) Do NOT include planning or reasoning text.\n"
+        "5) Describe the concrete completed outcome.\n\n"
+        f"User command: {user_command}\n"
+        f"Planned expected_result: {expected_result or '(none)'}\n"
+        f"Latest action result message: {result_message or '(none)'}\n"
+        f"Verifier evidence: {verifier_reason or '(none)'}\n"
+        f"Recent successful steps:\n{recent_steps_text}\n"
+    )
+
+    models = [BASE_MODEL]
+    if BASE_MODEL != PRIMARY_MODEL:
+        models.append(PRIMARY_MODEL)
+
+    config = {
+        "response_mime_type": "application/json",
+        "response_json_schema": CompletionReply.model_json_schema(),
+    }
+
+    for model_name in models:
+        try:
+            if callback:
+                callback(f"Generating completion reply with model: {model_name}")
+            response = get_model(callback, model_name=model_name).generate_content(
+                contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                config=config,
+            )
+            parsed = CompletionReply.model_validate_json(str(response.get("text") or ""))
+            text = str(parsed.text or "").strip()
+            if text:
+                return text
+        except Exception as exc:
+            logger.warning(
+                "Completion reply generation failed with model %s: %s",
+                model_name,
+                exc,
+            )
+
+    if expected_result:
+        return expected_result
+    if result_message:
+        return result_message
+    if user_command:
+        return f"Completed: {user_command}"
+    return "Completed."
 
 
 def plan_task(

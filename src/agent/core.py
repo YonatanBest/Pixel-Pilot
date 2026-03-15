@@ -7,7 +7,7 @@ import time
 import threading
 from typing import Any, Dict, List, Optional
 from tools.app_indexer import AppIndexer
-from agent.brain import plan_task
+from agent.brain import plan_task, generate_completion_reply
 from agent.clarification import ClarificationManager
 from config import Config, OperationMode
 from tools.eye import LocalCVEye
@@ -201,6 +201,14 @@ class AgentOrchestrator:
             self._append_history_message(message, blind_only=True, uia_only=True)
 
     def _finalize_success(self) -> bool:
+        if not self.deferred_reply:
+            self.deferred_reply = generate_completion_reply(
+                user_command=str(self.current_task or ""),
+                action=None,
+                action_result=None,
+                verification=None,
+                task_history=self.task_history,
+            )
         if self.deferred_reply and self.chat_window:
             try:
                 self.chat_window.add_final_answer(self.deferred_reply)
@@ -209,6 +217,24 @@ class AgentOrchestrator:
                 self.log(f"Error displaying final answer: {e}")
         self.log("Task marked as complete by AI.")
         return True
+
+    def _prepare_completion_reply(
+        self,
+        *,
+        action: Dict[str, Any],
+        action_result: Dict[str, Any],
+        verification: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        action_type = str(action.get("action_type") or "").strip().lower()
+        if action_type == "reply" and self.deferred_reply:
+            return
+        self.deferred_reply = generate_completion_reply(
+            user_command=str(self.current_task or ""),
+            action=action,
+            action_result=action_result,
+            verification=verification,
+            task_history=self.task_history,
+        )
 
     def _log_reason(self, reason_code: str, message: str) -> None:
         clean_code = str(reason_code or "").strip() or "unknown"
@@ -578,6 +604,11 @@ class AgentOrchestrator:
 
             if task_complete_effective:
                 if skip_verification_effective:
+                    self._prepare_completion_reply(
+                        action=action,
+                        action_result=action_result,
+                        verification=None,
+                    )
                     return self._finalize_success()
 
                 expected_result = str(action.get("expected_result") or "")
@@ -592,6 +623,11 @@ class AgentOrchestrator:
                         self.log(
                             "Blind verification confirmed completion: "
                             f"{blind_verification.get('reason', '')}"
+                        )
+                        self._prepare_completion_reply(
+                            action=action,
+                            action_result=action_result,
+                            verification=blind_verification,
                         )
                         return self._finalize_success()
 
@@ -630,6 +666,11 @@ class AgentOrchestrator:
                     self.log(
                         "Visual verification confirmed completion: "
                         f"{visual_verification.get('reasoning', '')}"
+                    )
+                    self._prepare_completion_reply(
+                        action=action,
+                        action_result=action_result,
+                        verification=visual_verification,
                     )
                     return self._finalize_success()
 
