@@ -1,15 +1,30 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import logging
+import tempfile
 import time
 from collections import Counter, deque
+from pathlib import Path
 from typing import Any, Optional
+
+from PIL import Image
 
 from config import Config
 
 logger = logging.getLogger("pixelpilot.uia")
+
+try:
+    import psutil
+except Exception:
+    psutil = None
+
+try:
+    import pyautogui
+except Exception:
+    pyautogui = None
 
 try:
     import uiautomation as auto
@@ -18,6 +33,9 @@ try:
 except Exception as exc:
     auto = None
     UIA_IMPORT_ERROR = str(exc)
+
+_OCR_ENGINE: Any | None = None
+_OCR_IMPORT_ERROR: str = ""
 
 
 def _unavailable_snapshot(workspace: str, reason: str) -> dict[str, Any]:
@@ -30,6 +48,8 @@ def _unavailable_snapshot(workspace: str, reason: str) -> dict[str, Any]:
         "active_window_class": "",
         "elements_count": 0,
         "elements": [],
+        "windows_count": 0,
+        "windows": [],
     }
 
 
@@ -56,6 +76,19 @@ def snapshot_signature(snapshot: Optional[dict[str, Any]]) -> str:
             }
         )
 
+    compact_windows = []
+    for window in (snapshot.get("windows") or [])[:40]:
+        compact_windows.append(
+            {
+                "window_id": window.get("window_id", ""),
+                "title": window.get("title", ""),
+                "class_name": window.get("class_name", ""),
+                "process_name": window.get("process_name", ""),
+                "is_visible": bool(window.get("is_visible", False)),
+                "is_minimized": bool(window.get("is_minimized", False)),
+            }
+        )
+
     compact = {
         "workspace": snapshot.get("workspace", ""),
         "available": bool(snapshot.get("available", False)),
@@ -64,6 +97,7 @@ def snapshot_signature(snapshot: Optional[dict[str, Any]]) -> str:
         "active_window_class": snapshot.get("active_window_class", ""),
         "elements_count": int(snapshot.get("elements_count", 0) or 0),
         "elements": compact_elements,
+        "windows": compact_windows,
     }
     raw = json.dumps(compact, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return f"blind:{hashlib.sha1(raw.encode('utf-8')).hexdigest()}"
@@ -100,6 +134,19 @@ def _safe_rect_visible(control: Any) -> bool:
         return False
 
 
+def _window_id_from_handle(handle: int) -> str:
+    return f"win_{int(handle):x}"
+
+
+def _process_name_from_pid(pid: int) -> str:
+    if not pid or psutil is None:
+        return ""
+    try:
+        return str(psutil.Process(int(pid)).name() or "")
+    except Exception:
+        return ""
+
+
 def _collect_patterns(control: Any) -> list[str]:
     patterns: list[str] = []
     try:
@@ -109,7 +156,7 @@ def _collect_patterns(control: Any) -> list[str]:
     except Exception:
         pass
 
-    for name in ("GetTextPattern", "GetValuePattern", "SendKeys"):
+    for name in ("GetTextPattern", "GetValuePattern", "GetInvokePattern", "SendKeys"):
         if hasattr(control, name):
             patterns.append(name.replace("Get", "").replace("Pattern", ""))
     return patterns
@@ -143,6 +190,8 @@ def _score_candidate(
 
     if "DefaultAction" in patterns:
         score += 2.5
+    if "Invoke" in patterns:
+        score += 1.5
     if "Text" in patterns:
         score += 1.0
     if "Value" in patterns:
@@ -212,6 +261,96 @@ def _safe_foreground_control(max_attempts: int = 8, delay: float = 0.06) -> Any:
         raise RuntimeError("Unable to resolve foreground/root control")
 
 
+def _window_matches_filters(
+    window: dict[str, Any],
+    *,
+    title_contains: str,
+    process_name: str,
+    visible_only: bool,
+) -> bool:
+    if visible_only and not bool(window.get("is_visible", False)):
+        return False
+
+    title_filter = (title_contains or "").strip().lower()
+    if title_filter and title_filter not in str(window.get("title", "")).lower():
+        return False
+
+    process_filter = (process_name or "").strip().lower()
+    if process_filter:
+        process = str(window.get("process_name", "")).lower()
+        if process_filter != process and process_filter not in process:
+            return False
+
+    return True
+
+
+def _scan_windows(
+    *,
+    max_windows: int,
+    title_contains: str = "",
+    process_name: str = "",
+    visible_only: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    root = auto.GetRootControl()
+    if root is None:
+        return [], {}
+
+    windows: list[dict[str, Any]] = []
+    control_index: dict[str, Any] = {}
+
+    for control in root.GetChildren() or []:
+        handle = int(_safe_attr(control, "NativeWindowHandle", default=0) or 0)
+        if handle <= 0:
+            continue
+
+        rect = _rect_to_dict(_safe_attr(control, "BoundingRectangle", default=None)) or {}
+        width = int(rect.get("right", 0)) - int(rect.get("left", 0))
+        height = int(rect.get("bottom", 0)) - int(rect.get("top", 0))
+        is_visible = width > 1 and height > 1
+        is_offscreen = bool(_safe_attr(control, "IsOffscreen", default=False))
+        is_minimized = bool(not is_visible and is_offscreen)
+        pid = int(_safe_attr(control, "ProcessId", default=0) or 0)
+        process = _process_name_from_pid(pid)
+
+        window = {
+            "window_id": _window_id_from_handle(handle),
+            "handle": handle,
+            "title": str(_safe_attr(control, "Name", default="") or ""),
+            "class_name": str(_safe_attr(control, "ClassName", default="") or ""),
+            "process_name": process,
+            "process_id": pid,
+            "is_visible": bool(is_visible),
+            "is_minimized": bool(is_minimized),
+            "rect": rect,
+        }
+        if not _window_matches_filters(
+            window,
+            title_contains=title_contains,
+            process_name=process_name,
+            visible_only=visible_only,
+        ):
+            continue
+
+        windows.append(window)
+        control_index[window["window_id"]] = control
+
+    windows.sort(
+        key=lambda item: (
+            not bool(item.get("is_visible", False)),
+            not bool(item.get("title", "")),
+            str(item.get("title", "")).lower(),
+        )
+    )
+    windows = windows[: max(1, int(max_windows or 1))]
+    allowed_ids = {w["window_id"] for w in windows}
+    control_index = {
+        window_id: control
+        for window_id, control in control_index.items()
+        if window_id in allowed_ids
+    }
+    return windows, control_index
+
+
 def _annotate_candidates(
     candidates: list[tuple[float, dict[str, Any], Any]],
     *,
@@ -219,6 +358,7 @@ def _annotate_candidates(
     title: str,
     class_name: str,
     max_nodes: int,
+    windows: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     base_keys = [_base_element_key(node) for _, node, _ in candidates]
     counts = Counter(base_keys)
@@ -238,6 +378,7 @@ def _annotate_candidates(
         control_index[ui_element_id] = control
 
     snapshot_nodes = nodes[:max_nodes]
+    snapshot_windows = list(windows or [])
     snapshot = {
         "schema_version": 1,
         "workspace": workspace,
@@ -247,6 +388,8 @@ def _annotate_candidates(
         "active_window_class": class_name,
         "elements_count": len(snapshot_nodes),
         "elements": snapshot_nodes,
+        "windows_count": len(snapshot_windows),
+        "windows": snapshot_windows,
     }
     return snapshot, control_index
 
@@ -309,12 +452,17 @@ def _scan_snapshot(
             continue
 
     candidates.sort(key=lambda item: item[0], reverse=True)
+    windows, _ = _scan_windows(
+        max_windows=Config.UIA_MAX_WINDOWS,
+        visible_only=False,
+    )
     return _annotate_candidates(
         candidates,
         workspace=workspace,
         title=title,
         class_name=class_name,
         max_nodes=max_nodes,
+        windows=windows,
     )
 
 
@@ -349,6 +497,43 @@ def _apply_focus(control: Any) -> tuple[bool, str]:
         return True, "SetActive"
     except Exception:
         return False, ""
+
+
+def _apply_window_show_state(handle: int, *, restore: bool, maximize: bool) -> None:
+    if handle <= 0:
+        return
+    try:
+        user32 = ctypes.windll.user32
+    except Exception:
+        return
+
+    try:
+        if restore:
+            # SW_RESTORE
+            user32.ShowWindow(handle, 9)
+        if maximize:
+            # SW_MAXIMIZE
+            user32.ShowWindow(handle, 3)
+        user32.SetForegroundWindow(handle)
+    except Exception:
+        pass
+
+
+def _resolve_element_control(
+    workspace: str,
+    target_id: str,
+) -> tuple[Optional[Any], Optional[dict[str, int]]]:
+    _, control_index = _scan_snapshot(
+        workspace=workspace,
+        max_nodes=max(Config.UIA_MAX_ELEMENTS * 3, 360),
+        preferred_terms=None,
+        scan_limit=max(Config.UIA_MAX_ELEMENTS * 30, 1200),
+    )
+    control = control_index.get(target_id)
+    if control is None:
+        return None, None
+    rect = _rect_to_dict(_safe_attr(control, "BoundingRectangle", default=None))
+    return control, rect
 
 
 def _extract_text_from_control(control: Any) -> tuple[str, str]:
@@ -595,6 +780,232 @@ def focus_element(
         }
 
 
+def activate_element(
+    workspace: str,
+    desktop_manager: Any,
+    ui_element_id: str,
+) -> dict[str, Any]:
+    workspace = (workspace or "user").strip().lower()
+    target_id = str(ui_element_id or "").strip()
+    if not target_id:
+        return {"success": False, "reason": "missing_id", "workspace": workspace}
+    if not Config.ENABLE_UIA_BLIND_MODE:
+        return {"success": False, "reason": "disabled", "workspace": workspace}
+    if auto is None:
+        return {
+            "success": False,
+            "reason": "import_error",
+            "workspace": workspace,
+            "error": UIA_IMPORT_ERROR,
+        }
+
+    def _activate() -> dict[str, Any]:
+        control, rect = _resolve_element_control(workspace, target_id)
+        if control is None:
+            return {
+                "success": False,
+                "reason": "not_found",
+                "workspace": workspace,
+                "ui_element_id": target_id,
+            }
+
+        _apply_focus(control)
+        try:
+            invoke = control.GetInvokePattern()
+            if invoke:
+                invoke.Invoke()
+                return {
+                    "success": True,
+                    "reason": "ok",
+                    "workspace": workspace,
+                    "ui_element_id": target_id,
+                    "method": "InvokePattern.Invoke",
+                    "rect": rect,
+                }
+        except Exception:
+            pass
+
+        try:
+            legacy = control.GetLegacyIAccessiblePattern()
+            if legacy:
+                legacy.DoDefaultAction()
+                return {
+                    "success": True,
+                    "reason": "ok",
+                    "workspace": workspace,
+                    "ui_element_id": target_id,
+                    "method": "LegacyIAccessible.DoDefaultAction",
+                    "rect": rect,
+                }
+        except Exception:
+            pass
+
+        for key in ("{Enter}", " "):
+            try:
+                control.SendKeys(key, waitTime=0.01)
+                return {
+                    "success": True,
+                    "reason": "ok",
+                    "workspace": workspace,
+                    "ui_element_id": target_id,
+                    "method": f"SendKeys({key})",
+                    "rect": rect,
+                }
+            except Exception:
+                continue
+
+        return {
+            "success": False,
+            "reason": "activation_failed",
+            "workspace": workspace,
+            "ui_element_id": target_id,
+            "rect": rect,
+        }
+
+    try:
+        return _run_in_workspace(workspace, desktop_manager, _activate)
+    except Exception as exc:
+        return {
+            "success": False,
+            "reason": "runtime_error",
+            "workspace": workspace,
+            "ui_element_id": target_id,
+            "error": str(exc),
+        }
+
+
+def list_windows(
+    workspace: str,
+    desktop_manager: Any,
+    *,
+    title_contains: str = "",
+    process_name: str = "",
+    visible_only: bool = False,
+    max_windows: Optional[int] = None,
+) -> dict[str, Any]:
+    workspace = (workspace or "user").strip().lower()
+    if not Config.ENABLE_UIA_BLIND_MODE:
+        return {
+            "available": False,
+            "status": "error",
+            "reason": "disabled",
+            "workspace": workspace,
+            "windows": [],
+        }
+    if auto is None:
+        return {
+            "available": False,
+            "status": "error",
+            "reason": "import_error",
+            "workspace": workspace,
+            "error": UIA_IMPORT_ERROR,
+            "windows": [],
+        }
+
+    safe_max_windows = max(1, int(max_windows or Config.UIA_MAX_WINDOWS))
+
+    def _list() -> dict[str, Any]:
+        windows, _ = _scan_windows(
+            max_windows=safe_max_windows,
+            title_contains=title_contains or "",
+            process_name=process_name or "",
+            visible_only=bool(visible_only),
+        )
+        return {
+            "available": True,
+            "status": "ok",
+            "reason": "ok",
+            "workspace": workspace,
+            "windows_count": len(windows),
+            "windows": windows,
+        }
+
+    try:
+        return _run_in_workspace(workspace, desktop_manager, _list)
+    except Exception as exc:
+        return {
+            "available": False,
+            "status": "error",
+            "reason": "runtime_error",
+            "workspace": workspace,
+            "error": str(exc),
+            "windows": [],
+        }
+
+
+def focus_window(
+    workspace: str,
+    desktop_manager: Any,
+    *,
+    window_id: Optional[str] = None,
+    title_contains: str = "",
+    process_name: str = "",
+    restore: bool = True,
+    maximize: bool = False,
+) -> dict[str, Any]:
+    workspace = (workspace or "user").strip().lower()
+    target_window_id = str(window_id or "").strip()
+    if not Config.ENABLE_UIA_BLIND_MODE:
+        return {"success": False, "reason": "disabled", "workspace": workspace}
+    if auto is None:
+        return {
+            "success": False,
+            "reason": "import_error",
+            "workspace": workspace,
+            "error": UIA_IMPORT_ERROR,
+        }
+
+    def _focus_window() -> dict[str, Any]:
+        windows, window_controls = _scan_windows(
+            max_windows=max(Config.UIA_MAX_WINDOWS * 2, 50),
+            title_contains=title_contains or "",
+            process_name=process_name or "",
+            visible_only=False,
+        )
+        target: Optional[dict[str, Any]] = None
+        control: Any = None
+        if target_window_id:
+            target = next(
+                (window for window in windows if window.get("window_id") == target_window_id),
+                None,
+            )
+            control = window_controls.get(target_window_id)
+        elif windows:
+            target = windows[0]
+            control = window_controls.get(str(target.get("window_id") or ""))
+
+        if target is None or control is None:
+            return {
+                "success": False,
+                "reason": "not_found",
+                "workspace": workspace,
+                "window_id": target_window_id or None,
+            }
+
+        handle = int(target.get("handle") or 0)
+        _apply_window_show_state(handle, restore=bool(restore), maximize=bool(maximize))
+        success, method = _apply_focus(control)
+        return {
+            "success": bool(success),
+            "reason": "ok" if success else "focus_failed",
+            "workspace": workspace,
+            "window": target,
+            "window_id": target.get("window_id"),
+            "method": method,
+        }
+
+    try:
+        return _run_in_workspace(workspace, desktop_manager, _focus_window)
+    except Exception as exc:
+        return {
+            "success": False,
+            "reason": "runtime_error",
+            "workspace": workspace,
+            "window_id": target_window_id or None,
+            "error": str(exc),
+        }
+
+
 def get_snapshot(
     workspace: str,
     desktop_manager: Any,
@@ -633,21 +1044,159 @@ def get_element_rect(
         return None
 
     def _resolve() -> dict[str, int] | None:
-        _, control_index = _scan_snapshot(
-            workspace=workspace,
-            max_nodes=max(Config.UIA_MAX_ELEMENTS * 3, 360),
-            preferred_terms=None,
-            scan_limit=max(Config.UIA_MAX_ELEMENTS * 30, 1200),
-        )
-        control = control_index.get(target_id)
+        control, rect = _resolve_element_control(workspace, target_id)
         if control is None:
             return None
-        return _rect_to_dict(_safe_attr(control, "BoundingRectangle", default=None))
+        return rect
 
     try:
         return _run_in_workspace(workspace, desktop_manager, _resolve)
     except Exception:
         return None
+
+
+def _clean_text(text: str) -> str:
+    lines = [line.rstrip() for line in (text or "").splitlines()]
+    cleaned: list[str] = []
+    blank_run = 0
+    for line in lines:
+        if line:
+            blank_run = 0
+            cleaned.append(line)
+            continue
+        blank_run += 1
+        if blank_run <= 1:
+            cleaned.append("")
+    return "\n".join(cleaned).strip()
+
+
+def _noise_ratio(text: str) -> float:
+    if not text:
+        return 1.0
+
+    noise_count = 0
+    for ch in text:
+        code = ord(ch)
+        if ch in {"\ufffc", "\u200c", "\u034f"}:
+            noise_count += 1
+            continue
+        if code < 32 and ch not in {"\n", "\t", "\r"}:
+            noise_count += 1
+    return noise_count / max(1, len(text))
+
+
+def _uia_needs_ocr_fallback(
+    *,
+    text: str,
+    source: str,
+    min_chars: int,
+    max_noise_ratio: float,
+) -> tuple[bool, str, float]:
+    ratio = _noise_ratio(text)
+    if not text:
+        return True, "no_uia_text", ratio
+    if len(text) < min_chars:
+        return True, "uia_text_too_short", ratio
+    if ratio > max_noise_ratio:
+        return True, "uia_text_too_noisy", ratio
+    if source in {"Control.Name", "LegacyIAccessible.Name"} and len(text) < (min_chars * 2):
+        return True, "uia_source_low_confidence", ratio
+    return False, "uia_text_good", ratio
+
+
+def _import_ocr_engine() -> tuple[Any | None, str]:
+    global _OCR_ENGINE
+    global _OCR_IMPORT_ERROR
+
+    if _OCR_ENGINE is not None:
+        return _OCR_ENGINE, ""
+    if _OCR_IMPORT_ERROR:
+        return None, _OCR_IMPORT_ERROR
+
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _OCR_ENGINE = RapidOCR()
+        return _OCR_ENGINE, ""
+    except Exception as exc:
+        _OCR_IMPORT_ERROR = str(exc)
+        return None, _OCR_IMPORT_ERROR
+
+
+def _capture_workspace_image(workspace: str, desktop_manager: Any) -> Optional[Image.Image]:
+    if workspace == "agent" and desktop_manager and getattr(desktop_manager, "is_created", False):
+        try:
+            img = desktop_manager.capture_desktop()
+            if img is not None:
+                return img.convert("RGB")
+        except Exception:
+            pass
+
+    if pyautogui is None:
+        return None
+    try:
+        return pyautogui.screenshot().convert("RGB")
+    except Exception:
+        return None
+
+
+def _extract_text_with_ocr(
+    *,
+    workspace: str,
+    desktop_manager: Any,
+    max_chars: int,
+) -> tuple[str, dict[str, Any]]:
+    engine, import_error = _import_ocr_engine()
+    if engine is None:
+        return "", {
+            "available": False,
+            "provider": "RapidOCR",
+            "error": f"rapidocr_onnxruntime not available: {import_error}",
+        }
+
+    image = _capture_workspace_image(workspace, desktop_manager)
+    if image is None:
+        return "", {
+            "available": True,
+            "provider": "RapidOCR",
+            "error": "screen_capture_failed",
+        }
+
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            image.save(tmp, format="PNG")
+            temp_path = Path(tmp.name)
+
+        ocr_result, _ = engine(str(temp_path))
+        lines: list[str] = []
+        for item in ocr_result or []:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                maybe_text = item[1]
+                if isinstance(maybe_text, str) and maybe_text.strip():
+                    lines.append(maybe_text.strip())
+
+        text = _clean_text("\n".join(lines))
+        if len(text) > max_chars:
+            text = text[:max_chars]
+
+        return text, {
+            "available": True,
+            "provider": "RapidOCR",
+            "line_count": len(lines),
+        }
+    except Exception as exc:
+        return "", {
+            "available": True,
+            "provider": "RapidOCR",
+            "error": f"OCR execution failed: {exc}",
+        }
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def read_text(
@@ -656,10 +1205,23 @@ def read_text(
     target: str,
     ui_element_id: Optional[str] = None,
     max_chars: int = 4000,
+    *,
+    use_ocr_fallback: bool = False,
+    force_ocr: bool = False,
+    ocr_min_chars: Optional[int] = None,
+    ocr_max_noise_ratio: Optional[float] = None,
 ) -> dict[str, Any]:
     workspace = (workspace or "user").strip().lower()
     safe_target = (target or "auto").strip().lower()
     safe_max_chars = max(1, int(max_chars or Config.UIA_TEXT_MAX_CHARS))
+    safe_ocr_min_chars = max(
+        40,
+        min(int(ocr_min_chars or Config.UIA_TEXT_OCR_MIN_CHARS), 2000),
+    )
+    safe_ocr_max_noise_ratio = max(
+        0.01,
+        min(float(ocr_max_noise_ratio or Config.UIA_TEXT_OCR_MAX_NOISE_RATIO), 0.95),
+    )
 
     if not Config.ENABLE_UIA_BLIND_MODE:
         return {
@@ -717,6 +1279,64 @@ def read_text(
                 best_source = source
                 best_seed = seed_source
 
+        needs_fallback, fallback_reason, ui_noise_ratio = _uia_needs_ocr_fallback(
+            text=best_text,
+            source=best_source,
+            min_chars=safe_ocr_min_chars,
+            max_noise_ratio=safe_ocr_max_noise_ratio,
+        )
+        should_use_ocr = bool(force_ocr or (use_ocr_fallback and needs_fallback))
+        if should_use_ocr:
+            ocr_text, ocr_meta = _extract_text_with_ocr(
+                workspace=workspace,
+                desktop_manager=desktop_manager,
+                max_chars=safe_max_chars,
+            )
+            if ocr_text:
+                return {
+                    "available": True,
+                    "status": "ok",
+                    "reason": "ok",
+                    "text": ocr_text,
+                    "source": "OCR.RapidOCR",
+                    "workspace": workspace,
+                    "target": safe_target,
+                    "ui_element_id": ui_element_id,
+                    "seed_source": "screen",
+                    "active_window_title": snapshot.get("active_window_title", ""),
+                    "active_window_class": snapshot.get("active_window_class", ""),
+                    "fallback": {
+                        "applied": True,
+                        "reason": "forced" if force_ocr else fallback_reason,
+                        "uia_source": best_source,
+                        "uia_text_length": len(best_text),
+                        "uia_noise_ratio": round(ui_noise_ratio, 4),
+                        "ocr": ocr_meta,
+                    },
+                }
+            if not best_text:
+                return {
+                    "available": True,
+                    "status": "error",
+                    "reason": "no_text",
+                    "text": "",
+                    "source": "",
+                    "workspace": workspace,
+                    "target": safe_target,
+                    "ui_element_id": ui_element_id,
+                    "seed_source": best_seed,
+                    "active_window_title": snapshot.get("active_window_title", ""),
+                    "active_window_class": snapshot.get("active_window_class", ""),
+                    "fallback": {
+                        "applied": True,
+                        "reason": "forced" if force_ocr else fallback_reason,
+                        "uia_source": best_source,
+                        "uia_text_length": 0,
+                        "uia_noise_ratio": round(ui_noise_ratio, 4),
+                        "ocr": ocr_meta,
+                    },
+                }
+
         status = "ok" if best_text else "error"
         reason = "ok" if best_text else "no_text"
         return {
@@ -731,6 +1351,11 @@ def read_text(
             "seed_source": best_seed,
             "active_window_title": snapshot.get("active_window_title", ""),
             "active_window_class": snapshot.get("active_window_class", ""),
+            "fallback": {
+                "applied": bool(should_use_ocr),
+                "reason": "forced" if force_ocr else fallback_reason,
+                "uia_noise_ratio": round(ui_noise_ratio, 4),
+            },
         }
 
     try:

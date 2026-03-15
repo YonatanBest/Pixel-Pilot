@@ -12,6 +12,15 @@ from agent.prompts import VERIFY_TASK_BLIND_PROMPT, VERIFY_TASK_COMPLETION_PROMP
 logger = logging.getLogger("pixelpilot.verify")
 
 
+def _verification_models() -> List[str]:
+    base = (Config.GEMINI_BASE_MODEL or Config.GEMINI_MODEL).strip()
+    primary = (Config.GEMINI_MODEL or "").strip()
+    models: List[str] = [base] if base else []
+    if primary and primary not in models:
+        models.append(primary)
+    return models or [Config.GEMINI_MODEL]
+
+
 def verify_task_completion(
     user_command: str,
     expected_result: str,
@@ -90,23 +99,37 @@ def verify_task_completion(
 
     contents = [{"role": "user", "parts": parts}]
 
-    try:
-        client = get_client()
-        response_data = client.generate_content(
-            model=Config.GEMINI_MODEL,
-            contents=contents,
-            config={
-                "response_mime_type": "application/json",
-                "response_json_schema": VerificationResult.model_json_schema(),
-            },
-        )
+    client = get_client()
+    last_error: Optional[Exception] = None
+    for idx, model_name in enumerate(_verification_models()):
+        try:
+            response_data = client.generate_content(
+                model=model_name,
+                contents=contents,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": VerificationResult.model_json_schema(),
+                },
+            )
 
-        result_obj = VerificationResult.model_validate_json(response_data["text"])
-        return result_obj.model_dump()
+            result_obj = VerificationResult.model_validate_json(response_data["text"])
+            payload = result_obj.model_dump()
+            payload["verifier_model"] = model_name
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if idx == 0:
+                logger.warning(
+                    "Primary verifier model '%s' failed; trying fallback model. Error: %s",
+                    model_name,
+                    exc,
+                )
+            else:
+                logger.error("Verification failed on model '%s': %s", model_name, exc)
 
-    except Exception as e:
-        logger.error(f"Error during verification: {e}")
-        return None
+    if last_error is not None:
+        logger.error("Error during verification: %s", last_error)
+    return None
 
 
 class BlindVerificationResult(BaseModel):
@@ -144,6 +167,18 @@ def _format_uia_state_section(ui_snapshot: Optional[Dict[str, Any]]) -> str:
             f"elements={ui_snapshot.get('elements_count', 0)}"
         )
     ]
+    windows = ui_snapshot.get("windows") or []
+    if windows:
+        lines.append(f"- top_windows={len(windows)}")
+        for window in windows[:15]:
+            lines.append(
+                "  - "
+                f"{window.get('window_id', '')}: "
+                f"title='{_truncate_text(window.get('title', ''), 60)}' "
+                f"class='{_truncate_text(window.get('class_name', ''), 40)}' "
+                f"process='{_truncate_text(window.get('process_name', ''), 30)}' "
+                f"visible={window.get('is_visible')} minimized={window.get('is_minimized')}"
+            )
     for element in (ui_snapshot.get("elements") or [])[:50]:
         rect = element.get("rect") or {}
         lines.append(
@@ -184,20 +219,35 @@ def verify_task_blind(
 
     contents = [{"role": "user", "parts": [{"text": prompt_text}]}]
 
-    try:
-        client = get_client()
-        response_data = client.generate_content(
-            model=Config.GEMINI_MODEL,
-            contents=contents,
-            config={
-                "response_mime_type": "application/json",
-                "response_json_schema": BlindVerificationResult.model_json_schema(),
-            },
-        )
+    client = get_client()
+    last_error: Optional[Exception] = None
+    for idx, model_name in enumerate(_verification_models()):
+        try:
+            response_data = client.generate_content(
+                model=model_name,
+                contents=contents,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": BlindVerificationResult.model_json_schema(),
+                },
+            )
 
-        result = BlindVerificationResult.model_validate_json(response_data["text"])
-        return result.model_dump(exclude_none=True)
-    except Exception as exc:
-        logger.error("Error during blind verification: %s", exc)
-        logger.debug("Blind verification snapshot: %s", json.dumps(ui_snapshot or {}))
-        return None
+            result = BlindVerificationResult.model_validate_json(response_data["text"])
+            payload = result.model_dump(exclude_none=True)
+            payload["verifier_model"] = model_name
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if idx == 0:
+                logger.warning(
+                    "Blind verifier model '%s' failed; trying fallback model. Error: %s",
+                    model_name,
+                    exc,
+                )
+            else:
+                logger.error("Blind verification failed on model '%s': %s", model_name, exc)
+
+    if last_error is not None:
+        logger.error("Error during blind verification: %s", last_error)
+    logger.debug("Blind verification snapshot: %s", json.dumps(ui_snapshot or {}))
+    return None

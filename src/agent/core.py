@@ -7,7 +7,7 @@ import time
 import threading
 from typing import Any, Dict, List, Optional
 from tools.app_indexer import AppIndexer
-from agent.brain import create_reference_sheet, get_model, plan_task, get_client
+from agent.brain import plan_task
 from agent.clarification import ClarificationManager
 from config import Config, OperationMode
 from tools.eye import LocalCVEye
@@ -16,9 +16,10 @@ from tools.loop import LoopDetector
 from skills import MediaSkill, BrowserSkill, SystemSkill, TimerSkill
 from tools.mouse import click_at
 from agent.actions import ActionExecutor
+from agent.action_guard import ActionGuard
 from agent.capture import ScreenCapture
 from agent.guidance import GuidanceSession
-from agent.verify import verify_task_blind
+from agent.verify import verify_task_blind, verify_task_completion
 import tools.ui_automation as ui_automation
 
 class StopRequested(Exception):
@@ -99,6 +100,7 @@ class AgentOrchestrator:
         self.active_workspace = Config.DEFAULT_WORKSPACE
         
         self.action_executor = ActionExecutor(self)
+        self.action_guard = ActionGuard()
         self.screen_capture = ScreenCapture(self)
 
         self.log(f"AI Agent initialized in {self.mode.value.upper()} mode")
@@ -208,6 +210,86 @@ class AgentOrchestrator:
         self.log("Task marked as complete by AI.")
         return True
 
+    def _log_reason(self, reason_code: str, message: str) -> None:
+        clean_code = str(reason_code or "").strip() or "unknown"
+        clean_message = str(message or "").strip() or "no details"
+        self.log(f"[{clean_code}] {clean_message}")
+
+    @staticmethod
+    def _skip_verification_allowed(action_type: str) -> bool:
+        return str(action_type or "").strip().lower() in {"reply", "wait"}
+
+    def _verify_blind_completion(
+        self,
+        *,
+        user_command: str,
+        expected_result: str,
+    ) -> tuple[Optional[Dict[str, Any]], bool]:
+        retries = max(0, int(Config.BLIND_VERIFICATION_RETRIES))
+        retry_delay = max(0.0, float(Config.BLIND_VERIFICATION_RETRY_DELAY))
+
+        for attempt in range(retries + 1):
+            blind_snapshot = self._capture_blind_snapshot()
+            blind_verification = verify_task_blind(
+                user_command=user_command,
+                expected_result=expected_result,
+                ui_snapshot=blind_snapshot,
+                task_history=self.task_history,
+                current_workspace=self.active_workspace,
+            )
+            if blind_verification and blind_verification.get("is_complete"):
+                return blind_verification, False
+
+            if blind_verification and not bool(blind_verification.get("needs_vision", True)):
+                return blind_verification, False
+
+            if attempt >= retries:
+                return blind_verification, True
+
+            self._log_reason(
+                "uia_insufficient",
+                f"Blind verification mismatch; refreshing UIA snapshot ({attempt + 1}/{retries})",
+            )
+            try:
+                ui_automation.ensure_foreground_focus(
+                    self.active_workspace,
+                    self.desktop_manager if self.active_workspace == "agent" else None,
+                )
+            except Exception:
+                pass
+            if retry_delay > 0:
+                time.sleep(retry_delay)
+
+        return None, True
+
+    def _verify_visual_completion(
+        self,
+        *,
+        user_command: str,
+        expected_result: str,
+    ) -> Optional[Dict[str, Any]]:
+        elements, ref_sheet = self.capture_screen()
+        screenshot_path = Config.SCREENSHOT_PATH
+
+        if not elements and (not screenshot_path or not os.path.exists(screenshot_path)):
+            elements, ref_sheet = self.capture_screen(force_robotics=True)
+            screenshot_path = Config.SCREENSHOT_PATH
+
+        if not screenshot_path or not os.path.exists(screenshot_path):
+            return None
+        if not os.path.exists(Config.DEBUG_PATH):
+            return None
+
+        return verify_task_completion(
+            user_command=user_command,
+            expected_result=expected_result,
+            screen_elements=elements or [],
+            original_path=screenshot_path,
+            debug_path=Config.DEBUG_PATH,
+            reference_sheet=ref_sheet,
+            task_history=self.task_history,
+        )
+
     def run_task(self, user_command: str) -> bool:
         """
         Main control loop for executing a user task.
@@ -228,7 +310,6 @@ class AgentOrchestrator:
         needs_vision = True
         self.is_magnified = False
         self.zoom_center = None
-        self.verifying_completion = False
 
         self.log(f"Starting task: {user_command}")
 
@@ -332,6 +413,41 @@ class AgentOrchestrator:
                         self.log("Action refined based on user feedback.")
                         action = refined_action
 
+            guard_result = self.action_guard.guard(
+                action,
+                callback=ai_status_callback,
+                source="vision_runtime" if needs_vision else "blind_runtime",
+            )
+            if not guard_result.valid:
+                self._log_reason(
+                    guard_result.reason_code or "invalid_action",
+                    guard_result.error or guard_result.message,
+                )
+                if not needs_vision:
+                    self._log_reason(
+                        "escalated_to_vision",
+                        "Invalid blind action blocked; escalating to vision planner.",
+                    )
+                    needs_vision = True
+                    self.current_blind_snapshot = None
+                self.task_history.append({
+                    "step": self.step_count,
+                    "action_type": action.get("action_type"),
+                    "params": action.get("params"),
+                    "reasoning": action.get("reasoning"),
+                    "success": False,
+                    "result_message": guard_result.message,
+                    "guard_error": guard_result.error,
+                    "reason_code": guard_result.reason_code,
+                })
+                if model_part:
+                    self.task_history.append(model_part)
+                continue
+
+            if guard_result.repaired:
+                self.log("Runtime ActionGuard repaired planner output before execution.")
+            action = guard_result.action or action
+
             if self.loop_detector and action.get("action_type") != "wait":
                 current_hash = (
                     self.screen_capture.last_hash
@@ -422,6 +538,25 @@ class AgentOrchestrator:
                     self.log(f"Action failed: {action_result.get('message')}")
                 if not needs_vision:
                     self._append_blind_observation(action, action_result)
+
+            requested_task_complete = bool(action.get("task_complete"))
+            if requested_task_complete and not success:
+                self._log_reason(
+                    "verification_rejected",
+                    "Ignoring task_complete because the latest action failed.",
+                )
+            task_complete_effective = bool(requested_task_complete and success)
+
+            requested_skip_verification = bool(action.get("skip_verification"))
+            action_type = str(action.get("action_type") or "").strip().lower()
+            skip_verification_effective = bool(
+                requested_skip_verification and self._skip_verification_allowed(action_type)
+            )
+            if requested_skip_verification and not skip_verification_effective:
+                self._log_reason(
+                    "verification_rejected",
+                    f"Ignoring skip_verification for action type '{action_type or 'unknown'}'.",
+                )
             
             self.task_history.append({
                 "step": self.step_count,
@@ -432,20 +567,26 @@ class AgentOrchestrator:
                 "sequence": action.get("action_sequence") if action.get("action_type") == "sequence" else None,
                 "result_message": action_result.get("message"),
                 "result_payload": action_result.get("payload"),
+                "task_complete_requested": requested_task_complete,
+                "task_complete_effective": task_complete_effective,
+                "skip_verification_requested": requested_skip_verification,
+                "skip_verification_effective": skip_verification_effective,
+                "guard_repaired": bool(guard_result.repaired),
             })
             if model_part:
                 self.task_history.append(model_part)
 
-            if action.get("task_complete"):
-                if not needs_vision and not action.get("skip_verification"):
+            if task_complete_effective:
+                if skip_verification_effective:
+                    return self._finalize_success()
+
+                expected_result = str(action.get("expected_result") or "")
+
+                if not needs_vision:
                     self.log("Task marked complete in blind mode. Running blind verification.")
-                    blind_snapshot = self._capture_blind_snapshot()
-                    blind_verification = verify_task_blind(
+                    blind_verification, escalate_to_vision = self._verify_blind_completion(
                         user_command=user_command,
-                        expected_result=str(action.get("expected_result") or ""),
-                        ui_snapshot=blind_snapshot,
-                        task_history=self.task_history,
-                        current_workspace=self.active_workspace,
+                        expected_result=expected_result,
                     )
                     if blind_verification and blind_verification.get("is_complete"):
                         self.log(
@@ -454,34 +595,60 @@ class AgentOrchestrator:
                         )
                         return self._finalize_success()
 
+                    reason = "Blind verification could not confirm completion"
+                    hint = ""
                     if blind_verification:
-                        reason = blind_verification.get("reason", "Blind verification could not confirm completion")
-                        self.log(f"Blind verification blocked completion: {reason}")
-                        hint = blind_verification.get("next_action_hint")
-                        observation = f"BLIND VERIFIER: {reason}"
-                        if hint:
-                            observation += f" Next action hint: {hint}"
-                        self._append_history_message(observation, blind_only=True, uia_only=True)
-                        needs_vision = bool(blind_verification.get("needs_vision", True))
-                    else:
-                        self.log("Blind verification failed; requesting vision verification.")
+                        reason = str(
+                            blind_verification.get("reason")
+                            or "Blind verification could not confirm completion"
+                        )
+                        hint = str(blind_verification.get("next_action_hint") or "").strip()
+
+                    self._log_reason("verification_rejected", f"Blind verification blocked completion: {reason}")
+                    observation = f"BLIND VERIFIER: {reason}"
+                    if hint:
+                        observation += f" Next action hint: {hint}"
+                    self._append_history_message(observation, blind_only=True, uia_only=True)
+
+                    if escalate_to_vision:
+                        self._log_reason(
+                            "escalated_to_vision",
+                            "UIA evidence remained insufficient after blind verification retries.",
+                        )
                         needs_vision = True
-
-                    if needs_vision:
                         self.current_blind_snapshot = None
-                    continue
-                
-                if needs_vision and not action.get("skip_verification") and not self.verifying_completion:
-                    self.log("Intercepting completion for MANDATORY visual verification.")
-                    self.verifying_completion = True
-                    needs_vision = True
-                    self.task_history.append({
-                        "role": "user", 
-                        "parts": [{"text": "You have indicated the task is complete. Please VERIFY this visually. Is the goal FULLY achieved? If yes, set task_complete=true again. If no, continue working."}]
-                    })
+                    else:
+                        needs_vision = bool(blind_verification and blind_verification.get("needs_vision", False))
                     continue
 
-                return self._finalize_success()
+                self.log("Task marked complete in vision mode. Running visual verification.")
+                visual_verification = self._verify_visual_completion(
+                    user_command=user_command,
+                    expected_result=expected_result,
+                )
+                if visual_verification and visual_verification.get("is_complete"):
+                    self.log(
+                        "Visual verification confirmed completion: "
+                        f"{visual_verification.get('reasoning', '')}"
+                    )
+                    return self._finalize_success()
+
+                reason = "Visual verification unavailable"
+                next_action = ""
+                if visual_verification:
+                    reason = str(
+                        visual_verification.get("reasoning")
+                        or "Visual verification could not confirm completion"
+                    )
+                    next_action = str(visual_verification.get("next_action") or "").strip()
+                self._log_reason("verification_rejected", f"Visual verification blocked completion: {reason}")
+                observation = f"VISUAL VERIFIER: {reason}"
+                if next_action:
+                    observation += f" Next action hint: {next_action}"
+                self._append_history_message(observation)
+                needs_vision = True
+                self.current_blind_snapshot = None
+                continue
 
             needs_vision = action.get("needs_vision", True)
             if needs_vision:

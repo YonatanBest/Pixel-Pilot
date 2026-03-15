@@ -2,9 +2,11 @@ import io
 import json
 import base64
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+
 from PIL import Image, ImageDraw, ImageFont
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
 from config import Config
 from backend_client import get_client, RateLimitError
 from agent.prompts import (
@@ -14,8 +16,45 @@ from agent.prompts import (
 )
 
 client = get_client()
-model = Config.GEMINI_MODEL
+PRIMARY_MODEL = Config.GEMINI_MODEL
+BASE_MODEL = Config.GEMINI_BASE_MODEL or PRIMARY_MODEL
 logger = logging.getLogger("pixelpilot.brain")
+
+# Strict action contract shared by planner and runtime guard.
+ActionType = Literal[
+    "click",
+    "type_text",
+    "press_key",
+    "key_combo",
+    "wait",
+    "search_web",
+    "open_app",
+    "magnify",
+    "reply",
+    "call_skill",
+    "switch_workspace",
+    "read_ui_text",
+    "list_windows",
+    "focus_window",
+    "sequence",
+]
+
+SubActionType = Literal[
+    "click",
+    "type_text",
+    "press_key",
+    "key_combo",
+    "wait",
+    "search_web",
+    "open_app",
+    "magnify",
+    "reply",
+    "call_skill",
+    "switch_workspace",
+    "read_ui_text",
+    "list_windows",
+    "focus_window",
+]
 
 
 class ModelWrapper:
@@ -32,8 +71,16 @@ class ModelWrapper:
         )
 
 
-def get_model(callback: Optional[Callable[[str], None]] = None):
-    return ModelWrapper(model, callback=callback)
+def get_model(
+    callback: Optional[Callable[[str], None]] = None,
+    *,
+    model_name: Optional[str] = None,
+):
+    return ModelWrapper(model_name or PRIMARY_MODEL, callback=callback)
+
+
+def get_base_model(callback: Optional[Callable[[str], None]] = None):
+    return ModelWrapper(BASE_MODEL, callback=callback)
 
 
 def create_reference_sheet(crops):
@@ -66,6 +113,8 @@ def create_reference_sheet(crops):
 
 
 class ActionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     element_id: int = Field(
         description="The ID number of the element to interact with from labels."
     )
@@ -73,6 +122,8 @@ class ActionResponse(BaseModel):
 
 
 class SkillArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: Optional[str] = Field(None, description="For search/media")
     url: Optional[str] = Field(None, description="For browser open")
     browser: Optional[str] = Field(None, description="Preferred browser (e.g., 'chrome', 'edge')")
@@ -81,13 +132,16 @@ class SkillArgs(BaseModel):
 
 
 class ActionParams(BaseModel):
-    element_id: Optional[int] = Field(None, description="ID of UI element")
+    model_config = ConfigDict(extra="forbid")
+
+    element_id: Optional[int] = Field(None, description="ID of visual UI element")
     target_id: Optional[int] = Field(None, description="Alias for element_id")
     ui_element_id: Optional[str] = Field(
         None,
         description="Stable UI Automation element id for blind-mode interaction",
     )
     text: Optional[str] = Field(None, description="Text to type or reply")
+    query: Optional[str] = Field(None, description="Query text for search actions")
     key: Optional[str] = Field(None, description="Key to press")
     keys: Optional[List[str]] = Field(None, description="Keys for combo")
     seconds: Optional[float] = Field(None, description="Time to wait")
@@ -105,13 +159,56 @@ class ActionParams(BaseModel):
         None,
         description="Maximum characters for read_ui_text responses",
     )
+    use_ocr_fallback: Optional[bool] = Field(
+        None,
+        description="Allow OCR fallback when UIA text is weak or unavailable",
+    )
+    force_ocr: Optional[bool] = Field(
+        None,
+        description="Force OCR instead of UIA text extraction",
+    )
+    ocr_min_chars: Optional[int] = Field(
+        None,
+        description="Minimum useful UIA chars before OCR fallback is considered",
+    )
+    ocr_max_noise_ratio: Optional[float] = Field(
+        None,
+        description="Maximum UIA control/noise ratio before OCR fallback",
+    )
+    window_id: Optional[str] = Field(None, description="Target window id for focus_window")
+    title_contains: Optional[str] = Field(
+        None,
+        description="Window title substring for list_windows/focus_window filtering",
+    )
+    process_name: Optional[str] = Field(
+        None,
+        description="Process name filter for list_windows/focus_window",
+    )
+    visible_only: Optional[bool] = Field(
+        None,
+        description="Whether to return only visible windows",
+    )
+    max_windows: Optional[int] = Field(
+        None,
+        description="Maximum windows to return for list_windows",
+    )
+    restore: Optional[bool] = Field(
+        None,
+        description="Restore target window before focusing",
+    )
+    maximize: Optional[bool] = Field(
+        None,
+        description="Maximize target window after focusing",
+    )
 
 
 class SubAction(BaseModel):
-    action_type: str = Field(
+    model_config = ConfigDict(extra="forbid")
+
+    action_type: SubActionType = Field(
         description=(
             "The type of action: click, type_text, press_key, key_combo, open_app, wait, "
-            "magnify, switch_workspace, read_ui_text"
+            "magnify, switch_workspace, read_ui_text, list_windows, focus_window"
         )
     )
     params: ActionParams = Field(description="Parameters for the action.")
@@ -119,7 +216,9 @@ class SubAction(BaseModel):
 
 
 class PlannedAction(BaseModel):
-    action_type: str = Field(
+    model_config = ConfigDict(extra="forbid")
+
+    action_type: ActionType = Field(
         description="The primary action type (or 'sequence' if using action_sequence)"
     )
     params: ActionParams = Field(description="Parameters for the action")
@@ -230,6 +329,19 @@ def _format_uia_state_section(ui_snapshot: Optional[Dict[str, Any]]) -> str:
         f"- visible_elements={ui_snapshot.get('elements_count', 0)}",
     ]
 
+    windows = ui_snapshot.get("windows") or []
+    if windows:
+        lines.append(f"- top_windows={len(windows)}")
+        for window in windows[:15]:
+            lines.append(
+                "  - "
+                f"{window.get('window_id', '')}: "
+                f"title='{_truncate_text(window.get('title', ''), 60)}' "
+                f"class='{_truncate_text(window.get('class_name', ''), 40)}' "
+                f"process='{_truncate_text(window.get('process_name', ''), 30)}' "
+                f"visible={window.get('is_visible')} minimized={window.get('is_minimized')}"
+            )
+
     for element in (ui_snapshot.get("elements") or [])[:50]:
         rect = element.get("rect") or {}
         lines.append(
@@ -244,6 +356,141 @@ def _format_uia_state_section(ui_snapshot: Optional[Dict[str, Any]]) -> str:
             f"{rect.get('right', '?')},{rect.get('bottom', '?')})"
         )
     return "\n".join(lines) + "\n"
+
+
+def _parse_action_payload(text_payload: str) -> Dict[str, Any]:
+    return PlannedAction.model_validate_json(text_payload).model_dump(exclude_none=True)
+
+
+def _repair_action_payload(
+    original_payload: str,
+    validation_error: str,
+    *,
+    callback: Optional[Callable[[str], None]] = None,
+) -> Optional[Dict[str, Any]]:
+    prompt = (
+        "Repair this action-planning JSON so it strictly matches the provided schema.\n"
+        "Rules:\n"
+        "1) Keep intent unchanged.\n"
+        "2) action_type MUST be one of the schema enum values exactly.\n"
+        "3) Remove unsupported fields.\n"
+        "4) Do not invent new actions.\n"
+        "Return only valid JSON matching schema.\n\n"
+        f"Validation error:\n{validation_error}\n\n"
+        f"Original payload:\n{original_payload}"
+    )
+
+    config = {
+        "response_mime_type": "application/json",
+        "response_json_schema": PlannedAction.model_json_schema(),
+    }
+
+    # Prefer base model for schema repair and fail over to primary model.
+    candidates = [BASE_MODEL]
+    if BASE_MODEL != PRIMARY_MODEL:
+        candidates.append(PRIMARY_MODEL)
+
+    for model_name in candidates:
+        try:
+            if callback:
+                callback(f"Repairing invalid action with model: {model_name}")
+            response_data = get_model(callback, model_name=model_name).generate_content(
+                contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                config=config,
+            )
+            repaired_text = str(response_data.get("text") or "").strip()
+            if not repaired_text:
+                continue
+            return _parse_action_payload(repaired_text)
+        except Exception as exc:
+            logger.warning(
+                "Action repair attempt failed with model %s: %s",
+                model_name,
+                exc,
+            )
+            continue
+
+    return None
+
+
+def validate_or_repair_action(
+    action_payload: Dict[str, Any],
+    *,
+    callback: Optional[Callable[[str], None]] = None,
+    allow_repair: bool = True,
+    source: str = "runtime",
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    try:
+        validated = PlannedAction.model_validate(action_payload).model_dump(exclude_none=True)
+        return validated, {
+            "status": "valid",
+            "repaired": False,
+            "source": source,
+            "error": "",
+        }
+    except Exception as exc:
+        error_text = str(exc)
+        if not allow_repair:
+            return None, {
+                "status": "invalid",
+                "repaired": False,
+                "source": source,
+                "error": error_text,
+            }
+
+        try:
+            payload_text = json.dumps(action_payload, ensure_ascii=True)
+        except Exception:
+            payload_text = str(action_payload)
+        repaired = _repair_action_payload(
+            payload_text,
+            error_text,
+            callback=callback,
+        )
+        if repaired is None:
+            return None, {
+                "status": "invalid",
+                "repaired": False,
+                "source": source,
+                "error": error_text,
+            }
+        return repaired, {
+            "status": "valid",
+            "repaired": True,
+            "source": source,
+            "error": error_text,
+        }
+
+
+def _finalize_planned_response(
+    response_text: str,
+    *,
+    callback: Optional[Callable[[str], None]] = None,
+    source: str = "planner",
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    try:
+        action_dict = _parse_action_payload(response_text)
+        return action_dict, {
+            "status": "valid",
+            "repaired": False,
+            "source": source,
+            "error": "",
+        }
+    except Exception as exc:
+        repaired = _repair_action_payload(
+            response_text,
+            str(exc),
+            callback=callback,
+        )
+        if repaired is None:
+            raise
+        return repaired, {
+            "status": "valid",
+            "repaired": True,
+            "source": source,
+            "error": str(exc),
+        }
+
 
 def plan_task(
     user_command: str,
@@ -335,10 +582,18 @@ def plan_task(
         )
 
         response_text = response_data["text"]
-        action_dict = PlannedAction.model_validate_json(response_text).model_dump(
-            exclude_none=True
+        action_dict, guard_meta = _finalize_planned_response(
+            response_text,
+            callback=callback,
+            source="vision_planner",
         )
-        model_part = {"role": "model", "parts": [{"text": response_text}]}
+        if guard_meta.get("repaired"):
+            logger.warning("Planner response was repaired before execution (vision path)")
+        model_part = {
+            "role": "model",
+            "parts": [{"text": response_text}],
+            "guard": guard_meta,
+        }
         return action_dict, model_part
     except RateLimitError:
         raise
@@ -367,7 +622,6 @@ def plan_task_blind(
     if task_context:
         context_section = f"\nTASK CONTEXT (previous steps):\n{task_context}\n"
 
-    turbo_status = "ENABLED" if Config.TURBO_MODE else "DISABLED"
     workspace_section = f"CURRENT WORKSPACE: {current_workspace}"
     agent_desktop_section = (
         "AGENT DESKTOP AVAILABLE: YES" if agent_desktop_available else "AGENT DESKTOP AVAILABLE: NO"
@@ -398,13 +652,18 @@ def plan_task_blind(
             },
         )
         response_text = response_data["text"]
-        action_dict = PlannedAction.model_validate_json(response_text).model_dump(
-            exclude_none=True
+        action_dict, guard_meta = _finalize_planned_response(
+            response_text,
+            callback=callback,
+            source="blind_planner",
         )
+        if guard_meta.get("repaired"):
+            logger.warning("Planner response was repaired before execution (blind path)")
         model_part = {
             "role": "model",
             "parts": [{"text": response_text}],
             "blind_only": True,
+            "guard": guard_meta,
         }
         return action_dict, model_part
     except RateLimitError:
@@ -454,17 +713,22 @@ def plan_task_blind_first_step(
             },
         )
         response_text = response_data["text"]
-        action_dict = PlannedAction.model_validate_json(response_text).model_dump(
-            exclude_none=True
+        action_dict, guard_meta = _finalize_planned_response(
+            response_text,
+            callback=callback,
+            source="blind_first_step_planner",
         )
+        if guard_meta.get("repaired"):
+            logger.warning("Planner response was repaired before execution (first-step path)")
         model_part = {
             "role": "model",
             "parts": [{"text": response_text}],
             "blind_only": True,
+            "guard": guard_meta,
         }
         return action_dict, model_part
     except RateLimitError:
         raise
     except Exception as e:
-        print(f"Error in plan_task_blind_first_step: {e}")
+        logger.error(f"Error in plan_task_blind_first_step: {e}")
         return None

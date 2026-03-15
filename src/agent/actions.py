@@ -110,6 +110,10 @@ class ActionExecutor:
                 return self._execute_switch_workspace(params)
             elif action_type == "read_ui_text":
                 return self._execute_read_ui_text(params)
+            elif action_type == "list_windows":
+                return self._execute_list_windows(params)
+            elif action_type == "focus_window":
+                return self._execute_focus_window(params)
             elif action_type == "sequence":
                 return self._result(True, "Sequence delegated to orchestrator")
             else:
@@ -183,6 +187,24 @@ class ActionExecutor:
         ui_element_id = str(params.get("ui_element_id") or "").strip()
         if ui_element_id:
             focus_result = self._focus_uia_element(ui_element_id)
+            activation_result = ui_automation.activate_element(
+                self.agent.active_workspace,
+                self.desktop_manager,
+                ui_element_id,
+            )
+            if activation_result.get("success"):
+                time.sleep(Config.WAIT_AFTER_CLICK)
+                return self._result(
+                    True,
+                    f"Activated UIA element {ui_element_id}",
+                    payload={
+                        "ui_element_id": ui_element_id,
+                        "rect": activation_result.get("rect"),
+                        "focus_method": focus_result.get("method"),
+                        "activation_method": activation_result.get("method"),
+                    },
+                )
+
             rect = self._resolve_uia_rect(ui_element_id)
             if not rect:
                 return self._result(False, f"UIA element not found: {ui_element_id}")
@@ -212,7 +234,9 @@ class ActionExecutor:
                 },
             )
 
-        element_id = params.get("element_id") or params.get("target_id")
+        element_id = params.get("element_id")
+        if element_id is None:
+            element_id = params.get("target_id")
         if element_id is None:
             logger.error(f"Missing element_id in click params. Received: {params}")
             return self._result(False, "Missing element_id/ui_element_id in click params")
@@ -366,10 +390,38 @@ class ActionExecutor:
 
         self.log(f"Opening app: {app_name}")
         dm = self.desktop_manager
+        existing_focus = ui_automation.focus_window(
+            self.agent.active_workspace,
+            dm,
+            title_contains=app_name,
+            process_name=app_name,
+            restore=True,
+            maximize=False,
+        )
+        if existing_focus.get("success"):
+            return self._result(
+                True,
+                f"Focused existing app window: {app_name}",
+                payload={"window": existing_focus.get("window")},
+            )
 
         if self.agent.app_indexer.open_app(app_name, desktop_manager=dm):
             time.sleep(Config.APP_LAUNCH_WAIT)
-            return self._result(True, f"Opened app via indexer: {app_name}")
+            launched_focus = ui_automation.focus_window(
+                self.agent.active_workspace,
+                dm,
+                title_contains=app_name,
+                process_name=app_name,
+                restore=True,
+                maximize=False,
+            )
+            if launched_focus.get("success"):
+                return self._result(
+                    True,
+                    f"Opened app and verified window: {app_name}",
+                    payload={"window": launched_focus.get("window")},
+                )
+            return self._result(False, f"App launched but window not verified: {app_name}")
 
         start_ok = self.agent.keyboard.press_key("win", desktop_manager=dm)
         time.sleep(1.0)
@@ -378,8 +430,25 @@ class ActionExecutor:
         enter_ok = self.agent.keyboard.press_key("enter", desktop_manager=dm)
 
         time.sleep(Config.APP_LAUNCH_WAIT)
-        success = bool(start_ok and type_ok and enter_ok)
-        return self._result(success, f"Opened app via Start menu: {app_name}" if success else f"Failed to open app: {app_name}")
+        shortcut_ok = bool(start_ok and type_ok and enter_ok)
+        if not shortcut_ok:
+            return self._result(False, f"Failed to open app: {app_name}")
+
+        launched_focus = ui_automation.focus_window(
+            self.agent.active_workspace,
+            dm,
+            title_contains=app_name,
+            process_name=app_name,
+            restore=True,
+            maximize=False,
+        )
+        if launched_focus.get("success"):
+            return self._result(
+                True,
+                f"Opened app and verified window: {app_name}",
+                payload={"window": launched_focus.get("window")},
+            )
+        return self._result(False, f"App launch attempted but window not verified: {app_name}")
 
     def _execute_magnify(self, params: Dict, elements: List[Dict]) -> Dict[str, Any]:
         element_id = params.get("element_id")
@@ -416,6 +485,47 @@ class ActionExecutor:
         self.agent._set_workspace(workspace, reason="Agent requested switch")
         return self._result(True, f"Switched workspace to {workspace}", payload={"workspace": workspace})
 
+    def _execute_list_windows(self, params: Dict) -> Dict[str, Any]:
+        result = ui_automation.list_windows(
+            self.agent.active_workspace,
+            self.desktop_manager,
+            title_contains=str(params.get("title_contains") or ""),
+            process_name=str(params.get("process_name") or ""),
+            visible_only=bool(params.get("visible_only", False)),
+            max_windows=int(params.get("max_windows") or Config.UIA_MAX_WINDOWS),
+        )
+        if result.get("status") == "ok":
+            return self._result(
+                True,
+                f"Listed {result.get('windows_count', 0)} window(s)",
+                payload=result,
+            )
+        return self._result(
+            False,
+            f"Failed to list windows: {result.get('reason', 'unknown')}",
+            payload=result,
+        )
+
+    def _execute_focus_window(self, params: Dict) -> Dict[str, Any]:
+        result = ui_automation.focus_window(
+            self.agent.active_workspace,
+            self.desktop_manager,
+            window_id=str(params.get("window_id") or "").strip() or None,
+            title_contains=str(params.get("title_contains") or ""),
+            process_name=str(params.get("process_name") or ""),
+            restore=bool(params.get("restore", True)),
+            maximize=bool(params.get("maximize", False)),
+        )
+        if result.get("success"):
+            window = result.get("window") or {}
+            title = str(window.get("title") or result.get("window_id") or "target")
+            return self._result(True, f"Focused window: {title}", payload=result)
+        return self._result(
+            False,
+            f"Failed to focus window: {result.get('reason', 'unknown')}",
+            payload=result,
+        )
+
     def _execute_read_ui_text(self, params: Dict) -> Dict[str, Any]:
         result = ui_automation.read_text(
             self.agent.active_workspace,
@@ -423,6 +533,14 @@ class ActionExecutor:
             target=str(params.get("target") or "auto"),
             ui_element_id=str(params.get("ui_element_id") or "").strip() or None,
             max_chars=int(params.get("max_chars") or Config.UIA_TEXT_MAX_CHARS),
+            use_ocr_fallback=bool(
+                params.get("use_ocr_fallback", Config.UIA_TEXT_USE_OCR_FALLBACK_DEFAULT)
+            ),
+            force_ocr=bool(params.get("force_ocr", False)),
+            ocr_min_chars=int(params.get("ocr_min_chars") or Config.UIA_TEXT_OCR_MIN_CHARS),
+            ocr_max_noise_ratio=float(
+                params.get("ocr_max_noise_ratio") or Config.UIA_TEXT_OCR_MAX_NOISE_RATIO
+            ),
         )
 
         text = str(result.get("text") or "")

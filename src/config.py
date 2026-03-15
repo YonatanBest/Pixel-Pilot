@@ -18,6 +18,7 @@ logger = logging.getLogger("pixelpilot.config")
 class Config:
     BACKEND_URL = os.getenv("BACKEND_URL", "https://pixel-pilot-5jpy.onrender.com")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+    GEMINI_BASE_MODEL = os.getenv("GEMINI_BASE_MODEL", GEMINI_MODEL).strip() or GEMINI_MODEL
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     USE_DIRECT_API = bool(GEMINI_API_KEY)
 
@@ -91,7 +92,23 @@ class Config:
     APP_LAUNCH_WAIT = 3
     ENABLE_UIA_BLIND_MODE = True
     UIA_MAX_ELEMENTS = 120
+    UIA_MAX_WINDOWS = 40
     UIA_TEXT_MAX_CHARS = 4000
+    UIA_TEXT_OCR_MIN_CHARS = 160
+    UIA_TEXT_OCR_MAX_NOISE_RATIO = 0.18
+    UIA_TEXT_USE_OCR_FALLBACK_DEFAULT = False
+
+    try:
+        BLIND_VERIFICATION_RETRIES = max(0, int(os.getenv("BLIND_VERIFICATION_RETRIES", "2")))
+    except Exception:
+        BLIND_VERIFICATION_RETRIES = 2
+
+    try:
+        BLIND_VERIFICATION_RETRY_DELAY = max(
+            0.0, float(os.getenv("BLIND_VERIFICATION_RETRY_DELAY", "0.25"))
+        )
+    except Exception:
+        BLIND_VERIFICATION_RETRY_DELAY = 0.25
 
     SAVE_SCREENSHOTS = True
     VERBOSE_LOGGING = True

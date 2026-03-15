@@ -77,6 +77,15 @@ AVAILABLE ACTIONS:
 - reply: Just answer the user's question directly. Params: {{"text": "<string>"}}
 - call_skill: Execute a skill function. Params: {{"skill": "media", "method": "play", "args": {{"query": "..."}}}}
 - switch_workspace: Switch between desktops. Params: {{"workspace": "user"|"agent"}}
+- read_ui_text: Read text via UI Automation (or OCR fallback when configured). Params: {{"target": "auto"|"focused"|"window"|"element", "ui_element_id": "el_...", "max_chars": 4000, "use_ocr_fallback": false, "force_ocr": false, "ocr_min_chars": 160, "ocr_max_noise_ratio": 0.18}}
+- list_windows: List top windows from UI Automation. Params: {{"title_contains": "<string>", "process_name": "<string>", "visible_only": false}}
+- focus_window: Focus a specific window via UI Automation. Params: {{"window_id": "win_...", "title_contains": "<string>", "process_name": "<string>", "restore": true, "maximize": false}}
+
+STRICT ACTION CONTRACT:
+- `action_type` MUST be exactly one of:
+  `click`, `type_text`, `press_key`, `key_combo`, `wait`, `search_web`, `open_app`, `magnify`, `reply`, `call_skill`, `switch_workspace`, `read_ui_text`, `list_windows`, `focus_window`, `sequence`.
+- Never use namespaced/prefixed values such as `blindactiontype.open_app`, `firststepactiontype.open_app`, or custom actions like `search_spotify`.
+- Never output unsupported extra fields in `params`.
 
 TURBO MODE RULES:
 - If {turbo_status} == ENABLED, you SHOULD combine multiple stable steps into 'action_sequence'.
@@ -106,7 +115,7 @@ CRITICAL GUIDELINES:
 2. **ID Precision**: You MUST use the `element_id` from the [Annotated Screen] or the provided list. Do not hallucinate IDs.
 3. **Launch First**: If the user wants to open an app (e.g., "Open Notepad"), always use `open_app` first. Do not try to find the icon manually unless `open_app` failed previously. **NOTE**: If using `call_skill("browser", "open", ...)`, you do NOT need to call `open_app` for the browser.
 3. **Verification**: Set `task_complete` to true ONLY if you are sure the user's goal is fully achieved.
-4. **Efficiency**: For trivial actions (like 'reply', 'wait', or simple confirmations) where a screenshot verification is overkill, SET `skip_verification: true`.
+4. **Efficiency**: `skip_verification: true` is allowed ONLY for `reply` and `wait`.
 5. **Magnification**: If you cannot see an element clearly or the text is too small, use `magnify` on the approximate area.
 6. **Robotics Fallback**: If OCR is failing to find an icon, mention "requesting robotics fallback" in your reasoning.
 7. **Blind Mode Switching**: If you are entering a phase where you don't need to see the screen (e.g. typing a long text, waiting, or using skills/hotkeys), SET `needs_vision: false`.
@@ -159,13 +168,20 @@ AVAILABLE BLIND ACTIONS:
 - wait: Wait. Params: {{"seconds": 1}}
 - open_app: Open app via Run/Start. Params: {{"app_name": "notepad"}}
 - search_web: Google search. Params: {{"query": "..."}}
-- read_ui_text: Read UIA-exposed text from the current workspace. Params: {{"target": "auto"|"focused"|"window"|"element", "ui_element_id": "el_...", "max_chars": 4000}}
+- read_ui_text: Read UIA-exposed text from the current workspace. Params: {{"target": "auto"|"focused"|"window"|"element", "ui_element_id": "el_...", "max_chars": 4000, "use_ocr_fallback": false, "force_ocr": false, "ocr_min_chars": 160, "ocr_max_noise_ratio": 0.18}}
+- list_windows: List top windows from UI Automation. Params: {{"title_contains": "<string>", "process_name": "<string>", "visible_only": false}}
+- focus_window: Focus a specific window via UI Automation. Params: {{"window_id": "win_...", "title_contains": "<string>", "process_name": "<string>", "restore": true, "maximize": false}}
 - reply: Answer user. Params: {{"text": "..."}}
 - call_skill: Use a skill (Media, Browser, System, Timer). Params: {{"skill": "...", "method": "...", "args": {{...}}}}
 - switch_workspace: Switch between desktops. Params: {{"workspace": "user"|"agent"}}
 
 UNAVAILABLE ACTIONS (Requires Vision):
 - magnify
+
+STRICT ACTION CONTRACT:
+- `action_type` MUST be exactly one of:
+  `click`, `type_text`, `press_key`, `key_combo`, `wait`, `search_web`, `open_app`, `reply`, `call_skill`, `switch_workspace`, `read_ui_text`, `list_windows`, `focus_window`, `sequence`.
+- Never use namespaced/prefixed values such as `blindactiontype.open_app` or any unknown action names.
 
 RESPONSE RULES:
 - Default to blind when the requested action is fully supported by skills, shortcuts, app launch, `ui_element_id`, or `read_ui_text`.
@@ -177,6 +193,7 @@ RESPONSE RULES:
 - If the task is "What is on my screen?", set `needs_vision: true`.
 - If the user asks for text from the current app and the text is not already in UI AUTOMATION STATE, use `read_ui_text` before escalating.
 - When using `reply`, ALWAYS put the answer in `params.text` (not `message`).
+- `skip_verification: true` is allowed ONLY for `reply` and `wait`.
 - **ASK FOR HELP**: If you get stuck or need user input (e.g. "What is the password?"), set `clarification_needed: true` and provide a `clarification_question`.
 
 RESPONSE FORMAT:
@@ -219,6 +236,10 @@ AVAILABLE ACTIONS:
 - `switch_workspace`: Use this to set the correct context for Step 2. Params: {{"workspace": "user"|"agent"}}.
 - `open_app`: Launch an app immediately (e.g., "Notepad").
 - `call_skill`: Use a system skill (media, volume, browser API).
+
+STRICT ACTION CONTRACT:
+- `action_type` MUST be exactly one of `reply`, `switch_workspace`, `open_app`, `call_skill`.
+- Never output prefixed values such as `firststepactiontype.open_app`.
 
 RULES:
 - If the plan is to use vision on the next step, you MUST decide the workspace NOW.
