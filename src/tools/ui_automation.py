@@ -509,8 +509,13 @@ def _apply_window_show_state(handle: int, *, restore: bool, maximize: bool) -> N
 
     try:
         if restore:
-            # SW_RESTORE
-            user32.ShowWindow(handle, 9)
+            try:
+                is_minimized = bool(user32.IsIconic(handle))
+            except Exception:
+                is_minimized = False
+            if is_minimized:
+                # SW_RESTORE only for minimized windows; keep maximized state intact.
+                user32.ShowWindow(handle, 9)
         if maximize:
             # SW_MAXIMIZE
             user32.ShowWindow(handle, 3)

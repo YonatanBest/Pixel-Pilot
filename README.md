@@ -35,7 +35,7 @@ Detailed diagram: [src/logos/System-Architecture_Detailed.png](src/logos/System-
 
 ### Focus restore on passthrough transitions
 - When click-through is disabled, PixelPilot stores the last external foreground window handle.
-- When click-through is enabled again, it attempts to restore focus to that window (`ShowWindow(SW_RESTORE)` + `SetForegroundWindow`).
+- When click-through is enabled again, it restores only if that window is minimized, then brings it to foreground (`SetForegroundWindow`).
 - Invalid/missing handles are ignored safely.
 
 ## Key Features

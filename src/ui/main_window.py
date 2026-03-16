@@ -124,8 +124,13 @@ class MainWindow(QMainWindow):
         try:
             if not bool(user32.IsWindow(handle)):
                 return
-            # SW_RESTORE
-            user32.ShowWindow(handle, 9)
+            try:
+                is_minimized = bool(user32.IsIconic(handle))
+            except Exception:
+                is_minimized = False
+            if is_minimized:
+                # SW_RESTORE only when minimized; do not unmaximize normal/maximized windows.
+                user32.ShowWindow(handle, 9)
             user32.SetForegroundWindow(handle)
         except Exception:
             return
