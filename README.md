@@ -163,8 +163,15 @@ Notes:
 Startup behavior:
 - Direct mode (`GEMINI_API_KEY` present): no login dialog.
 - When Live is available, Live mode is enabled by default at startup.
-- Backend mode (no local key): login/register dialog appears.
+- Backend mode (no local key): login dialog appears.
 - Login dialog also lets user paste/store an API key.
+
+### Testing Credentials
+
+Use these credentials when testing the public backend:
+
+- Email: `test@example.com`
+- Password: `test12345`
 
 The app attempts admin relaunch at startup; if elevation is denied, it continues with limited capability.
 
@@ -197,7 +204,7 @@ BACKEND_URL=http://localhost:8000
 ```
 
 Backend endpoints:
-- `POST /auth/register`
+- `POST /auth/register` (currently disabled for public testing)
 - `POST /auth/login`
 - `GET /auth/me`
 - `POST /v1/generate` (JWT protected, Redis rate limited)
