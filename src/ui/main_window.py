@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 import ctypes
+=======
+>>>>>>> b029afe (refator: changed positions of agent view and details)
 from typing import Optional
 
 from PySide6.QtCore import QPoint, Qt
@@ -29,7 +32,10 @@ class MainWindow(QMainWindow):
         self.expanded = False
         self._background_hidden = False
         self.sidecar: Optional[SidecarPreview] = None
+<<<<<<< HEAD
         self._last_external_foreground_handle: Optional[int] = None
+=======
+>>>>>>> b029afe (refator: changed positions of agent view and details)
 
         self.chat_widget = ChatWidget()
         self.setCentralWidget(self.chat_widget)
@@ -71,6 +77,7 @@ class MainWindow(QMainWindow):
         else:
             self.sidecar.hide()
 
+<<<<<<< HEAD
     @staticmethod
     def _get_user32():
         try:
@@ -135,6 +142,8 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
+=======
+>>>>>>> b029afe (refator: changed positions of agent view and details)
     def set_click_through_enabled(self, enable: bool):
         enable = bool(enable)
         if not enable:
