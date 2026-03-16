@@ -39,6 +39,8 @@ class MainController(QObject):
         self._stop_requested = False
         self.live_session = None
         self.live_mode_enabled = False
+        self._live_action_passthrough_active = False
+        self._task_passthrough_active = False
         
         self.desktop_manager = None
 
@@ -50,6 +52,71 @@ class MainController(QObject):
         self.gui_adapter.guidance_next_requested.connect(self.handle_guidance_next)
         self.gui_adapter.guidance_input_requested.connect(self.handle_guidance_input)
         self.gui_adapter.workspace_changed.connect(self.handle_workspace_changed)
+
+    @staticmethod
+    def _normalize_workspace(workspace: str) -> str:
+        key = (workspace or "user").strip().lower() or "user"
+        if key not in {"user", "agent"}:
+            key = "user"
+        return key
+
+    def _resolve_current_workspace(self) -> str:
+        if not self.agent:
+            return "user"
+        return self._normalize_workspace(getattr(self.agent, "active_workspace", "user"))
+
+    def _resolve_current_mode(self) -> OperationMode:
+        mode = None
+        if self.agent:
+            mode = getattr(self.agent, "mode", None)
+        if mode is None:
+            mode = getattr(self.gui_adapter, "current_mode", None)
+        if isinstance(mode, OperationMode):
+            return mode
+        mode_value = getattr(mode, "value", mode)
+        return Config.get_mode(str(mode_value or Config.DEFAULT_MODE.value))
+
+    def _is_live_session_enabled(self) -> bool:
+        return bool(
+            self.live_mode_enabled
+            and self.live_session
+            and bool(getattr(self.live_session, "enabled", False))
+        )
+
+    def _apply_click_through_policy(self):
+        workspace = self._resolve_current_workspace()
+        mode = self._resolve_current_mode()
+        click_through = False
+
+        if workspace == "user":
+            if self._is_live_session_enabled():
+                click_through = bool(self._live_action_passthrough_active)
+            elif mode in {OperationMode.GUIDE, OperationMode.SAFE, OperationMode.AUTO}:
+                click_through = bool(self._task_passthrough_active)
+
+        try:
+            self.main_window.set_click_through_enabled(click_through)
+        except Exception:
+            pass
+
+    def _force_user_workspace_for_mode_change(self):
+        if not self.agent:
+            return
+
+        reason = "Mode change policy: switched to user workspace"
+        setter = getattr(self.agent, "_set_workspace", None)
+        if callable(setter):
+            try:
+                setter("user", reason=reason)
+                return
+            except Exception:
+                pass
+
+        try:
+            self.agent.active_workspace = "user"
+        except Exception:
+            pass
+        self.handle_workspace_changed("user")
 
     def init_agent(self):
         try:
@@ -84,6 +151,7 @@ class MainController(QObject):
                 self.agent.desktop_manager = self.desktop_manager
 
             self._init_live_session()
+            self._apply_click_through_policy()
             self.update_sidecar_visibility()
         except Exception as e:
             self.gui_adapter.add_error_message(f"Failed to initialize agent: {e}")
@@ -232,6 +300,8 @@ class MainController(QObject):
             return
 
         self.gui_adapter.add_activity_message(f"Executing: {text}")
+        self._task_passthrough_active = True
+        self._apply_click_through_policy()
         
         self.update_sidecar_visibility()
 
@@ -271,14 +341,17 @@ class MainController(QObject):
     def on_task_finished(self, success):
         if self._stop_requested:
             self._stop_requested = False
+            self._task_passthrough_active = False
+            self._apply_click_through_policy()
             self.gui_adapter.add_system_message("Stopped")
             return
+        self._task_passthrough_active = False
         if success:
             self.gui_adapter.add_activity_message("Done")
         else:
             self.gui_adapter.add_error_message("Task failed or incomplete")
         
-        self.main_window.set_click_through_enabled(False)
+        self._apply_click_through_policy()
         self.update_sidecar_visibility()
 
     def toggle_click_through(self):
@@ -343,6 +416,10 @@ class MainController(QObject):
                 except Exception:
                     pass
             self.gui_adapter.current_mode = mode
+            self._live_action_passthrough_active = False
+            self._task_passthrough_active = False
+            self._force_user_workspace_for_mode_change()
+            self._apply_click_through_policy()
             self.gui_adapter.add_activity_message("Settings updated")
         except Exception as e:
             self.gui_adapter.add_error_message(f"Failed to change mode: {e}")
@@ -352,7 +429,11 @@ class MainController(QObject):
         if not self.agent:
             return
 
-        workspace = (workspace or "user").strip().lower() or "user"
+        workspace = self._normalize_workspace(workspace)
+        try:
+            self.agent.active_workspace = workspace
+        except Exception:
+            pass
 
         try:
             if self.main_window and hasattr(self.main_window, "chat_widget"):
@@ -360,13 +441,9 @@ class MainController(QObject):
         except Exception:
             pass
 
-        try:
-            if workspace == "user":
-                self.main_window.set_click_through_enabled(True)
-            else:
-                self.main_window.set_click_through_enabled(False)
-        except Exception:
-            pass
+        if workspace != "user":
+            self._live_action_passthrough_active = False
+            self._task_passthrough_active = False
 
         if self.live_session:
             try:
@@ -374,6 +451,7 @@ class MainController(QObject):
             except Exception:
                 pass
 
+        self._apply_click_through_policy()
         self.update_sidecar_visibility()
 
     @Slot(str)
@@ -449,6 +527,9 @@ class MainController(QObject):
 
         success = self.live_session.set_enabled(bool(enabled))
         self.live_mode_enabled = bool(enabled and success)
+        self._task_passthrough_active = False
+        if not self.live_mode_enabled:
+            self._live_action_passthrough_active = False
         if self.live_mode_enabled and self.agent:
             try:
                 self.live_session.notify_workspace_changed(self.agent.active_workspace)
@@ -459,6 +540,7 @@ class MainController(QObject):
                 self.main_window.chat_widget.set_live_enabled(self.live_mode_enabled)
         except Exception:
             pass
+        self._apply_click_through_policy()
 
     @Slot(bool)
     def handle_live_voice_toggled(self, enabled: bool):
@@ -484,6 +566,12 @@ class MainController(QObject):
     @Slot(object)
     def _handle_live_action_state(self, payload: object):
         if isinstance(payload, dict):
+            status = str(payload.get("status") or "").strip().lower()
+            if status in {"queued", "running", "cancel_requested"}:
+                self._live_action_passthrough_active = True
+            elif status in {"succeeded", "failed", "cancelled"}:
+                self._live_action_passthrough_active = False
+            self._apply_click_through_policy()
             self.gui_adapter.update_live_action_state(payload)
 
     @Slot(str)
@@ -502,12 +590,14 @@ class MainController(QObject):
     def _handle_live_availability(self, available: bool, reason: str):
         if not available:
             self.live_mode_enabled = False
+            self._live_action_passthrough_active = False
         self.gui_adapter.update_live_availability(available, reason)
         try:
             if self.main_window and hasattr(self.main_window, "chat_widget"):
                 self.main_window.chat_widget.set_live_availability(available, reason)
         except Exception:
             pass
+        self._apply_click_through_policy()
 
     @Slot(bool)
     def _handle_live_voice_active(self, active: bool):

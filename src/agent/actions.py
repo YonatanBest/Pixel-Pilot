@@ -483,7 +483,17 @@ class ActionExecutor:
 
         self.log(f"Switching to workspace: {workspace}")
         self.agent._set_workspace(workspace, reason="Agent requested switch")
-        return self._result(True, f"Switched workspace to {workspace}", payload={"workspace": workspace})
+        effective_workspace = str(
+            getattr(self.agent, "active_workspace", workspace) or workspace
+        ).strip().lower() or "user"
+        return self._result(
+            True,
+            f"Switched workspace to {effective_workspace}",
+            payload={
+                "workspace": effective_workspace,
+                "requested_workspace": str(workspace),
+            },
+        )
 
     def _execute_list_windows(self, params: Dict) -> Dict[str, Any]:
         result = ui_automation.list_windows(

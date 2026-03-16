@@ -316,6 +316,11 @@ def main():
     background_toggle.activated.connect(window.toggle_background_visibility)
     window._qt_shortcuts.append(background_toggle)
 
+    details_toggle = QShortcut(QKeySequence("Ctrl+Shift+D"), window)
+    details_toggle.setContext(Qt.ShortcutContext.ApplicationShortcut)
+    details_toggle.activated.connect(window.toggle_expand)
+    window._qt_shortcuts.append(details_toggle)
+
     # Windows system-wide hotkeys (work even when the overlay is click-through/unfocused)
     hotkeys = GlobalHotkeyManager(parent=window)
     window._global_hotkeys = hotkeys
@@ -324,11 +329,13 @@ def main():
     HK_STOP = 2
     HK_CLOSE = 3
     HK_BACKGROUND = 4
+    HK_DETAILS = 5
 
     hotkeys.register(HK_TOGGLE, modifiers=MOD_CONTROL | MOD_SHIFT, vk=ord("Z"))
     hotkeys.register(HK_STOP, modifiers=MOD_CONTROL | MOD_SHIFT, vk=ord("X"))
     hotkeys.register(HK_CLOSE, modifiers=MOD_CONTROL | MOD_SHIFT, vk=ord("Q"))
     hotkeys.register(HK_BACKGROUND, modifiers=MOD_CONTROL | MOD_SHIFT, vk=ord("M"))
+    hotkeys.register(HK_DETAILS, modifiers=MOD_CONTROL | MOD_SHIFT, vk=ord("D"))
 
     def _on_hotkey(hotkey_id: int):
         if hotkey_id == HK_TOGGLE:
@@ -339,6 +346,8 @@ def main():
             QApplication.quit()
         elif hotkey_id == HK_BACKGROUND:
             window.toggle_background_visibility()
+        elif hotkey_id == HK_DETAILS:
+            window.toggle_expand()
 
     hotkeys.activated.connect(_on_hotkey)
     

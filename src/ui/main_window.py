@@ -1,3 +1,4 @@
+import ctypes
 from typing import Optional
 
 from PySide6.QtCore import QPoint, Qt
@@ -28,6 +29,7 @@ class MainWindow(QMainWindow):
         self.expanded = False
         self._background_hidden = False
         self.sidecar: Optional[SidecarPreview] = None
+        self._last_external_foreground_handle: Optional[int] = None
 
         self.chat_widget = ChatWidget()
         self.setCentralWidget(self.chat_widget)
@@ -69,7 +71,70 @@ class MainWindow(QMainWindow):
         else:
             self.sidecar.hide()
 
+    @staticmethod
+    def _get_user32():
+        try:
+            return ctypes.windll.user32
+        except Exception:
+            return None
+
+    def _window_handle(self) -> int:
+        try:
+            return int(self.winId())
+        except Exception:
+            return 0
+
+    def _is_own_window_handle(self, handle: int) -> bool:
+        if handle <= 0:
+            return False
+        if handle == self._window_handle():
+            return True
+        if self.sidecar is not None:
+            try:
+                if handle == int(self.sidecar.winId()):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _remember_external_foreground_window(self) -> None:
+        user32 = self._get_user32()
+        if user32 is None:
+            return
+
+        try:
+            handle = int(user32.GetForegroundWindow() or 0)
+        except Exception:
+            return
+
+        if handle <= 0 or self._is_own_window_handle(handle):
+            return
+        self._last_external_foreground_handle = handle
+
+    def _restore_last_external_foreground_window(self) -> None:
+        handle = int(self._last_external_foreground_handle or 0)
+        self._last_external_foreground_handle = None
+        if handle <= 0 or self._is_own_window_handle(handle):
+            return
+
+        user32 = self._get_user32()
+        if user32 is None:
+            return
+
+        try:
+            if not bool(user32.IsWindow(handle)):
+                return
+            # SW_RESTORE
+            user32.ShowWindow(handle, 9)
+            user32.SetForegroundWindow(handle)
+        except Exception:
+            return
+
     def set_click_through_enabled(self, enable: bool):
+        enable = bool(enable)
+        if not enable:
+            self._remember_external_foreground_window()
+
         was_visible = self.isVisible()
 
         flags = self.windowFlags()
@@ -84,6 +149,8 @@ class MainWindow(QMainWindow):
         self.click_through_enabled = bool(enable)
         if was_visible:
             self.show()
+        if enable:
+            self._restore_last_external_foreground_window()
 
     def center_at_top(self):
         screen = QGuiApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()

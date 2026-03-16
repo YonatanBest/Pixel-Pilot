@@ -327,12 +327,6 @@ class AgentOrchestrator:
         self.current_blind_snapshot = None
         self._check_stop()
 
-        if self.chat_window:
-            try:
-                self.chat_window.set_click_through(False)
-            except Exception:
-                pass
-
         needs_vision = True
         self.is_magnified = False
         self.zoom_center = None
@@ -343,6 +337,11 @@ class AgentOrchestrator:
             self.log(msg)
 
         if self.mode == OperationMode.GUIDE:
+            if self.active_workspace != "user":
+                self._set_workspace(
+                    "user",
+                    reason="Guidance mode requires user workspace",
+                )
             self.log("Entering GUIDANCE mode (Interactive Tutorial)")
             session = GuidanceSession(
                 user_goal=user_command,
@@ -721,6 +720,9 @@ class AgentOrchestrator:
         target = (target or "").strip().lower()
         if target not in {"user", "agent"}:
             return
+        if self.mode == OperationMode.GUIDE and target == "agent":
+            self.log("Guidance workspace policy enforced: staying on user workspace")
+            target = "user"
 
         changed = (self.active_workspace != target)
         self.active_workspace = target
@@ -735,10 +737,6 @@ class AgentOrchestrator:
             try:
                 if hasattr(self.chat_window, "notify_workspace_changed"):
                     self.chat_window.notify_workspace_changed(target)
-                if target == "user":
-                    self.chat_window.set_click_through(True)
-                else:
-                    self.chat_window.set_click_through(False)
             except Exception:
                 pass
 
