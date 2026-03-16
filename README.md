@@ -13,8 +13,6 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
 
 ![High-Level Design View](src/logos/System-Architecture.png)
 
-Detailed diagram: [src/logos/System-Architecture_Detailed.png](src/logos/System-Architecture_Detailed.png)
-
 ## Current Behavior (Important)
 
 ### Mode and workspace policy
@@ -143,7 +141,7 @@ LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE=105
 DEFAULT_MODE=auto
 AGENT_MODE=auto
 VISION_MODE=ocr
-BACKEND_URL=https://pixel-pilot-5jpy.onrender.com
+BACKEND_URL=your_backend_url
 
 # optional
 PIXELPILOT_GATEWAY_TOKEN=pixelpilot-secret
@@ -207,15 +205,6 @@ Backend endpoints:
 
 Default rate limit logic in backend: 200 requests/day per user.
 
-## Optional Web Portal
-
-Web app lives in `web/`.
-
-```bash
-cd web
-npm install
-npm run dev
-```
 
 ## Optional Gateway
 

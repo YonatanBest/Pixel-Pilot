@@ -2,13 +2,13 @@
 
 :root {
   /* Brand Colors */
-  --color-primary: #007acc;
-  --color-secondary: #4EC9B0;
-  --color-accent: #61dafbaa;
+  --color-primary: #f86f03;
+  --color-secondary: #22c7d6;
+  --color-accent: #fbbf24;
 
   /* Backgrounds */
-  --color-bg: #030303;
-  --color-surface: #0a0a0a;
+  --color-bg: #090705;
+  --color-surface: #11100c;
 
   /* Text */
   --color-text: #ffffff;
@@ -48,6 +48,10 @@ html {
 
 body {
   min-height: 100vh;
+  background:
+    radial-gradient(60rem 40rem at 10% -10%, rgba(248, 111, 3, 0.18), transparent 60%),
+    radial-gradient(48rem 30rem at 85% 0%, rgba(34, 199, 214, 0.16), transparent 58%),
+    linear-gradient(180deg, #0d0906 0%, #080604 100%);
   -webkit-font-smoothing: antialiased;
 }
 
