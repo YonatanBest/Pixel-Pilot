@@ -316,6 +316,35 @@ def _request_payload(model: str = "gemini-3.1") -> dict:
     }
 
 
+def test_registration_is_disabled_by_default(test_client):
+    client, _, _ = test_client
+
+    response = client.post(
+        "/auth/register",
+        json={"email": "tester@example.com", "password": "secret123"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == backend_main.REGISTRATION_DISABLED_MESSAGE
+
+
+def test_login_still_works_when_registration_is_disabled(test_client):
+    client, _, _ = test_client
+
+    response = client.post(
+        "/auth/login",
+        json={"email": "tester@example.com", "password": "secret123"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "access_token": "token",
+        "token_type": "bearer",
+        "user_id": "existing-user",
+        "email": "tester@example.com",
+    }
+
+
 def test_rest_success_increments_daily_and_minute_counts(test_client):
     client, fake_redis, fixed_time = test_client
 

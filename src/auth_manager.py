@@ -5,6 +5,10 @@ from urllib import request, error
 
 from config import Config
 
+REGISTRATION_DISABLED_MESSAGE = (
+    "Registration is disabled. Use the tester credentials provided to you."
+)
+
 
 class AuthManager:
     def __init__(self, backend_url: Optional[str] = None):
@@ -107,16 +111,18 @@ class AuthManager:
         self._save_token(token)
 
     def register(self, email: str, password: str) -> None:
-        token = self._request_json(
-            "POST", "/auth/register", {"email": email, "password": password}
-        )
-        self.access_token = token.get("access_token")
-        self.user_id = token.get("user_id")
-        self.email = token.get("email")
-        self.token_type = token.get("token_type", "bearer")
-        if not self.access_token:
-            raise RuntimeError("Registration failed: no access token returned")
-        self._save_token(token)
+        # Temporarily disabled while tester accounts are managed manually.
+        # token = self._request_json(
+        #     "POST", "/auth/register", {"email": email, "password": password}
+        # )
+        # self.access_token = token.get("access_token")
+        # self.user_id = token.get("user_id")
+        # self.email = token.get("email")
+        # self.token_type = token.get("token_type", "bearer")
+        # if not self.access_token:
+        #     raise RuntimeError("Registration failed: no access token returned")
+        # self._save_token(token)
+        raise RuntimeError(REGISTRATION_DISABLED_MESSAGE)
 
     def verify_token(self) -> bool:
         if not self.access_token:

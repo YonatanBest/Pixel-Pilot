@@ -24,7 +24,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 class Config:
-    BACKEND_URL = os.getenv("BACKEND_URL", "https://pixel-pilot-5jpy.onrender.com")
+    BACKEND_URL = os.getenv("BACKEND_URL", "https://pixelpilot-backend-564947821962.us-central1.run.app")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
     GEMINI_BASE_MODEL = os.getenv("GEMINI_BASE_MODEL", GEMINI_MODEL).strip() or GEMINI_MODEL
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")

@@ -1,6 +1,6 @@
 """
 Login dialog for user authentication.
-Shows email/password fields with login and register options.
+Shows email/password fields with login and API key options.
 """
 
 import os
@@ -21,7 +21,7 @@ from auth_manager import get_auth_manager
 
 
 class LoginDialog(QDialog):
-    """Login/Register dialog for user authentication."""
+    """Login dialog for tester authentication."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -75,9 +75,10 @@ class LoginDialog(QDialog):
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
-        subtitle = QLabel("Sign in to continue to PixelPilot")
+        subtitle = QLabel("Sign in with the tester credentials you were given")
         subtitle.setObjectName("subtitle")
         subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
         layout.addSpacing(16)
@@ -115,32 +116,40 @@ class LoginDialog(QDialog):
         self.login_btn.clicked.connect(self._on_login)
         layout.addWidget(self.login_btn)
 
-        divider_container = QFrame()
-        divider_layout = QHBoxLayout(divider_container)
-        divider_layout.setContentsMargins(0, 8, 0, 8)
+        # divider_container = QFrame()
+        # divider_layout = QHBoxLayout(divider_container)
+        # divider_layout.setContentsMargins(0, 8, 0, 8)
+        #
+        # left_line = QFrame()
+        # left_line.setObjectName("dividerLine")
+        # left_line.setFixedHeight(1)
+        #
+        # or_label = QLabel("or")
+        # or_label.setObjectName("dividerText")
+        #
+        # right_line = QFrame()
+        # right_line.setObjectName("dividerLine")
+        # right_line.setFixedHeight(1)
+        #
+        # divider_layout.addWidget(left_line, 1)
+        # divider_layout.addWidget(or_label)
+        # divider_layout.addWidget(right_line, 1)
+        # layout.addWidget(divider_container)
+        #
+        # self.register_btn = QPushButton("Create Account")
+        # self.register_btn.setObjectName("secondaryBtn")
+        # self.register_btn.setMinimumHeight(44)
+        # self.register_btn.setCursor(Qt.PointingHandCursor)
+        # self.register_btn.clicked.connect(self._on_register)
+        # layout.addWidget(self.register_btn)
 
-        left_line = QFrame()
-        left_line.setObjectName("dividerLine")
-        left_line.setFixedHeight(1)
-
-        or_label = QLabel("or")
-        or_label.setObjectName("dividerText")
-
-        right_line = QFrame()
-        right_line.setObjectName("dividerLine")
-        right_line.setFixedHeight(1)
-
-        divider_layout.addWidget(left_line, 1)
-        divider_layout.addWidget(or_label)
-        divider_layout.addWidget(right_line, 1)
-        layout.addWidget(divider_container)
-
-        self.register_btn = QPushButton("Create Account")
-        self.register_btn.setObjectName("secondaryBtn")
-        self.register_btn.setMinimumHeight(44)
-        self.register_btn.setCursor(Qt.PointingHandCursor)
-        self.register_btn.clicked.connect(self._on_register)
-        layout.addWidget(self.register_btn)
+        tester_note = QLabel(
+            "Registration is disabled. Use the login credentials provided to you."
+        )
+        tester_note.setObjectName("hintLabel")
+        tester_note.setAlignment(Qt.AlignCenter)
+        tester_note.setWordWrap(True)
+        layout.addWidget(tester_note)
 
         layout.addSpacing(16)
 
@@ -216,6 +225,12 @@ class LoginDialog(QDialog):
             QLabel#subtitle {
                 color: rgba(207, 233, 255, 0.6);
                 font: 12px 'Segoe UI', 'Inter', sans-serif;
+            }
+
+            QLabel#hintLabel {
+                color: rgba(207, 233, 255, 0.65);
+                font: 11px 'Segoe UI', 'Inter', sans-serif;
+                padding: 4px 10px 0 10px;
             }
 
             QLabel#fieldLabel {
@@ -359,26 +374,26 @@ class LoginDialog(QDialog):
         except Exception as e:
             self._set_status(f"Failed to save key: {e}", ok=False)
 
-    def _on_register(self):
-        email = self.email_input.text().strip()
-        password = self.password_input.text()
-
-        if not email or not password:
-            self._set_status("Please enter email and password", ok=False)
-            return
-
-        if len(password) < 6:
-            self._set_status("Password must be at least 6 characters", ok=False)
-            return
-
-        self._set_status("Creating account...", ok=True)
-
-        try:
-            self.auth_manager.register(email, password)
-            self.success = True
-            self.accept()
-        except RuntimeError as e:
-            self._set_status(str(e), ok=False)
+    # def _on_register(self):
+    #     email = self.email_input.text().strip()
+    #     password = self.password_input.text()
+    #
+    #     if not email or not password:
+    #         self._set_status("Please enter email and password", ok=False)
+    #         return
+    #
+    #     if len(password) < 6:
+    #         self._set_status("Password must be at least 6 characters", ok=False)
+    #         return
+    #
+    #     self._set_status("Creating account...", ok=True)
+    #
+    #     try:
+    #         self.auth_manager.register(email, password)
+    #         self.success = True
+    #         self.accept()
+    #     except RuntimeError as e:
+    #         self._set_status(str(e), ok=False)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:

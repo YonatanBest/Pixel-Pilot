@@ -24,6 +24,9 @@ security = HTTPBearer()
 GENERATION_ERROR_MESSAGE = "Generation failed"
 SERVICE_UNAVAILABLE_MESSAGE = "Service temporarily unavailable"
 WS_AUTH_TIMEOUT_SECONDS = 10
+REGISTRATION_DISABLED_MESSAGE = (
+    "Registration is disabled. Use the tester credentials provided to you."
+)
 
 
 # Request/Response models
@@ -136,20 +139,22 @@ async def register(
     request: auth.RegisterRequest,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    """Register a new user."""
-    try:
-        user = await auth.register_user(request.email, request.password, db)
-        token = auth.create_access_token(user["user_id"], user["email"])
-        return auth.TokenResponse(
-            access_token=token,
-            user_id=user["user_id"],
-            email=user["email"],
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Registration error: {e}")
-        raise HTTPException(status_code=500, detail="Registration failed")
+    """Disable public self-registration."""
+    # Temporarily disabled while the backend is public.
+    # try:
+    #     user = await auth.register_user(request.email, request.password, db)
+    #     token = auth.create_access_token(user["user_id"], user["email"])
+    #     return auth.TokenResponse(
+    #         access_token=token,
+    #         user_id=user["user_id"],
+    #         email=user["email"],
+    #     )
+    # except ValueError as e:
+    #     raise HTTPException(status_code=400, detail=str(e))
+    # except Exception as e:
+    #     logger.error(f"Registration error: {e}")
+    #     raise HTTPException(status_code=500, detail="Registration failed")
+    raise HTTPException(status_code=403, detail=REGISTRATION_DISABLED_MESSAGE)
 
 
 @app.post("/auth/login", response_model=auth.TokenResponse)
