@@ -421,6 +421,36 @@ class ActionExecutor:
                     f"Opened app and verified window: {app_name}",
                     payload={"window": launched_focus.get("window")},
                 )
+            if self.agent.active_workspace == "agent" and dm is not None:
+                try:
+                    windows = dm.list_windows() or []
+                except Exception:
+                    windows = []
+
+                match = next(
+                    (
+                        window
+                        for window in windows
+                        if app_name.lower() in str(window.get("title") or "").lower()
+                    ),
+                    None,
+                )
+                if match:
+                    return self._result(
+                        True,
+                        f"Opened app and verified desktop window: {app_name}",
+                        payload={"window": match, "focus_verification": launched_focus},
+                    )
+
+                self.log(
+                    f"Opened app on agent workspace without UIA verification: {app_name} "
+                    f"(reason: {launched_focus.get('reason')})"
+                )
+                return self._result(
+                    True,
+                    f"Opened app on agent workspace: {app_name}",
+                    payload={"focus_verification": launched_focus},
+                )
             return self._result(False, f"App launched but window not verified: {app_name}")
 
         start_ok = self.agent.keyboard.press_key("win", desktop_manager=dm)
@@ -447,6 +477,16 @@ class ActionExecutor:
                 True,
                 f"Opened app and verified window: {app_name}",
                 payload={"window": launched_focus.get("window")},
+            )
+        if self.agent.active_workspace == "agent" and shortcut_ok:
+            self.log(
+                f"Agent workspace launch fallback succeeded without UIA verification: {app_name} "
+                f"(reason: {launched_focus.get('reason')})"
+            )
+            return self._result(
+                True,
+                f"Opened app on agent workspace: {app_name}",
+                payload={"focus_verification": launched_focus},
             )
         return self._result(False, f"App launch attempted but window not verified: {app_name}")
 

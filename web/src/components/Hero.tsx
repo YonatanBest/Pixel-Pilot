@@ -41,15 +41,15 @@ export const Hero = () => {
                     className="hero-description-wrapper"
                 >
                     <p className="hero-desc">
-                        A windows automation agent powered by <span className="text-brand-gradient">Gemini</span>.
+                        The visual home for PixelPilot, a Windows automation agent powered by <span className="text-brand-gradient">Gemini</span>.
                         <br />
-                        It sees what you see. It does what you say.
+                        Explore capabilities, workflows, and architecture in one place.
                     </p>
 
                     <div className="hero-actions">
                         <Magnetic strength={0.3}>
                             <button className="btn-mag-primary" onClick={scrollToQuickStart}>
-                                Initialize Agent
+                                Explore Website
                             </button>
                         </Magnetic>
                     </div>
@@ -62,7 +62,7 @@ export const Hero = () => {
                 animate={{ opacity: 1 }}
                 transition={{ delay: 1, duration: 1 }}
             >
-                <span>SCROLL TO EXPLORE</span>
+                <span>SCROLL</span>
                 <motion.div
                     className="scroll-line"
                     animate={{ height: [0, 60, 0], y: [0, 0, 60] }}

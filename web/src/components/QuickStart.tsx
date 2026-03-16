@@ -4,10 +4,10 @@ import './QuickStart.css';
 import { Magnetic } from './Magnetic';
 
 const commands = [
-    { text: "git clone https://github.com/birukabza/Pixel-Pilot.git", output: "Cloning into 'Pixel-Pilot'..." },
-    { text: "cd Pixel-Pilot && python install.py", output: "Installing dependencies... Done." },
-    { text: "Open the PixelPilot Desktop shortcut", output: "Launching PixelPilot..." },
-    { text: "(Optional) .\\venv\\Scripts\\python.exe .\\src\\main.py", output: "PixelPilot Online. Listening..." }
+    { text: "Discover the project vision", output: "Read the architecture and safety model overview." },
+    { text: "Review installation guide", output: "Follow the docs path for setup and environment variables." },
+    { text: "Explore operation modes", output: "Choose Guidance, Safe, or Auto based on your workflow." },
+    { text: "Launch PixelPilot locally", output: "Run with the desktop shortcut or direct CLI command." }
 ];
 
 export const QuickStart = () => {
@@ -15,8 +15,8 @@ export const QuickStart = () => {
         <section id="quickstart" className="quickstart-section">
             <div className="container">
                 <div className="qs-content">
-                    <h2 className="qs-title">INITIALIZATION</h2>
-                    <p className="qs-subtitle">Three steps to authority.</p>
+                    <h2 className="qs-title">GET STARTED</h2>
+                    <p className="qs-subtitle">A simple path from discovery to first launch.</p>
                 </div>
 
                 <div className="terminal-window">
@@ -24,7 +24,7 @@ export const QuickStart = () => {
                         <div className="t-dot red" />
                         <div className="t-dot yellow" />
                         <div className="t-dot green" />
-                        <span className="t-title">admin@pixelpilot:~</span>
+                        <span className="t-title">pixelpilot.io / launch-path</span>
                     </div>
                     <div className="terminal-body">
                         {commands.map((cmd, i) => (
@@ -37,7 +37,7 @@ export const QuickStart = () => {
                                 className="cmd-row"
                             >
                                 <div className="cmd-line">
-                                    <span className="prompt">$</span>
+                                    <span className="prompt">&gt;</span>
                                     <span className="cmd-text">{cmd.text}</span>
                                 </div>
                                 <motion.div
@@ -55,7 +55,7 @@ export const QuickStart = () => {
 
                 <div className="qs-actions">
                     <Magnetic>
-                        <Link to="/docs" className="docs-link">Read Full Documentation &rarr;</Link>
+                        <Link to="/docs" className="docs-link">Open Documentation &rarr;</Link>
                     </Magnetic>
                 </div>
             </div>

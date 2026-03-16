@@ -141,12 +141,26 @@ class AgentDesktopManager:
         result = [None]
         error = [None]
         def worker():
+            com_initialized = False
             try:
+                try:
+                    # UI Automation requires COM initialization on the calling thread.
+                    coinit = ctypes.windll.ole32.CoInitializeEx(None, 0x2)  # COINIT_APARTMENTTHREADED
+                    if coinit in (0, 1):  # S_OK / S_FALSE
+                        com_initialized = True
+                except Exception:
+                    pass
                 if not user32.SetThreadDesktop(self._desktop_handle):
                     return
                 result[0] = func(*args, **kwargs)
             except Exception as e:
                 error[0] = str(e)
+            finally:
+                if com_initialized:
+                    try:
+                        ctypes.windll.ole32.CoUninitialize()
+                    except Exception:
+                        pass
         t = threading.Thread(target=worker, daemon=True)
         t.start()
         t.join(timeout=5.0)

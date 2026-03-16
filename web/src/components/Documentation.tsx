@@ -22,7 +22,7 @@ export const Documentation = () => {
                     <article className="doc-card">
                         <h3>Installation</h3>
                         <p>Run the installer to set up the environment and desktop launcher.</p>
-                        <pre className="doc-code">{`$ git clone https://github.com/birukabza/Pixel-Pilot.git\n$ cd Pixel-Pilot\n$ python install.py`}</pre>
+                        <pre className="doc-code">{`$ git clone https://github.com/dagemawinegash/Pixel-Pilot-Project.git\n$ cd Pixel-Pilot-Project\n$ python install.py`}</pre>
                         <div className="doc-note">
                             <span>Optional:</span> <code>python install.py --no-tasks</code>
                         </div>
@@ -90,7 +90,7 @@ export const Documentation = () => {
                 </div>
 
                 <div className="doc-footer">
-                    <a href="https://github.com/birukabza/Pixel-Pilot" target="_blank" rel="noreferrer" className="doc-link">
+                    <a href="https://github.com/dagemawinegash/Pixel-Pilot-Project" target="_blank" rel="noreferrer" className="doc-link">
                         View Full Repository Documentation &rarr;
                     </a>
                 </div>

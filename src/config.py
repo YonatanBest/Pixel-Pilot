@@ -2,6 +2,7 @@ import os
 import logging
 from pathlib import Path
 from enum import Enum
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -61,6 +62,11 @@ class Config:
     LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES = max(
         4096,
         int(os.getenv("LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES", "65536") or "65536"),
+    )
+    LIVE_AUDIO_LOSSLESS_MODE = _env_bool("LIVE_AUDIO_LOSSLESS_MODE", True)
+    LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS = max(
+        0,
+        int(os.getenv("LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS", "220") or "220"),
     )
     LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE = max(
         30,
@@ -137,6 +143,7 @@ class Config:
     ENABLE_BLIND_MODE = True
     APP_LAUNCH_WAIT = 3
     ENABLE_UIA_BLIND_MODE = True
+    ENABLE_UIA_FOR_AGENT_WORKSPACE = _env_bool("ENABLE_UIA_FOR_AGENT_WORKSPACE", True)
     UIA_MAX_ELEMENTS = 120
     UIA_MAX_WINDOWS = 40
     UIA_TEXT_MAX_CHARS = 4000
@@ -167,7 +174,7 @@ class Config:
     DEFAULT_WORKSPACE = "user"  # "user" or "agent"
 
     @classmethod
-    def get_mode(cls, mode_str: str = None) -> OperationMode:
+    def get_mode(cls, mode_str: Optional[str] = None) -> OperationMode:
         """
         Get operation mode from string or environment variable.
 
@@ -179,6 +186,9 @@ class Config:
         """
         if mode_str is None:
             mode_str = os.getenv("AGENT_MODE", cls.DEFAULT_MODE.value)
+            
+        if not isinstance(mode_str, str):
+            mode_str = str(mode_str)
 
         mode_str = mode_str.lower()
 

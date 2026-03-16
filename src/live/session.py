@@ -38,19 +38,25 @@ else:
 
 LIVE_SYSTEM_INSTRUCTION = (
     "You are Pixy operating in Gemini Live mode on a Windows PC. "
-    "When users ask to explain, teach, or help them understand what is on screen, you must annotate while explaining. "
-    "Do not wait for an explicit 'highlight' request. "
-    "For those requests, call overlay drawing tools "
-    "(overlay_draw_box, overlay_draw_text, overlay_draw_pointer, overlay_clear) by default. "
-    "Use tight, precise highlights around the smallest relevant element and avoid broad container boxes. "
-    "Keep annotations temporary: set ttl_ms for boxes/text/pointers and clear stale overlays when the explanation segment is done. "
     "Work UIA-first: prefer UI Automation state, window listing, window focus, keyboard actions, "
     "app launch, and brokered status checks before requesting detailed vision. "
     "Treat the low-FPS video feed as coarse awareness only, not precise click targeting. "
     "Use capture_screen only when UI Automation or coarse live video is insufficient. "
     "Never issue a second mutating tool call while any action is queued, running, or cancel_requested. "
     "After a mutating tool call, inspect get_action_status or wait_for_action before planning the next action. "
-    "Respect the current workspace, ask for confirmation before destructive actions, and keep replies concise."
+    "Respect the current workspace, ask for confirmation before destructive actions, and keep replies concise. "
+    "If the user asks for Gmail (including phrasing like 'through Gmail'), use a browser workflow instead of Mail app assumptions. "
+    "If login/2FA/captcha blocks progress, ask the user to complete it, then continue."
+)
+
+LIVE_GUIDANCE_SYSTEM_INSTRUCTION = (
+    "You are Pixy operating in Gemini Live guidance mode on a Windows PC. "
+    "You are a tutor only: guide the user step-by-step with concise voice/text instructions. "
+    "Do not perform desktop actions on the user's behalf. "
+    "Do not wait for the user to say 'done' if you can already observe progress. "
+    "When you detect the user completed a step, acknowledge it immediately and continue to the next step. "
+    "If tools are available, use them only for read-only observation and adapt your guidance from what you see. "
+    "Ask short follow-up questions only when the observed state is ambiguous."
 )
 
 LIVE_SYSTEM_CONTEXT_PREFIX = (
@@ -102,6 +108,7 @@ class LiveSessionManager(QObject):
         self._image_input_enabled = bool(Config.LIVE_ENABLE_IMAGE_INPUT)
         self._video_stream_enabled = bool(Config.LIVE_ENABLE_VIDEO_STREAM and self._image_input_enabled)
         self._speaker_drop_logged_at = 0.0
+        self._speaker_backlog_logged_at = 0.0
         self._audio_resample_logged_at = 0.0
         self._last_guidance_snapshot_signature = ""
         self._last_guidance_probe_sent_at = 0.0
@@ -114,6 +121,16 @@ class LiveSessionManager(QObject):
         )
         self.tools.set_guidance_mode(self._is_guidance_mode())
         self.availability_changed.emit(self.is_available, self.unavailable_reason)
+
+    def _mode_key(self, mode: Optional[object] = None) -> str:
+        value = self._mode if mode is None else mode
+        if isinstance(value, OperationMode):
+            return value.value
+        enum_value = getattr(value, "value", value)
+        return str(enum_value or "").strip().lower()
+
+    def _is_guidance_mode(self, mode: Optional[object] = None) -> bool:
+        return self._mode_key(mode) == OperationMode.GUIDE.value
 
     @property
     def is_available(self) -> bool:
@@ -158,8 +175,6 @@ class LiveSessionManager(QObject):
             self._current_goal = clean
         self.agent.current_task = clean
         self._recent_user_steering.append(clean)
-        if self._looks_like_explanation_request(clean):
-            self._clear_overlay_immediately()
         self.session_state_changed.emit("thinking")
         return self._submit_async(self._send_text(clean))
 
@@ -344,7 +359,8 @@ class LiveSessionManager(QObject):
         self._session_cm = self._client.aio.live.connect(model=Config.GEMINI_LIVE_MODEL, config=config)
         self._session = await self._session_cm.__aenter__()
         self._session_started_at = time.monotonic()
-        self._speaker_queue = asyncio.Queue(maxsize=Config.LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS)
+        queue_maxsize = 0 if Config.LIVE_AUDIO_LOSSLESS_MODE else Config.LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS
+        self._speaker_queue = asyncio.Queue(maxsize=queue_maxsize)
         self._receive_task = asyncio.create_task(self._receive_loop())
         self._video_task = (
             asyncio.create_task(self._video_loop()) if self._video_stream_enabled else None
@@ -707,6 +723,12 @@ class LiveSessionManager(QObject):
                         out = payload
                 else:
                     ratecv_state = None
+                play_seconds = len(out) / float(2 * max(1, output_rate))
+                suppress_tail = max(0.0, Config.LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS / 1000.0)
+                self._audio_output_suppressed_until = max(
+                    self._audio_output_suppressed_until,
+                    time.monotonic() + play_seconds + suppress_tail,
+                )
                 await asyncio.to_thread(stream.write, out)
         except asyncio.CancelledError:
             raise
@@ -995,6 +1017,20 @@ class LiveSessionManager(QObject):
         if queue is None or not data:
             return
         item = (data, self._normalize_audio_rate(sample_rate, Config.LIVE_AUDIO_OUTPUT_RATE))
+
+        if Config.LIVE_AUDIO_LOSSLESS_MODE:
+            await queue.put(item)
+            if queue.maxsize == 0:
+                backlog = queue.qsize()
+                if backlog >= 512:
+                    now = time.monotonic()
+                    if now - self._speaker_backlog_logged_at > 3.0:
+                        logger.warning(
+                            "Live speaker backlog high in lossless mode (qsize=%d)",
+                            backlog,
+                        )
+                        self._speaker_backlog_logged_at = now
+            return
 
         if not queue.full():
             await queue.put(item)

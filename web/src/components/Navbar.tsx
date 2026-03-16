@@ -34,10 +34,10 @@ export const Navbar = () => {
                     {isHome ? (
                         <>
                             <Magnetic>
-                                <button onClick={() => scrollToSection('features')} className="nav-link">Capabilities</button>
+                                <button onClick={() => scrollToSection('features')} className="nav-link">Why</button>
                             </Magnetic>
                             <Magnetic>
-                                <button onClick={() => scrollToSection('quickstart')} className="nav-link">Install</button>
+                                <button onClick={() => scrollToSection('quickstart')} className="nav-link">Start</button>
                             </Magnetic>
                         </>
                     ) : (
@@ -50,14 +50,14 @@ export const Navbar = () => {
                     <div className="nav-separator" />
                     {isHome && (
                         <Magnetic>
-                            <button onClick={() => scrollToSection('hotkeys')} className="nav-link">Controls</button>
+                            <button onClick={() => scrollToSection('hotkeys')} className="nav-link">Modes</button>
                         </Magnetic>
                     )}
                     <Magnetic>
                         <Link to="/docs" className="nav-link">Docs</Link>
                     </Magnetic>
                     <Magnetic>
-                        <a href="https://github.com/birukabza/Pixel-Pilot" target="_blank" rel="noreferrer" className="nav-link">GitHub</a>
+                        <a href="https://github.com/dagemawinegash/Pixel-Pilot-Project" target="_blank" rel="noreferrer" className="nav-link">GitHub</a>
                     </Magnetic>
                 </div>
             </motion.nav>

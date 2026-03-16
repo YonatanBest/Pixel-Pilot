@@ -2,9 +2,9 @@ import { motion, useMotionValue, useSpring, useTransform } from 'framer-motion';
 import './Hotkeys.css';
 
 const hotkeys = [
-    { keys: ['Ctrl', 'Shift', 'Z'], action: 'Toggle Click-Through' },
-    { keys: ['Ctrl', 'Shift', 'X'], action: 'Stop Execution' },
-    { keys: ['Ctrl', 'Shift', 'Q'], action: 'Quit Application' },
+    { keys: ['MODE', 'GUIDE'], action: 'Hands-on walkthrough for first-time tasks.' },
+    { keys: ['MODE', 'SAFE'], action: 'Confirms risky operations before execution.' },
+    { keys: ['MODE', 'AUTO'], action: 'Autonomous flow for repeatable workflows.' },
 ];
 
 const TiltCard = ({ children }: { children: React.ReactNode }) => {
@@ -56,7 +56,7 @@ export const Hotkeys = () => {
     return (
         <section id="hotkeys" className="hotkeys-section">
              <div className="container">
-                <h2 className="section-title">CONTROL MATRIX</h2>
+            <h2 className="section-title">OPERATION MODES</h2>
                 <div className="hotkeys-grid">
                     {hotkeys.map((item, i) => (
                         <TiltCard key={i}>

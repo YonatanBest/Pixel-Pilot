@@ -2,16 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
 import time
-import json
-import asyncio
-import urllib.request
 from collections.abc import Callable
 from typing import Any, Optional
 
 import pyautogui
-from PIL import Image
 
 from config import Config
 from live.broker import LiveActionBroker
@@ -22,6 +17,24 @@ logger = logging.getLogger("pixelpilot.live.tools")
 
 
 class LiveToolRegistry:
+    READ_ONLY_TOOL_NAMES = {
+        "ui_get_snapshot",
+        "ui_list_windows",
+        "ui_read_text",
+        "capture_screen",
+        "get_action_status",
+        "wait_for_action",
+    }
+    MUTATING_TOOL_NAMES = {
+        "mouse_click",
+        "keyboard_type_text",
+        "keyboard_press_key",
+        "keyboard_key_combo",
+        "app_open",
+        "workspace_switch",
+        "ui_focus_window",
+    }
+
     def __init__(
         self,
         *,
@@ -179,114 +192,6 @@ class LiveToolRegistry:
                 },
             },
             {
-                "name": "overlay_draw_box",
-                "description": (
-                    "Draw a highlight box on the user's screen overlay. "
-                    "Use this for explanation/teaching annotations. "
-                    "When ui_element_id is provided, the runtime can tighten the rectangle for precision."
-                ),
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "id": {"type": "STRING"},
-                        "x": {"type": "NUMBER"},
-                        "y": {"type": "NUMBER"},
-                        "width": {"type": "NUMBER"},
-                        "height": {"type": "NUMBER"},
-                        "x_min": {"type": "NUMBER"},
-                        "y_min": {"type": "NUMBER"},
-                        "x_max": {"type": "NUMBER"},
-                        "y_max": {"type": "NUMBER"},
-                        "ui_element_id": {"type": "STRING"},
-                        "tight": {"type": "BOOLEAN"},
-                        "inset_px": {"type": "INTEGER"},
-                        "normalized": {"type": "BOOLEAN"},
-                        "color": {"type": "STRING"},
-                        "stroke_width": {"type": "NUMBER"},
-                        "corner_radius": {"type": "NUMBER"},
-                        "opacity": {"type": "NUMBER"},
-                        "ttl_ms": {"type": "INTEGER"},
-                    },
-                },
-            },
-            {
-                "name": "overlay_draw_text",
-                "description": (
-                    "Draw teaching/explanation text on the user's screen overlay."
-                ),
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "id": {"type": "STRING"},
-                        "x": {"type": "NUMBER"},
-                        "y": {"type": "NUMBER"},
-                        "ui_element_id": {"type": "STRING"},
-                        "text": {"type": "STRING"},
-                        "normalized": {"type": "BOOLEAN"},
-                        "color": {"type": "STRING"},
-                        "font_size": {"type": "INTEGER"},
-                        "font_family": {"type": "STRING"},
-                        "align": {"type": "STRING"},
-                        "baseline": {"type": "STRING"},
-                        "max_width": {"type": "INTEGER"},
-                        "panel_bg": {"type": "STRING"},
-                        "panel_bg_secondary": {"type": "STRING"},
-                        "accent_glow": {"type": "STRING"},
-                        "panel_border": {"type": "STRING"},
-                        "ttl_ms": {"type": "INTEGER"},
-                    },
-                    "required": ["text"],
-                },
-            },
-            {
-                "name": "overlay_draw_pointer",
-                "description": (
-                    "Draw a pointer (dot/ring/line) with optional label to explain an on-screen target."
-                ),
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "id": {"type": "STRING"},
-                        "x": {"type": "NUMBER"},
-                        "y": {"type": "NUMBER"},
-                        "ui_element_id": {"type": "STRING"},
-                        "text": {"type": "STRING"},
-                        "text_x": {"type": "NUMBER"},
-                        "text_y": {"type": "NUMBER"},
-                        "normalized": {"type": "BOOLEAN"},
-                        "color": {"type": "STRING"},
-                        "dot_color": {"type": "STRING"},
-                        "radius": {"type": "NUMBER"},
-                        "ring_radius": {"type": "NUMBER"},
-                        "ring_width": {"type": "NUMBER"},
-                        "line_width": {"type": "NUMBER"},
-                        "font_size": {"type": "INTEGER"},
-                        "font_family": {"type": "STRING"},
-                        "text_max_width": {"type": "INTEGER"},
-                        "ttl_ms": {"type": "INTEGER"},
-                    },
-                },
-            },
-            {
-                "name": "overlay_clear",
-                "description": "Clear all teaching/explanation annotations from the user's screen overlay.",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {},
-                },
-            },
-            {
-                "name": "overlay_remove",
-                "description": "Remove one annotation by id from the user's screen overlay.",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "id": {"type": "STRING"},
-                    },
-                    "required": ["id"],
-                },
-            },
-            {
                 "name": "get_action_status",
                 "description": "Get the current status of a brokered desktop action.",
                 "parameters": {
@@ -363,16 +268,6 @@ class LiveToolRegistry:
             return self._handle_read_text(payload)
         if tool_name == "capture_screen":
             return self._handle_capture_screen()
-        if tool_name == "overlay_draw_box":
-            return self._handle_overlay_draw_box(payload)
-        if tool_name == "overlay_draw_text":
-            return self._handle_overlay_draw_text(payload)
-        if tool_name == "overlay_draw_pointer":
-            return self._handle_overlay_draw_pointer(payload)
-        if tool_name == "overlay_clear":
-            return self._handle_overlay_clear()
-        if tool_name == "overlay_remove":
-            return self._handle_overlay_remove(payload)
         if tool_name == "get_action_status":
             return self.broker.get_action_status(str(payload.get("action_id") or ""))
         if tool_name == "wait_for_action":
@@ -1938,3 +1833,4 @@ class LiveToolRegistry:
             "elements": elements,
             "windows": windows,
         }
+

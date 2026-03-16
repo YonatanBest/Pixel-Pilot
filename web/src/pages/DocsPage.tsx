@@ -14,6 +14,9 @@ const envVars = [
 const moduleMap = [
     { name: 'src/main.py', detail: 'PySide6 UI, agent loop, and orchestration entry.' },
     { name: 'src/agent', detail: 'Brain, guidance, verification, and clarification layers.' },
+    { name: 'src/live/session.py', detail: 'Gemini Live session manager, reconnect flow, voice, and transcript lifecycle.' },
+    { name: 'src/live/broker.py', detail: 'Serialized action broker with queued/running/cancel/succeeded states.' },
+    { name: 'src/live/tools.py', detail: 'Live tool declarations for UI Automation and mutating action boundaries.' },
     { name: 'src/core', detail: 'Controllers, logging, and app lifecycle glue.' },
     { name: 'src/tools', detail: 'Mouse, keyboard, vision, and app indexing tools.' },
     { name: 'src/skills', detail: 'Browser, media, system, timer skill surfaces.' },
@@ -24,15 +27,22 @@ const moduleMap = [
 ];
 
 const modeGuide = [
-    { mode: 'GUIDANCE', detail: 'Interactive, step-by-step tutorial mode. You do the actions while PixelPilot watches and helps.' },
-    { mode: 'SAFE', detail: 'Confirms only potentially dangerous actions (like delete, shutdown).' },
-    { mode: 'AUTO', detail: 'Runs fully autonomously without requiring confirmation.' },
-    { mode: 'Blind mode', detail: 'When vision is not needed, PixelPilot can plan and act without screenshots and switch back to vision when required.' }
+    { mode: 'GUIDANCE', detail: 'Step-by-step coaching mode. Workspace is locked to user and actions are instructional-first.' },
+    { mode: 'SAFE', detail: 'Executes tasks while confirming potentially dangerous operations.' },
+    { mode: 'AUTO', detail: 'Fully autonomous execution with verification and loop protection.' },
+    { mode: 'Live default', detail: 'When available, Gemini Live starts enabled by default and can be toggled off.' }
 ];
 
 const visionGuide = [
-    { mode: 'ROBO', detail: 'Gemini Robotics-ER for semantic UI detection.' },
-    { mode: 'OCR', detail: 'EasyOCR + OpenCV for fast local parsing.' }
+    { mode: 'UIA', detail: 'Blind-first UI Automation snapshotting, targeting, text reads, and window focus.' },
+    { mode: 'OCR', detail: 'EasyOCR + OpenCV for fast local parsing when semantics are enough.' },
+    { mode: 'ROBO', detail: 'Gemini Robotics-ER fallback for semantic UI disambiguation.' }
+];
+
+const liveGuide = [
+    { mode: 'Action Broker', detail: 'Mutating actions are serialized with queued/running/cancel states.' },
+    { mode: 'Voice Runtime', detail: 'Native-audio live stream with mic/speaker queue handling and reconnect continuity.' },
+    { mode: 'Stop Safety', detail: 'Live stop requests cancel current actions and pause at safe boundaries.' }
 ];
 
 export const DocsPage = () => {
@@ -44,11 +54,11 @@ export const DocsPage = () => {
                     <h1>Operator Guide, Systems Map, and Runtime Notes</h1>
                     <p>
                         Detailed documentation for the PixelPilot codebase. Powered by the Gemini
-                        GenAI SDK with a vision-first automation pipeline and Secure Desktop support.
+                        GenAI SDK with Gemini Live sessions, UI Automation-first execution, and Secure Desktop support.
                     </p>
                     <div className="docs-hero-actions">
                         <Link className="docs-cta primary" to="/">Back to Landing</Link>
-                        <a className="docs-cta" href="https://github.com/birukabza/Pixel-Pilot" target="_blank" rel="noreferrer">GitHub</a>
+                        <a className="docs-cta" href="https://github.com/dagemawinegash/Pixel-Pilot-Project" target="_blank" rel="noreferrer">GitHub</a>
                     </div>
                 </div>
             </header>
@@ -58,7 +68,7 @@ export const DocsPage = () => {
                     <article className="docs-card">
                         <h2>Install</h2>
                         <p>Run the installer to create the virtual environment and scheduled tasks.</p>
-                        <pre>{`$ git clone https://github.com/birukabza/Pixel-Pilot.git\n$ cd Pixel-Pilot\n$ python install.py`}</pre>
+                        <pre>{`$ git clone https://github.com/dagemawinegash/Pixel-Pilot-Project.git\n$ cd Pixel-Pilot-Project\n$ python install.py`}</pre>
                         <div className="docs-note">Optional: <code>python install.py --no-tasks</code></div>
                         <ul>
                             <li>Builds UAC helpers and scheduled tasks.</li>
@@ -100,49 +110,77 @@ export const DocsPage = () => {
                 <div className="container">
                     <div className="docs-section-header">
                         <h2>Architecture</h2>
-                        <p>Multi-process layout that bridges userland automation and Secure Desktop.</p>
+                        <p>End-to-end flow from UI intent to Live execution, verification, and Secure Desktop orchestration.</p>
                     </div>
-                    <div className="docs-diagram">
-                        <svg viewBox="0 0 900 420" role="img" aria-label="PixelPilot architecture diagram">
-                            <defs>
-                                <marker id="arrow" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
-                                    <path d="M0,0 L0,6 L6,3 z" fill="#4EC9B0" />
-                                </marker>
-                            </defs>
-                            <rect x="40" y="40" width="240" height="90" rx="12" className="node" />
-                            <text x="60" y="80" className="node-title">Main App</text>
-                            <text x="60" y="105" className="node-sub">UI + Agent Loop</text>
+                    <div className="docs-diagram arch-diagram" role="img" aria-label="PixelPilot architecture diagram">
+                        <div className="arch-lane">
+                            <h3 className="arch-lane-title">Primary Desktop Runtime</h3>
+                            <div className="arch-flow-row">
+                                <article className="arch-node">
+                                    <h4>Chat UI + Mode Control</h4>
+                                    <p>Live toggle, workspace policy</p>
+                                </article>
+                                <span className="arch-arrow" aria-hidden="true">→</span>
+                                <article className="arch-node">
+                                    <h4>Agent Brain</h4>
+                                    <p>plan - verify - clarify loop</p>
+                                </article>
+                                <span className="arch-arrow" aria-hidden="true">→</span>
+                                <article className="arch-node">
+                                    <h4>Vision Router</h4>
+                                    <p>UIA first, OCR/Robo fallback</p>
+                                </article>
+                                <span className="arch-arrow" aria-hidden="true">→</span>
+                                <article className="arch-node">
+                                    <h4>Desktop Tools</h4>
+                                    <p>mouse, keyboard, app skills</p>
+                                </article>
+                            </div>
+                        </div>
 
-                            <rect x="330" y="40" width="240" height="90" rx="12" className="node" />
-                            <text x="350" y="80" className="node-title">Vision Pipeline</text>
-                            <text x="350" y="105" className="node-sub">Robo + OCR</text>
+                        <div className="arch-lane-connector" aria-hidden="true">↓</div>
 
-                            <rect x="620" y="40" width="240" height="90" rx="12" className="node" />
-                            <text x="640" y="80" className="node-title">Skills + Tools</text>
-                            <text x="640" y="105" className="node-sub">Mouse, Keyboard, OS</text>
+                        <div className="arch-lane">
+                            <h3 className="arch-lane-title">Live and Automation Execution</h3>
+                            <div className="arch-flow-row arch-flow-row-3">
+                                <article className="arch-node">
+                                    <h4>Gemini Live Session</h4>
+                                    <p>voice, transcript, reconnect</p>
+                                </article>
+                                <span className="arch-arrow" aria-hidden="true">→</span>
+                                <article className="arch-node">
+                                    <h4>Live Action Broker</h4>
+                                    <p>queued, running, cancel states</p>
+                                </article>
+                                <span className="arch-arrow" aria-hidden="true">→</span>
+                                <article className="arch-node">
+                                    <h4>UI Automation</h4>
+                                    <p>snapshot, focus, read text</p>
+                                </article>
+                            </div>
+                        </div>
 
-                            <rect x="40" y="190" width="240" height="90" rx="12" className="node" />
-                            <text x="60" y="230" className="node-title">Agent Desktop</text>
-                            <text x="60" y="255" className="node-sub">Isolated Workspace</text>
+                        <div className="arch-lane-connector" aria-hidden="true">↓</div>
 
-                            <rect x="330" y="190" width="240" height="90" rx="12" className="node" />
-                            <text x="350" y="230" className="node-title">UAC Orchestrator</text>
-                            <text x="350" y="255" className="node-sub">SYSTEM Task</text>
-
-                            <rect x="620" y="190" width="240" height="90" rx="12" className="node" />
-                            <text x="640" y="230" className="node-title">UAC Agent</text>
-                            <text x="640" y="255" className="node-sub">Secure Desktop</text>
-
-                            <rect x="330" y="320" width="240" height="70" rx="12" className="node" />
-                            <text x="350" y="360" className="node-title">Gateway (Optional)</text>
-
-                            <line x1="280" y1="85" x2="330" y2="85" className="link" markerEnd="url(#arrow)" />
-                            <line x1="570" y1="85" x2="620" y2="85" className="link" markerEnd="url(#arrow)" />
-                            <line x1="160" y1="130" x2="160" y2="190" className="link" markerEnd="url(#arrow)" />
-                            <line x1="450" y1="130" x2="450" y2="190" className="link" markerEnd="url(#arrow)" />
-                            <line x1="740" y1="130" x2="740" y2="190" className="link" markerEnd="url(#arrow)" />
-                            <line x1="450" y1="280" x2="450" y2="320" className="link" markerEnd="url(#arrow)" />
-                        </svg>
+                        <div className="arch-lane">
+                            <h3 className="arch-lane-title">Privilege and Integration Layer</h3>
+                            <div className="arch-flow-row arch-flow-row-3">
+                                <article className="arch-node">
+                                    <h4>Agent Desktop Isolation</h4>
+                                    <p>optional</p>
+                                </article>
+                                <span className="arch-arrow" aria-hidden="true">→</span>
+                                <article className="arch-node">
+                                    <h4>UAC Orchestrator + Secure Desktop Agent</h4>
+                                    <p>elevated prompt handling</p>
+                                </article>
+                                <span className="arch-arrow" aria-hidden="true">→</span>
+                                <article className="arch-node">
+                                    <h4>FastAPI Backend and Gateway</h4>
+                                    <p>optional integration path</p>
+                                </article>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -162,8 +200,8 @@ export const DocsPage = () => {
                         </div>
                     </div>
                     <div>
-                        <h2>Vision</h2>
-                        <p>Vision routing selects the fastest reliable path.</p>
+                        <h2>Perception Stack</h2>
+                        <p>Execution prefers UI Automation evidence before escalating to visual models.</p>
                         <div className="stack">
                             {visionGuide.map((item) => (
                                 <div key={item.mode} className="stack-row">
@@ -173,6 +211,38 @@ export const DocsPage = () => {
                             ))}
                         </div>
                     </div>
+                </div>
+            </section>
+
+            <section className="docs-section">
+                <div className="container docs-grid">
+                    <article className="docs-card">
+                        <h2>Gemini Live Runtime</h2>
+                        <p>Live sessions are first-class and default-on when direct API mode is available.</p>
+                        <ul>
+                            <li>Streams voice/text with session continuity and reconnect support.</li>
+                            <li>Uses action serialization so mutating calls do not overlap.</li>
+                            <li>Supports safe stop requests with broker-aware cancellation.</li>
+                        </ul>
+                    </article>
+                    <article className="docs-card">
+                        <h2>UI Automation Core</h2>
+                        <p>Blind execution uses UIA primitives before screenshot-heavy reasoning.</p>
+                        <ul>
+                            <li>Window listing and focus for deterministic app targeting.</li>
+                            <li><code>ui_element_id</code> actions for stable click/type workflows.</li>
+                            <li>Text extraction via UIA first, OCR fallback when needed.</li>
+                        </ul>
+                    </article>
+                    <article className="docs-card">
+                        <h2>Live Orchestration</h2>
+                        <p>Live runtime coordinates execution order, continuity, and interruption safety.</p>
+                        <ul>
+                            {liveGuide.map((item) => (
+                                <li key={item.mode}><strong>{item.mode}:</strong> {item.detail}</li>
+                            ))}
+                        </ul>
+                    </article>
                 </div>
             </section>
 

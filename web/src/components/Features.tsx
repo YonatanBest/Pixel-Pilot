@@ -4,29 +4,39 @@ import './Features.css';
 
 const features = [
   {
-    title: 'Multimodal Vision',
-    desc: 'Gemini Robotics-ER + local OCR edge engine.',
+    title: 'Vision-First Automation',
+    desc: 'Understands on-screen context with Gemini Robotics-ER and local OCR fallback.',
     id: '01'
   },
   {
-    title: 'Safety Tiers',
-    desc: 'Guidance, Safe, and Full-Auto execution modes.',
+    title: 'Gemini Live Sessions',
+    desc: 'Default-on live voice and text runtime with reconnect continuity and stop safety.',
     id: '02'
   },
   {
-    title: 'Interactive Planning',
-    desc: 'Blind first-step decisions for intelligent workspace routing.',
+    title: 'UI Automation Core',
+    desc: 'Blind-first snapshots, window focus, UI element targeting, and text extraction.',
     id: '03'
   },
   {
-    title: 'Agent Desktop',
-    desc: 'Isolated sandbox for secure background tasks.',
+    title: 'Adaptive Safety Modes',
+    desc: 'Guidance, Safe, and Auto execution designed for different trust levels.',
     id: '04'
   },
   {
-    title: 'Deferred Verification',
-    desc: 'Post-action screen analysis with buffered task replies.',
+    title: 'Live Decision Loop',
+    desc: 'Plans, verifies, and corrects actions while tasks are still in motion.',
     id: '05'
+  },
+  {
+    title: 'Agent Desktop',
+    desc: 'Runs in an isolated desktop workspace for clean, reliable automation.',
+    id: '06'
+  },
+  {
+    title: 'Secure Desktop Coverage',
+    desc: 'UAC orchestration extends control into elevated and protected prompts.',
+    id: '07'
   }
 ];
 
@@ -36,15 +46,15 @@ export const Features = () => {
     target: targetRef,
   });
 
-  const x = useTransform(scrollYProgress, [0, 1], ["0%", "-85%"]);
+  const x = useTransform(scrollYProgress, [0, 1], ["0%", "-93%"]);
 
   return (
     <section ref={targetRef} id="features" className="features-section">
       <div className="sticky-wrapper">
         <motion.div style={{ x }} className="features-track">
           <div className="feature-intro">
-            <h2>CAPABILITIES</h2>
-            <p>A suite of tools designed for total OS control.</p>
+            <h2>WHY PIXELPILOT</h2>
+            <p>Core pillars behind the project and its automation model.</p>
             <span className="scroll-hint">SCROLL &rarr;</span>
           </div>
           {features.map((feature) => (
