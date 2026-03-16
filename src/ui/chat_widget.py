@@ -27,7 +27,7 @@ from .sidecar_preview import EmbeddedAgentPreview
 from config import OperationMode, Config
 
 
-DEFAULT_INPUT_PROMPT = "Ask Pixel Pilot to do anything..."
+DEFAULT_INPUT_PROMPT = "Ask Pixy to do anything..."
 LISTENING_INPUT_PROMPT = "Listening..."
 LIVE_IDLE_INPUT_PROMPT = "Type or speak to Gemini Live..."
 LIVE_VOICE_INPUT_PROMPT = "Live voice active..."

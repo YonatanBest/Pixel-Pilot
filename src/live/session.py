@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import audioop
 import asyncio
 import io
 import json
 import logging
 import math
+import re
 import struct
 import threading
 import time
@@ -35,7 +37,13 @@ else:
 
 
 LIVE_SYSTEM_INSTRUCTION = (
-    "You are Pixel Pilot operating in Gemini Live mode on a Windows PC. "
+    "You are Pixy operating in Gemini Live mode on a Windows PC. "
+    "When users ask to explain, teach, or help them understand what is on screen, you must annotate while explaining. "
+    "Do not wait for an explicit 'highlight' request. "
+    "For those requests, call overlay drawing tools "
+    "(overlay_draw_box, overlay_draw_text, overlay_draw_pointer, overlay_clear) by default. "
+    "Use tight, precise highlights around the smallest relevant element and avoid broad container boxes. "
+    "Keep annotations temporary: set ttl_ms for boxes/text/pointers and clear stale overlays when the explanation segment is done. "
     "Work UIA-first: prefer UI Automation state, window listing, window focus, keyboard actions, "
     "app launch, and brokered status checks before requesting detailed vision. "
     "Treat the low-FPS video feed as coarse awareness only, not precise click targeting. "
@@ -46,8 +54,13 @@ LIVE_SYSTEM_INSTRUCTION = (
 )
 
 LIVE_GUIDANCE_SYSTEM_INSTRUCTION = (
-    "You are Pixel Pilot operating in Gemini Live guidance mode on a Windows PC. "
+    "You are Pixy operating in Gemini Live guidance mode on a Windows PC. "
     "You are a tutor only: guide the user step-by-step with concise voice/text instructions. "
+    "For learning/help/explanation requests, visual guidance is required: draw overlays "
+    "(overlay_draw_box, overlay_draw_text, overlay_draw_pointer, overlay_clear) on the user's screen by default, "
+    "without waiting for the user to explicitly ask for highlighting. "
+    "Keep highlights tight and precise around the specific target element. "
+    "Use temporary overlays (ttl_ms) and clear stale annotations after each explained step. "
     "Do not perform desktop actions on the user's behalf. "
     "Do not wait for the user to say 'done' if you can already observe progress. "
     "When you detect the user completed a step, acknowledge it immediately and continue to the next step. "
@@ -85,7 +98,7 @@ class LiveSessionManager(QObject):
         self._session_cm = None
         self._session_started_at = 0.0
         self._resume_handle: Optional[str] = None
-        self._speaker_queue: Optional[asyncio.Queue[bytes]] = None
+        self._speaker_queue: Optional[asyncio.Queue[tuple[bytes, int]]] = None
         self._receive_task: Optional[asyncio.Task] = None
         self._video_task: Optional[asyncio.Task] = None
         self._speaker_task: Optional[asyncio.Task] = None
@@ -101,6 +114,10 @@ class LiveSessionManager(QObject):
         self._pending_capture_paths: deque[tuple[str, dict[str, Any]]] = deque(maxlen=4)
         self._audio_output_suppressed_until = 0.0
         self._reconnect_in_progress = False
+        self._image_input_enabled = bool(Config.LIVE_ENABLE_IMAGE_INPUT)
+        self._video_stream_enabled = bool(Config.LIVE_ENABLE_VIDEO_STREAM and self._image_input_enabled)
+        self._speaker_drop_logged_at = 0.0
+        self._audio_resample_logged_at = 0.0
         self._last_guidance_snapshot_signature = ""
         self._last_guidance_probe_sent_at = 0.0
 
@@ -122,6 +139,36 @@ class LiveSessionManager(QObject):
 
     def _is_guidance_mode(self, mode: Optional[object] = None) -> bool:
         return self._mode_key(mode) == OperationMode.GUIDE.value
+
+    @staticmethod
+    def _looks_like_explanation_request(text: str) -> bool:
+        haystack = str(text or "").strip().lower()
+        if not haystack:
+            return False
+        triggers = (
+            "explain",
+            "teach",
+            "help me understand",
+            "understand this",
+            "walk me through",
+            "how does this work",
+            "what is this",
+            "break this down",
+            "clarify",
+            "study",
+            "learn",
+        )
+        return any(term in haystack for term in triggers)
+
+    def _clear_overlay_immediately(self) -> None:
+        chat_window = getattr(self.agent, "chat_window", None)
+        sender = getattr(chat_window, "send_overlay_command", None)
+        if not callable(sender):
+            return
+        try:
+            sender({"action": "overlay_clear"})
+        except Exception:
+            logger.debug("Failed to clear overlay before explanation turn", exc_info=True)
 
     @property
     def is_available(self) -> bool:
@@ -166,6 +213,8 @@ class LiveSessionManager(QObject):
             self._current_goal = clean
         self.agent.current_task = clean
         self._recent_user_steering.append(clean)
+        if self._looks_like_explanation_request(clean):
+            self._clear_overlay_immediately()
         self.session_state_changed.emit("thinking")
         return self._submit_async(self._send_text(clean))
 
@@ -307,7 +356,7 @@ class LiveSessionManager(QObject):
         if not payload:
             return
 
-        session = await self._ensure_session()
+        session = await self._ensure_session_with_retry()
         try:
             await asyncio.wait_for(session.send_realtime_input(text=payload), timeout=8.0)
         except asyncio.TimeoutError as exc:
@@ -326,11 +375,29 @@ class LiveSessionManager(QObject):
             raise
 
     async def _start_voice_async(self) -> None:
-        await self._ensure_session()
+        await self._ensure_session_with_retry()
         if self._mic_task and not self._mic_task.done():
             return
         self._mic_task = asyncio.create_task(self._microphone_loop())
         self.session_state_changed.emit("listening")
+
+    async def _ensure_session_with_retry(self, retries: int = 1):
+        attempt = 0
+        while True:
+            try:
+                return await self._ensure_session()
+            except Exception as exc:  # noqa: BLE001
+                if attempt >= retries or not self._is_recoverable_connection_error(exc):
+                    raise
+                delay_s = 0.75 * (attempt + 1)
+                logger.warning(
+                    "Live session connect failed (%s); retrying in %.2fs",
+                    exc,
+                    delay_s,
+                )
+                await self._disconnect_session()
+                await asyncio.sleep(delay_s)
+                attempt += 1
 
     async def _stop_voice_async(self) -> None:
         if self._mic_task and not self._mic_task.done():
@@ -353,9 +420,11 @@ class LiveSessionManager(QObject):
         self._session_cm = self._client.aio.live.connect(model=Config.GEMINI_LIVE_MODEL, config=config)
         self._session = await self._session_cm.__aenter__()
         self._session_started_at = time.monotonic()
-        self._speaker_queue = asyncio.Queue(maxsize=64)
+        self._speaker_queue = asyncio.Queue(maxsize=Config.LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS)
         self._receive_task = asyncio.create_task(self._receive_loop())
-        self._video_task = asyncio.create_task(self._video_loop())
+        self._video_task = (
+            asyncio.create_task(self._video_loop()) if self._video_stream_enabled else None
+        )
         self._speaker_task = asyncio.create_task(self._speaker_loop())
         self._rotation_task = asyncio.create_task(self._rotation_loop())
         if self._is_guidance_mode():
@@ -509,27 +578,21 @@ class LiveSessionManager(QObject):
 
                             inline_data = getattr(part, "inline_data", None)
                             data = getattr(inline_data, "data", None) if inline_data is not None else None
-                            if data and self._speaker_queue is not None:
+                            mime_type = str(getattr(inline_data, "mime_type", "") or "").lower()
+                            if data and self._speaker_queue is not None and (
+                                not mime_type or mime_type.startswith("audio/")
+                            ):
                                 self._audio_output_suppressed_until = time.monotonic() + 0.25
                                 self.assistant_audio_level_changed.emit(self._compute_audio_level(data))
-                                if self._speaker_queue.full():
-                                    try:
-                                        self._speaker_queue.get_nowait()
-                                    except asyncio.QueueEmpty:
-                                        pass
-                                await self._speaker_queue.put(data)
+                                sample_rate = self._extract_audio_rate(mime_type)
+                                await self._enqueue_speaker_audio(data, sample_rate)
 
                     if getattr(server_content, "interrupted", False):
                         self.session_state_changed.emit("interrupted")
                         self._assistant_buffer = ""
                         self._user_buffer = ""
                         self.assistant_audio_level_changed.emit(0.0)
-                        if self._speaker_queue is not None:
-                            while not self._speaker_queue.empty():
-                                try:
-                                    self._speaker_queue.get_nowait()
-                                except asyncio.QueueEmpty:
-                                    break
+                        self._clear_speaker_queue()
 
                     if getattr(server_content, "turn_complete", False):
                         if self._user_buffer:
@@ -546,6 +609,10 @@ class LiveSessionManager(QObject):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
+            if self._maybe_disable_image_input_for_error(exc):
+                if self.enabled and not self._shutdown_event.is_set():
+                    await self._reconnect_with_resume()
+                return
             if self._is_recoverable_connection_error(exc):
                 logger.warning("Live receive loop connection lost; reconnecting: %s", exc)
                 if self.enabled and not self._shutdown_event.is_set():
@@ -581,6 +648,8 @@ class LiveSessionManager(QObject):
 
     async def _video_loop(self) -> None:
         assert self._session is not None
+        if not self._video_stream_enabled:
+            return
         interval = max(0.5, 1.0 / max(1, Config.LIVE_VIDEO_FPS))
         try:
             while True:
@@ -592,6 +661,10 @@ class LiveSessionManager(QObject):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
+            if self._maybe_disable_image_input_for_error(exc):
+                if self.enabled and not self._shutdown_event.is_set():
+                    await self._reconnect_with_resume()
+                return
             if self._is_recoverable_connection_error(exc):
                 logger.warning("Live video loop connection lost; reconnecting: %s", exc)
                 if self.enabled and not self._shutdown_event.is_set():
@@ -645,20 +718,72 @@ class LiveSessionManager(QObject):
     async def _speaker_loop(self) -> None:
         pya = pyaudio.PyAudio()
         stream = None
+        output_rate = Config.LIVE_AUDIO_OUTPUT_RATE
+        ratecv_state: Any = None
+        pending_chunk: Optional[tuple[bytes, int]] = None
         try:
             stream = await asyncio.to_thread(
                 pya.open,
                 format=pyaudio.paInt16,
                 channels=1,
-                rate=Config.LIVE_AUDIO_OUTPUT_RATE,
+                rate=output_rate,
                 output=True,
             )
             while True:
                 if self._speaker_queue is None:
                     await asyncio.sleep(0.05)
                     continue
-                payload = await self._speaker_queue.get()
-                await asyncio.to_thread(stream.write, payload)
+                if pending_chunk is not None:
+                    payload, source_rate = pending_chunk
+                    pending_chunk = None
+                else:
+                    payload, source_rate = await self._speaker_queue.get()
+                if not payload:
+                    continue
+                normalized_source_rate = self._normalize_audio_rate(source_rate, output_rate)
+                batch_payloads = [payload]
+                total_bytes = len(payload)
+                queue = self._speaker_queue
+                if queue is not None:
+                    while (
+                        len(batch_payloads) < Config.LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS
+                        and total_bytes < Config.LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES
+                    ):
+                        try:
+                            next_payload, next_rate = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if not next_payload:
+                            continue
+                        normalized_next_rate = self._normalize_audio_rate(next_rate, output_rate)
+                        if normalized_next_rate != normalized_source_rate:
+                            pending_chunk = (next_payload, next_rate)
+                            break
+                        batch_payloads.append(next_payload)
+                        total_bytes += len(next_payload)
+
+                merged_payload = (
+                    b"".join(batch_payloads) if len(batch_payloads) > 1 else batch_payloads[0]
+                )
+                out = merged_payload
+                if normalized_source_rate != output_rate:
+                    try:
+                        out, ratecv_state = audioop.ratecv(
+                            merged_payload,
+                            2,
+                            1,
+                            normalized_source_rate,
+                            output_rate,
+                            ratecv_state,
+                        )
+                        self._maybe_log_audio_resample(normalized_source_rate, output_rate)
+                    except Exception:
+                        logger.debug("Failed to resample assistant audio chunk", exc_info=True)
+                        ratecv_state = None
+                        out = payload
+                else:
+                    ratecv_state = None
+                await asyncio.to_thread(stream.write, out)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -837,16 +962,21 @@ class LiveSessionManager(QObject):
         if self._session is None:
             return
         try:
-            with Image.open(screenshot_path) as image:
-                frame = self._image_to_bytes(image, max_size=(1280, 720), fmt="PNG")
-            blob = types.Blob(data=frame, mime_type="image/png")
-            await self._session.send_realtime_input(video=blob)
+            if self._image_input_enabled:
+                with Image.open(screenshot_path) as image:
+                    frame = self._image_to_bytes(image, max_size=(1280, 720), fmt="PNG")
+                blob = types.Blob(data=frame, mime_type="image/png")
+                await self._session.send_realtime_input(video=blob)
             await self._send_realtime_text(
                 "Detailed capture refreshed for the active workspace. "
                 f"Summary: {json.dumps(summary, ensure_ascii=True)}",
                 allow_retry=False,
             )
         except Exception as exc:  # noqa: BLE001
+            if self._maybe_disable_image_input_for_error(exc):
+                if self.enabled and not self._shutdown_event.is_set():
+                    await self._reconnect_with_resume()
+                return
             logger.debug("Failed to push capture context: %s", exc, exc_info=True)
 
     def _capture_video_frame(self) -> Optional[bytes]:
@@ -925,7 +1055,107 @@ class LiveSessionManager(QObject):
         name = exc.__class__.__name__.lower()
         return (
             "connectionclosed" in name
+            or "connectionreseterror" in name
+            or "timeouterror" in name
+            or "winerror 64" in message
+            or "opening handshake" in message
+            or "connection reset" in message
+            or "network name is no longer available" in message
             or "ping timeout" in message
             or "no close frame received" in message
             or "keepalive ping timeout" in message
         )
+
+    async def _enqueue_speaker_audio(self, data: bytes, sample_rate: int) -> None:
+        queue = self._speaker_queue
+        if queue is None or not data:
+            return
+        item = (data, self._normalize_audio_rate(sample_rate, Config.LIVE_AUDIO_OUTPUT_RATE))
+
+        if not queue.full():
+            await queue.put(item)
+            return
+
+        try:
+            await asyncio.wait_for(queue.put(item), timeout=0.20)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+        maxsize = queue.maxsize if queue.maxsize > 0 else Config.LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS
+        trim_to = min(
+            maxsize - 1,
+            max(Config.LIVE_AUDIO_SPEAKER_QUEUE_TRIM_TO_CHUNKS, maxsize - 16),
+        )
+        dropped = 0
+        while queue.qsize() > trim_to:
+            try:
+                queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+
+        if dropped:
+            now = time.monotonic()
+            if now - self._speaker_drop_logged_at > 2.0:
+                logger.warning(
+                    "Live speaker queue pressure: dropped %d stale chunks (qsize=%d/%d)",
+                    dropped,
+                    queue.qsize(),
+                    maxsize,
+                )
+                self._speaker_drop_logged_at = now
+
+        await queue.put(item)
+
+    def _clear_speaker_queue(self) -> None:
+        queue = self._speaker_queue
+        if queue is None:
+            return
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    @staticmethod
+    def _extract_audio_rate(mime_type: str) -> int:
+        fallback = Config.LIVE_AUDIO_OUTPUT_RATE
+        text = str(mime_type or "").lower()
+        if not text:
+            return fallback
+        match = re.search(r"(?:rate|sample_rate)\s*=\s*(\d{4,6})", text)
+        if not match:
+            return fallback
+        return LiveSessionManager._normalize_audio_rate(match.group(1), fallback)
+
+    @staticmethod
+    def _normalize_audio_rate(rate: Any, fallback: int) -> int:
+        try:
+            parsed = int(str(rate).strip())
+        except Exception:
+            return fallback
+        return parsed if 8000 <= parsed <= 96000 else fallback
+
+    def _maybe_log_audio_resample(self, src_rate: int, dst_rate: int) -> None:
+        now = time.monotonic()
+        if now - self._audio_resample_logged_at < 5.0:
+            return
+        logger.info("Resampling assistant audio from %s Hz to %s Hz", src_rate, dst_rate)
+        self._audio_resample_logged_at = now
+
+    def _maybe_disable_image_input_for_error(self, exc: Exception) -> bool:
+        if not self._image_input_enabled:
+            return False
+        message = str(exc or "").lower()
+        if "operation is not implemented" not in message and "not supported" not in message:
+            return False
+        self._image_input_enabled = False
+        self._video_stream_enabled = False
+        logger.warning(
+            "Gemini Live model rejected image/video input; disabling image stream for this run."
+        )
+        self.error_received.emit(
+            "Live model rejected screen image/video input; continuing with audio and tool context only."
+        )
+        return True

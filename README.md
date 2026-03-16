@@ -127,9 +127,15 @@ GEMINI_BASE_MODEL=gemini-3-flash-preview
 ENABLE_GEMINI_LIVE_MODE=true
 LIVE_MODE_DEFAULT_ENABLED=true
 GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+LIVE_ENABLE_IMAGE_INPUT=false
+LIVE_ENABLE_VIDEO_STREAM=false
 LIVE_VIDEO_FPS=1
 LIVE_AUDIO_INPUT_RATE=16000
 LIVE_AUDIO_OUTPUT_RATE=24000
+LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS=192
+LIVE_AUDIO_SPEAKER_QUEUE_TRIM_TO_CHUNKS=144
+LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS=8
+LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES=65536
 LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE=105
 
 DEFAULT_MODE=auto
@@ -144,6 +150,7 @@ PIXELPILOT_GATEWAY_TOKEN=pixelpilot-secret
 Notes:
 - Live mode availability currently requires direct API mode (`GEMINI_API_KEY` present).
 - `LIVE_MODE_DEFAULT_ENABLED=true` means Live starts enabled whenever available.
+- `LIVE_ENABLE_IMAGE_INPUT=false` avoids image/video realtime sends for native-audio models (prevents policy-violation disconnects).
 - If `GEMINI_API_KEY` is missing, app uses backend auth/proxy mode.
 
 ## Run

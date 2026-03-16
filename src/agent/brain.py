@@ -544,7 +544,7 @@ def generate_completion_reply(
     recent_steps_text = "\n".join(recent_steps) or "(no successful steps recorded)"
 
     prompt = (
-        "You are Pixel Pilot. Write the final completion message to the user.\n"
+        "You are Pixy. Write the final completion message to the user.\n"
         "The task is already verified complete.\n"
         "Rules:\n"
         "1) Output must be user-facing and natural.\n"

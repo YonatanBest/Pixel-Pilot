@@ -41,6 +41,7 @@ class MainController(QObject):
         self.live_mode_enabled = False
         self._live_action_passthrough_active = False
         self._task_passthrough_active = False
+        self.annotation_overlay = None
         
         self.desktop_manager = None
 
@@ -52,6 +53,7 @@ class MainController(QObject):
         self.gui_adapter.guidance_next_requested.connect(self.handle_guidance_next)
         self.gui_adapter.guidance_input_requested.connect(self.handle_guidance_input)
         self.gui_adapter.workspace_changed.connect(self.handle_workspace_changed)
+        self.gui_adapter.overlay_command_requested.connect(self.handle_overlay_command)
 
     @staticmethod
     def _normalize_workspace(workspace: str) -> str:
@@ -172,8 +174,30 @@ class MainController(QObject):
             self._apply_default_live_mode()
             self._apply_click_through_policy()
             self.update_sidecar_visibility()
+            self._clear_annotation_overlay()
         except Exception as e:
             self.gui_adapter.add_error_message(f"Failed to initialize agent: {e}")
+
+    def _ensure_annotation_overlay(self):
+        if self.annotation_overlay is not None:
+            return self.annotation_overlay
+        try:
+            from ui.live_annotation_overlay import LiveAnnotationOverlay
+
+            self.annotation_overlay = LiveAnnotationOverlay()
+            return self.annotation_overlay
+        except Exception:
+            logger.exception("Failed to initialize live annotation overlay")
+            self.annotation_overlay = None
+            return None
+
+    def _clear_annotation_overlay(self):
+        if self.annotation_overlay is None:
+            return
+        try:
+            self.annotation_overlay.clear_annotations()
+        except Exception:
+            logger.debug("Failed to clear annotation overlay", exc_info=True)
 
     def _init_live_session(self):
         if self.live_session:
@@ -336,6 +360,7 @@ class MainController(QObject):
             self.gui_adapter.add_activity_message("Stopping...")
             self.live_session.request_stop()
             live_stopped = True
+            self._clear_annotation_overlay()
 
         if not self.worker or not self.worker.isRunning():
             if not live_stopped:
@@ -401,6 +426,14 @@ class MainController(QObject):
                 except Exception:
                     pass
 
+            self._clear_annotation_overlay()
+            if self.annotation_overlay is not None:
+                try:
+                    self.annotation_overlay.close()
+                except Exception:
+                    pass
+                self.annotation_overlay = None
+
             if self.desktop_manager:
                 try:
                     self.desktop_manager.close_all_windows(timeout=1.5)
@@ -463,6 +496,7 @@ class MainController(QObject):
         if workspace != "user":
             self._live_action_passthrough_active = False
             self._task_passthrough_active = False
+            self._clear_annotation_overlay()
 
         if self.live_session:
             try:
@@ -549,6 +583,7 @@ class MainController(QObject):
         self._task_passthrough_active = False
         if not self.live_mode_enabled:
             self._live_action_passthrough_active = False
+            self._clear_annotation_overlay()
         if self.live_mode_enabled and self.agent:
             try:
                 self.live_session.notify_workspace_changed(self.agent.active_workspace)
@@ -621,3 +656,17 @@ class MainController(QObject):
     @Slot(bool)
     def _handle_live_voice_active(self, active: bool):
         self.gui_adapter.update_live_voice_active(active)
+
+    @Slot(object)
+    def handle_overlay_command(self, payload: object):
+        if not isinstance(payload, dict):
+            return
+        overlay = self._ensure_annotation_overlay()
+        if overlay is None:
+            return
+        try:
+            result = overlay.apply_command(payload)
+            if not result.get("ok", False):
+                logger.debug("Overlay command rejected: %s", result)
+        except Exception:
+            logger.debug("Failed to apply overlay command", exc_info=True)

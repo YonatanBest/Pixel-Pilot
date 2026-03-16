@@ -34,9 +34,34 @@ class Config:
         "GEMINI_LIVE_MODEL",
         "gemini-2.5-flash-native-audio-preview-12-2025",
     ).strip() or "gemini-2.5-flash-native-audio-preview-12-2025"
+    _LIVE_MODEL_LOWER = GEMINI_LIVE_MODEL.lower()
+    LIVE_ENABLE_IMAGE_INPUT = _env_bool(
+        "LIVE_ENABLE_IMAGE_INPUT",
+        "native-audio" not in _LIVE_MODEL_LOWER,
+    )
+    LIVE_ENABLE_VIDEO_STREAM = _env_bool("LIVE_ENABLE_VIDEO_STREAM", LIVE_ENABLE_IMAGE_INPUT)
     LIVE_VIDEO_FPS = max(1, int(os.getenv("LIVE_VIDEO_FPS", "1") or "1"))
     LIVE_AUDIO_INPUT_RATE = max(8000, int(os.getenv("LIVE_AUDIO_INPUT_RATE", "16000") or "16000"))
     LIVE_AUDIO_OUTPUT_RATE = max(8000, int(os.getenv("LIVE_AUDIO_OUTPUT_RATE", "24000") or "24000"))
+    LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS = max(
+        16,
+        int(os.getenv("LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS", "192") or "192"),
+    )
+    LIVE_AUDIO_SPEAKER_QUEUE_TRIM_TO_CHUNKS = max(
+        4,
+        min(
+            LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS - 1,
+            int(os.getenv("LIVE_AUDIO_SPEAKER_QUEUE_TRIM_TO_CHUNKS", "144") or "144"),
+        ),
+    )
+    LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS = max(
+        1,
+        int(os.getenv("LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS", "8") or "8"),
+    )
+    LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES = max(
+        4096,
+        int(os.getenv("LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES", "65536") or "65536"),
+    )
     LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE = max(
         30,
         int(os.getenv("LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE", "105") or "105"),
