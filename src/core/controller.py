@@ -181,6 +181,24 @@ class MainController(QObject):
         except Exception:
             pass
 
+    def _apply_default_live_mode(self):
+        if not self.live_session:
+            self.live_mode_enabled = False
+            return
+
+        available = bool(getattr(self.live_session, "is_available", False))
+        should_enable = bool(Config.LIVE_MODE_DEFAULT_ENABLED and available)
+        if should_enable:
+            self.handle_live_mode_changed(True)
+            return
+
+        self.live_mode_enabled = False
+        try:
+            if self.main_window and hasattr(self.main_window, "chat_widget"):
+                self.main_window.chat_widget.set_live_enabled(False)
+        except Exception:
+            pass
+
     def _force_user_workspace_for_mode_change(self):
         if not self.agent:
             return
