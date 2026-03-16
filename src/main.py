@@ -192,7 +192,13 @@ def main():
         )
         dialog.exec()
 
-    window = MainWindow()
+    try:
+        window = MainWindow()
+    except Exception:
+        logger.exception("Failed to construct main window")
+        if splash:
+            splash.close()
+        raise
     if os.path.exists(task_icon_path):
         window.setWindowIcon(QIcon(task_icon_path))
     
@@ -230,6 +236,7 @@ def main():
     window.chat_widget.vision_changed.connect(controller.handle_vision_changed)
     window.chat_widget.live_mode_changed.connect(controller.handle_live_mode_changed)
     window.chat_widget.live_voice_toggled.connect(controller.handle_live_voice_toggled)
+    window.chat_widget.agent_view_visibility_changed.connect(controller.update_sidecar_visibility)
 
     # Logout handler
     def handle_logout():

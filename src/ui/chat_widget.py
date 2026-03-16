@@ -13,8 +13,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QComboBox,
     QMenu,
+    QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal, QUrl, QTimer
+from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QEvent
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtSvgWidgets import QSvgWidget
 
@@ -44,6 +45,7 @@ class ChatWidget(QWidget):
     vision_changed = Signal(str)
     live_mode_changed = Signal(bool)
     live_voice_toggled = Signal(bool)
+    agent_view_visibility_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -53,6 +55,13 @@ class ChatWidget(QWidget):
         self.audio_service.text_received.connect(self.on_speech_text)
         self.audio_service.status_changed.connect(self.on_listening_status)
         self.audio_service.level_changed.connect(self.on_audio_level)
+
+        self._agent_panel_width = 380
+        self._agent_panel_min_width = 300
+        self._agent_panel_max_width = 720
+        self._agent_resizing = False
+        self._agent_resize_start_x = 0
+        self._agent_resize_start_width = self._agent_panel_width
 
         self.setup_ui()
         self.apply_styles()
@@ -73,6 +82,7 @@ class ChatWidget(QWidget):
         self.view_mode = "bar_only"
         self._agent_view_enabled = False
         self._agent_view_requested = False
+        self._agent_preview_source = None
 
         self._chat_model: list[dict] = []
         self._turn_active = False
@@ -279,26 +289,35 @@ class ChatWidget(QWidget):
         self.set_view_mode("extended" if expanded else "bar_only")
 
     def set_agent_view_enabled(self, enabled: bool):
+        was_enabled = self._agent_view_enabled
+        was_requested = self._agent_view_requested
         self._agent_view_enabled = bool(enabled)
         if not self._agent_view_enabled:
             self._agent_view_requested = False
         self._refresh_workspace_badge()
         self._apply_view_mode()
+        if was_enabled != self._agent_view_enabled or was_requested != self._agent_view_requested:
+            self.agent_view_visibility_changed.emit()
 
     def set_agent_preview_source(self, desktop_manager_or_none):
-        self.agent_preview.set_capture_source(desktop_manager_or_none)
+        self._agent_preview_source = desktop_manager_or_none
         if desktop_manager_or_none is None:
             self._agent_view_requested = False
         self._apply_view_mode()
+        self.agent_view_visibility_changed.emit()
 
     def _toggle_agent_view(self):
         if not self._agent_view_enabled:
             return
         self._agent_view_requested = not self._agent_view_requested
         self._apply_view_mode()
+        self.agent_view_visibility_changed.emit()
 
     def can_toggle_agent_view(self) -> bool:
         return self._agent_view_enabled
+
+    def should_show_agent_view(self) -> bool:
+        return bool(self._agent_view_enabled and self._agent_view_requested)
 
     def _refresh_workspace_badge(self, show_agent: bool = False):
         workspace = self.workspace_badge.workspace()
@@ -428,7 +447,7 @@ class ChatWidget(QWidget):
     def setup_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setSpacing(0)
 
         self.extended_panel = QFrame()
         self.extended_panel.setObjectName("extendedPanel")
@@ -533,12 +552,7 @@ class ChatWidget(QWidget):
 
         ep.addWidget(self.process_panel)
 
-        self.agent_separator = QFrame()
-        self.agent_separator.setObjectName("agentSeparator")
-        self.agent_separator.setFrameShape(QFrame.Shape.HLine)
-        self.agent_separator.setFrameShadow(QFrame.Shadow.Plain)
-
-        self.agent_panel = QFrame()
+        self.agent_panel = QFrame(self)
         self.agent_panel.setObjectName("agentPanel")
         ap = QVBoxLayout(self.agent_panel)
         ap.setContentsMargins(0, 0, 0, 0)
@@ -550,11 +564,23 @@ class ChatWidget(QWidget):
 
         self.agent_preview = EmbeddedAgentPreview(self, fps=Config.SIDECAR_PREVIEW_FPS)
         ap.addWidget(self.agent_preview)
+        self.agent_panel.setMinimumWidth(self._agent_panel_min_width)
+        self.agent_panel.setFixedWidth(self._agent_panel_width)
+        self.agent_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.agent_panel.hide()
 
-        self.extended_panel.setVisible(False)
+        self.agent_resize_handle = QFrame(self)
+        self.agent_resize_handle.setObjectName("agentResizeHandle")
+        self.agent_resize_handle.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.agent_resize_handle.setToolTip("Drag to resize agent view")
+        self.agent_resize_handle.hide()
+        self.agent_resize_handle.installEventFilter(self)
+
+        self.extended_panel.setMinimumWidth(360)
 
         self.top_bar = QFrame()
         self.top_bar.setObjectName("topBar")
+        self.top_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         h = QHBoxLayout(self.top_bar)
         h.setContentsMargins(12, 10, 12, 10)
         h.setSpacing(10)
@@ -615,18 +641,16 @@ class ChatWidget(QWidget):
         h.addWidget(self.expand_btn)
         h.addWidget(self.close_btn)
 
-        self.agent_below_container = QFrame()
-        self.agent_below_container.setObjectName("agentBelowContainer")
-        abc = QVBoxLayout(self.agent_below_container)
-        abc.setContentsMargins(0, 0, 0, 0)
-        abc.setSpacing(6)
-        abc.addWidget(self.agent_separator)
-        abc.addWidget(self.agent_panel)
-        self.agent_below_container.setVisible(False)
+        self.extended_panel.setVisible(False)
 
-        layout.addWidget(self.extended_panel)
-        layout.addWidget(self.top_bar)
-        layout.addWidget(self.agent_below_container)
+        self.top_row = QWidget()
+        top_row_layout = QHBoxLayout(self.top_row)
+        top_row_layout.setContentsMargins(0, 0, 0, 0)
+        top_row_layout.setSpacing(0)
+        top_row_layout.addWidget(self.top_bar, 1)
+
+        layout.addWidget(self.top_row)
+        layout.addWidget(self.extended_panel, 1)
         self.setLayout(layout)
 
     def apply_styles(self):
@@ -684,6 +708,13 @@ class ChatWidget(QWidget):
                 border: 1px solid #d3dce8;
                 border-radius: 16px;
             }
+            QFrame#agentResizeHandle {
+                background: #d2dae5;
+                border-radius: 3px;
+            }
+            QFrame#agentResizeHandle:hover {
+                background: #94a3b8;
+            }
             QComboBox#modeCombo, QComboBox#visionCombo {
                 background: #ffffff;
                 color: #1f2937;
@@ -739,13 +770,6 @@ class ChatWidget(QWidget):
                 color: #334155;
                 font: 700 12px 'Segoe UI', sans-serif;
                 padding-left: 2px;
-            }
-            QFrame#agentSeparator {
-                color: #d5deea;
-                background: #d5deea;
-                border: none;
-                min-height: 1px;
-                max-height: 1px;
             }
             QTextEdit#chatDisplay {
                 background: #ffffff;
@@ -1732,6 +1756,53 @@ class ChatWidget(QWidget):
         self.view_mode = mode_key
         self._apply_view_mode()
 
+    def _sync_top_bar_width(self, show_agent: bool) -> None:
+        if not hasattr(self, "top_bar"):
+            return
+        if not show_agent:
+            self.top_bar.setMinimumWidth(0)
+            self.top_bar.setMaximumWidth(16777215)
+            self.top_bar.updateGeometry()
+            return
+
+        margin = 12
+        gap = 10
+        max_bar = max(300, self.width() - (self._agent_panel_width + margin * 2 + gap))
+        self.top_bar.setFixedWidth(max_bar)
+
+    def _position_agent_panel(self) -> None:
+        if not hasattr(self, "agent_panel") or not hasattr(self, "agent_resize_handle") or not hasattr(self, "top_bar"):
+            return
+        if not self.agent_panel.isVisible():
+            self.agent_resize_handle.hide()
+            return
+
+        margin = 12
+        gap = 8
+        top_left = self.top_bar.mapTo(self, self.top_bar.rect().topLeft())
+        panel_w = max(self._agent_panel_min_width, min(self._agent_panel_width, self._agent_panel_max_width))
+        panel_h = max(220, min(340, self.height() - 24))
+        x = max(margin, self.width() - panel_w - margin)
+        y = top_left.y() + 6
+
+        self.agent_panel.setGeometry(x, y, panel_w, panel_h)
+
+        handle_w = 6
+        handle_y = y + 24
+        handle_h = max(64, panel_h - 36)
+        self.agent_resize_handle.setGeometry(max(margin, x - handle_w - gap), handle_y, handle_w, handle_h)
+        self.agent_resize_handle.raise_()
+        self.agent_panel.raise_()
+        self.agent_resize_handle.show()
+
+    @staticmethod
+    def _mouse_global_x(event) -> int:
+        if hasattr(event, "globalPosition"):
+            return int(event.globalPosition().x())
+        if hasattr(event, "globalPos"):
+            return int(event.globalPos().x())
+        return 0
+
     def _apply_view_mode(self):
         listening = self._live_voice_active if self._live_enabled else self.audio_service.is_listening
         expanded = self.view_mode == "extended"
@@ -1740,9 +1811,17 @@ class ChatWidget(QWidget):
         self.expand_btn.setText(DETAILS_EXPANDED_ICON if expanded else DETAILS_COLLAPSED_ICON)
         self.expand_btn.setToolTip("Hide process details" if expanded else "Show process details")
 
-        show_agent = bool(expanded and self._agent_view_enabled and self._agent_view_requested)
-        self.agent_below_container.setVisible(show_agent)
-        self.agent_preview.set_active(show_agent)
+        # Sidecar preview is now owned by MainWindow; keep embedded preview hidden.
+        show_agent = bool(self._agent_view_enabled and self._agent_view_requested)
+        self.agent_panel.hide()
+        self.agent_resize_handle.hide()
+        if self._agent_resizing:
+            self._agent_resizing = False
+            try:
+                self.agent_resize_handle.releaseMouse()
+            except Exception:
+                pass
+        self.agent_preview.set_active(False)
         self._refresh_workspace_badge(show_agent)
 
         if not expanded:
@@ -1775,6 +1854,12 @@ class ChatWidget(QWidget):
             self.guidance_bar.hide()
             self.guidance_btn.hide()
             self.continue_btn.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
+    def eventFilter(self, obj, event):
+        return super().eventFilter(obj, event)
 
     def _hide_input_hint(self):
         if self.input_hint.isVisible():
