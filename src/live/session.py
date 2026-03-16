@@ -19,6 +19,7 @@ from PySide6.QtCore import QObject, Signal
 from config import Config, OperationMode
 from .broker import LiveActionBroker
 from .tools import LiveToolRegistry
+from tools import ui_automation
 
 logger = logging.getLogger("pixelpilot.live.session")
 
@@ -48,8 +49,10 @@ LIVE_GUIDANCE_SYSTEM_INSTRUCTION = (
     "You are Pixel Pilot operating in Gemini Live guidance mode on a Windows PC. "
     "You are a tutor only: guide the user step-by-step with concise voice/text instructions. "
     "Do not perform desktop actions on the user's behalf. "
+    "Do not wait for the user to say 'done' if you can already observe progress. "
+    "When you detect the user completed a step, acknowledge it immediately and continue to the next step. "
     "If tools are available, use them only for read-only observation and adapt your guidance from what you see. "
-    "Ask short follow-up questions when needed and wait for user confirmation before moving to the next step."
+    "Ask short follow-up questions only when the observed state is ambiguous."
 )
 
 LIVE_SYSTEM_CONTEXT_PREFIX = (
@@ -88,6 +91,7 @@ class LiveSessionManager(QObject):
         self._speaker_task: Optional[asyncio.Task] = None
         self._mic_task: Optional[asyncio.Task] = None
         self._rotation_task: Optional[asyncio.Task] = None
+        self._guidance_observer_task: Optional[asyncio.Task] = None
         self._shutdown_event = threading.Event()
         self._assistant_buffer = ""
         self._user_buffer = ""
@@ -97,6 +101,8 @@ class LiveSessionManager(QObject):
         self._pending_capture_paths: deque[tuple[str, dict[str, Any]]] = deque(maxlen=4)
         self._audio_output_suppressed_until = 0.0
         self._reconnect_in_progress = False
+        self._last_guidance_snapshot_signature = ""
+        self._last_guidance_probe_sent_at = 0.0
 
         self.broker = LiveActionBroker(on_action_update=self._on_action_update)
         self.tools = LiveToolRegistry(
@@ -196,6 +202,8 @@ class LiveSessionManager(QObject):
         self._mode = mode
         is_guidance = self._is_guidance_mode()
         self.tools.set_guidance_mode(is_guidance)
+        self._last_guidance_snapshot_signature = ""
+        self._last_guidance_probe_sent_at = 0.0
 
         if is_guidance and not was_guidance:
             self.broker.cancel_current_action("Live guidance mode enabled. Actions are disabled.")
@@ -350,6 +358,10 @@ class LiveSessionManager(QObject):
         self._video_task = asyncio.create_task(self._video_loop())
         self._speaker_task = asyncio.create_task(self._speaker_loop())
         self._rotation_task = asyncio.create_task(self._rotation_loop())
+        if self._is_guidance_mode():
+            self._last_guidance_snapshot_signature = ""
+            self._last_guidance_probe_sent_at = 0.0
+            self._guidance_observer_task = asyncio.create_task(self._guidance_observer_loop())
         if self._voice_enabled and (self._mic_task is None or self._mic_task.done()):
             self._mic_task = asyncio.create_task(self._microphone_loop())
         self.session_state_changed.emit("listening")
@@ -358,7 +370,14 @@ class LiveSessionManager(QObject):
 
     async def _disconnect_session(self, *, close_client: bool = False) -> None:
         current_task = asyncio.current_task()
-        tasks = [self._mic_task, self._video_task, self._speaker_task, self._receive_task, self._rotation_task]
+        tasks = [
+            self._mic_task,
+            self._video_task,
+            self._speaker_task,
+            self._receive_task,
+            self._rotation_task,
+            self._guidance_observer_task,
+        ]
         pending: list[asyncio.Task] = []
         for task in tasks:
             if task is None or task.done() or task is current_task:
@@ -373,6 +392,7 @@ class LiveSessionManager(QObject):
         self._speaker_task = None
         self._receive_task = None
         self._rotation_task = None
+        self._guidance_observer_task = None
         self._speaker_queue = None
         self.audio_level_changed.emit(0.0)
         self.assistant_audio_level_changed.emit(0.0)
@@ -676,6 +696,114 @@ class LiveSessionManager(QObject):
                 await self._ensure_session()
         finally:
             self._reconnect_in_progress = False
+
+    def _guidance_desktop_manager(self):
+        if str(getattr(self.agent, "active_workspace", "user")).strip().lower() == "agent":
+            return getattr(self.agent, "desktop_manager", None)
+        return None
+
+    def _guidance_goal_terms(self) -> list[str]:
+        getter = getattr(self.agent, "_goal_terms", None)
+        if callable(getter):
+            try:
+                return [str(item).strip() for item in (getter() or []) if str(item).strip()]
+            except Exception:
+                return []
+        return []
+
+    @staticmethod
+    def _guidance_snapshot_digest(snapshot: dict[str, Any]) -> dict[str, Any]:
+        elements = []
+        for item in (snapshot.get("elements") or [])[:8]:
+            elements.append(
+                {
+                    "ui_element_id": item.get("ui_element_id"),
+                    "name": item.get("name"),
+                    "control_type": item.get("control_type"),
+                }
+            )
+
+        windows = []
+        for item in (snapshot.get("windows") or [])[:5]:
+            windows.append(
+                {
+                    "window_id": item.get("window_id"),
+                    "title": item.get("title"),
+                    "process_name": item.get("process_name"),
+                    "is_visible": item.get("is_visible"),
+                }
+            )
+
+        return {
+            "workspace": snapshot.get("workspace"),
+            "active_window_title": snapshot.get("active_window_title"),
+            "active_window_class": snapshot.get("active_window_class"),
+            "elements_count": snapshot.get("elements_count"),
+            "windows_count": snapshot.get("windows_count"),
+            "elements_preview": elements,
+            "windows_preview": windows,
+        }
+
+    async def _guidance_observer_loop(self) -> None:
+        # In live guidance mode, detect UIA state changes and proactively nudge the model
+        # so it can acknowledge step completion without waiting for explicit "done".
+        poll_interval_s = 1.0
+        nudge_cooldown_s = 2.5
+        try:
+            while True:
+                await asyncio.sleep(poll_interval_s)
+
+                if self._shutdown_event.is_set() or not self.enabled or self._session is None:
+                    continue
+                if not self._is_guidance_mode():
+                    continue
+                if not str(self._current_goal or "").strip():
+                    continue
+                if self.broker.has_pending():
+                    continue
+
+                try:
+                    snapshot = await asyncio.to_thread(
+                        ui_automation.get_snapshot,
+                        getattr(self.agent, "active_workspace", "user"),
+                        self._guidance_desktop_manager(),
+                        Config.UIA_MAX_ELEMENTS,
+                        self._guidance_goal_terms(),
+                    )
+                except Exception:
+                    continue
+
+                if not isinstance(snapshot, dict) or not snapshot.get("available", False):
+                    continue
+
+                signature = ui_automation.snapshot_signature(snapshot)
+                if not signature or signature == self._last_guidance_snapshot_signature:
+                    continue
+                self._last_guidance_snapshot_signature = signature
+
+                summary = self._guidance_snapshot_digest(snapshot)
+                self.tools.last_snapshot_summary = summary
+                try:
+                    self.agent.current_blind_snapshot = snapshot
+                except Exception:
+                    pass
+
+                now = time.monotonic()
+                if now - self._last_guidance_probe_sent_at < nudge_cooldown_s:
+                    continue
+                self._last_guidance_probe_sent_at = now
+
+                prompt = (
+                    "Guidance observer update: screen/UI state changed after the user's action. "
+                    "If this indicates the current step was completed, acknowledge it now and give the next step "
+                    "without waiting for the user to say done. If not complete, give one short correction. "
+                    f"State summary: {json.dumps(summary, ensure_ascii=True)}"
+                )
+                await self._send_realtime_text(prompt, allow_retry=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Guidance observer loop stopped unexpectedly", exc_info=True)
 
     def _build_resume_summary(self) -> str:
         payload = {
