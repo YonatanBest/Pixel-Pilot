@@ -1,6 +1,4 @@
-import io
 import json
-import os
 import base64
 import logging
 from typing import Any, Dict, Optional
@@ -15,11 +13,44 @@ logger = logging.getLogger("pixelpilot.client")
 
 class RateLimitError(RuntimeError):
     def __init__(
-        self, message: str, remaining: Optional[int] = None, limit: Optional[int] = None
+        self,
+        message: str,
+        remaining: Optional[int] = None,
+        limit: Optional[int] = None,
+        window: Optional[str] = None,
+        retry_after_seconds: Optional[int] = None,
     ):
         super().__init__(message)
         self.remaining = remaining
         self.limit = limit
+        self.window = window
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _parse_rate_limit_detail(detail_payload: Any) -> dict[str, Any]:
+    if isinstance(detail_payload, dict):
+        return {
+            "message": str(detail_payload.get("message") or "Request failed"),
+            "limit": detail_payload.get("limit"),
+            "remaining": detail_payload.get("remaining"),
+            "window": detail_payload.get("window"),
+            "retry_after_seconds": detail_payload.get("retry_after_seconds"),
+        }
+    return {
+        "message": str(detail_payload or "Request failed"),
+        "limit": None,
+        "remaining": None,
+        "window": None,
+        "retry_after_seconds": None,
+    }
+
+
+def _format_rate_limit_message(detail: dict[str, Any]) -> str:
+    window = str(detail.get("window") or "").strip().lower()
+    retry_after_seconds = detail.get("retry_after_seconds")
+    if window == "minute" and retry_after_seconds is not None:
+        return f"Rate limit exceeded. Try again in {max(1, int(retry_after_seconds))}s."
+    return str(detail.get("message") or "Request failed")
 
 
 class DirectGeminiClient:
@@ -185,20 +216,24 @@ class BackendClient:
                 if response.get("type") == "error":
                     code = int(response.get("code", 500))
                     detail_payload = response.get("detail", "Request failed")
-                    if isinstance(detail_payload, dict):
-                        detail = str(detail_payload.get("message") or "Request failed")
-                        limit = detail_payload.get("limit")
-                        remaining = detail_payload.get("remaining")
-                    else:
-                        detail = str(detail_payload)
-                        limit = None
-                        remaining = None
+                    rate_limit_detail = _parse_rate_limit_detail(detail_payload)
+                    detail = str(rate_limit_detail["message"])
+                    limit = rate_limit_detail["limit"]
+                    remaining = rate_limit_detail["remaining"]
+                    window = rate_limit_detail["window"]
+                    retry_after_seconds = rate_limit_detail["retry_after_seconds"]
 
                     if code == 401:
                         auth.logout()
                         raise RuntimeError("Session expired. Please log in again.")
                     if code == 429:
-                        raise RateLimitError(detail, remaining=remaining, limit=limit)
+                        raise RateLimitError(
+                            _format_rate_limit_message(rate_limit_detail),
+                            remaining=remaining,
+                            limit=limit,
+                            window=window,
+                            retry_after_seconds=retry_after_seconds,
+                        )
                     raise RuntimeError(detail)
 
                 if response.get("type") != "generate_result":

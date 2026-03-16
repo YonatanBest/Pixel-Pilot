@@ -1,13 +1,15 @@
+import asyncio
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import redis.asyncio as redis
-import json
 import uvicorn
 import service
-import logging
 import auth
 import rate_limiter
 from database import lifespan, get_db, get_redis
@@ -18,6 +20,10 @@ logger = logging.getLogger("backend")
 
 app = FastAPI(title="PixelPilot AI Backend", version="1.0.0", lifespan=lifespan)
 security = HTTPBearer()
+
+GENERATION_ERROR_MESSAGE = "Generation failed"
+SERVICE_UNAVAILABLE_MESSAGE = "Service temporarily unavailable"
+WS_AUTH_TIMEOUT_SECONDS = 10
 
 
 # Request/Response models
@@ -32,42 +38,82 @@ class GenerateResponse(BaseModel):
     remaining_requests: Optional[int] = None
 
 
+def _build_rate_limit_message(reservation: rate_limiter.RateLimitReservation) -> str:
+    if reservation.window == rate_limiter.WINDOW_MINUTE:
+        return (
+            f"Rate limit exceeded. Try again in "
+            f"{max(1, reservation.retry_after_seconds)}s."
+        )
+    return (
+        f"Daily limit exceeded ({reservation.limit} requests). "
+        f"Resets at midnight UTC."
+    )
+
+
+def _build_rate_limit_detail(
+    reservation: rate_limiter.RateLimitReservation,
+) -> Dict[str, Any]:
+    return {
+        "message": _build_rate_limit_message(reservation),
+        "window": reservation.window,
+        "limit": reservation.limit,
+        "remaining": reservation.remaining,
+        "retry_after_seconds": reservation.retry_after_seconds,
+    }
+
+
+def _build_rate_limit_headers(detail: Dict[str, Any]) -> Dict[str, str]:
+    headers = {
+        "X-RateLimit-Limit": str(detail.get("limit", 0)),
+        "X-RateLimit-Remaining": str(detail.get("remaining", 0)),
+    }
+    retry_after_seconds = int(detail.get("retry_after_seconds", 0) or 0)
+    if retry_after_seconds > 0:
+        headers["Retry-After"] = str(retry_after_seconds)
+    return headers
+
+
 async def _generate_with_rate_limit(
     request: GenerateRequest,
     user_id: str,
     redis_client: redis.Redis,
 ) -> Dict[str, Any]:
     if redis_client is None:
-        raise HTTPException(status_code=503, detail="Redis unavailable")
+        raise HTTPException(status_code=503, detail=SERVICE_UNAVAILABLE_MESSAGE)
 
-    allowed, current, limit = await rate_limiter.check_rate_limit(user_id, redis_client)
-    if not allowed:
+    reservation = await rate_limiter.reserve_generate_request(user_id, redis_client)
+    if not reservation.allowed:
         raise HTTPException(
             status_code=429,
-            detail={
-                "message": f"Daily limit exceeded ({limit} requests). Resets at midnight UTC.",
-                "limit": limit,
-                "remaining": 0,
-            },
+            detail=_build_rate_limit_detail(reservation),
         )
 
-    logger.info(f"Generating content for user {user_id} with model: {request.model}")
-    result = await service.generate_content(
-        service.GenerationRequest(
-            model=request.model,
-            contents=request.contents,
-            config=request.config,
+    try:
+        logger.info(
+            "Generating content for user %s with model: %s",
+            user_id,
+            request.model,
         )
-    )
-
-    await rate_limiter.increment_usage(user_id, redis_client)
-    remaining = await rate_limiter.get_remaining_requests(user_id, redis_client)
+        result = await service.generate_content(
+            service.GenerationRequest(
+                model=request.model,
+                contents=request.contents,
+                config=request.config,
+            )
+        )
+    except Exception:
+        logger.exception("Generation error for user %s", user_id)
+        try:
+            await rate_limiter.refund_generate_request(reservation, redis_client)
+        except Exception:
+            logger.exception("Failed to refund reserved quota for user %s", user_id)
+        raise HTTPException(status_code=500, detail=GENERATION_ERROR_MESSAGE)
 
     if isinstance(result, dict):
-        result["remaining_requests"] = remaining
+        result["remaining_requests"] = reservation.daily_remaining
         return result
 
-    return {"text": str(result), "remaining_requests": remaining}
+    return {"text": str(result), "remaining_requests": reservation.daily_remaining}
 
 
 # Auth dependency
@@ -145,20 +191,11 @@ async def generate(
     except HTTPException as e:
         headers = None
         if e.status_code == 429 and isinstance(e.detail, dict):
-            headers = {
-                "X-RateLimit-Limit": str(e.detail.get("limit", 0)),
-                "X-RateLimit-Remaining": str(e.detail.get("remaining", 0)),
-            }
+            headers = _build_rate_limit_headers(e.detail)
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=headers)
-    except Exception as e:
-        status_code = 500
-        if hasattr(e, "code"):
-            status_code = e.code
-        elif hasattr(e, "status_code"):
-            status_code = e.status_code
-
-        logger.error(f"Generation error: {e}")
-        raise HTTPException(status_code=status_code, detail=str(e))
+    except Exception:
+        logger.exception("Unexpected generation handler error")
+        raise HTTPException(status_code=500, detail=GENERATION_ERROR_MESSAGE)
 
 
 @app.websocket("/ws/generate")
@@ -170,7 +207,24 @@ async def ws_generate(websocket: WebSocket):
 
     try:
         while True:
-            raw = await websocket.receive_text()
+            if user is None:
+                try:
+                    raw = await asyncio.wait_for(
+                        websocket.receive_text(),
+                        timeout=WS_AUTH_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": 401,
+                            "detail": "Authentication timeout",
+                        }
+                    )
+                    await websocket.close(code=1008)
+                    return
+            else:
+                raw = await websocket.receive_text()
             try:
                 message = json.loads(raw)
             except json.JSONDecodeError:
@@ -182,6 +236,16 @@ async def ws_generate(websocket: WebSocket):
             msg_type = message.get("type")
 
             if msg_type == "auth":
+                if user is not None:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": 400,
+                            "detail": "Already authenticated",
+                        }
+                    )
+                    continue
+
                 token = str(message.get("token") or "").strip()
                 user = auth.verify_access_token(token)
                 if not user:
@@ -243,15 +307,22 @@ async def ws_generate(websocket: WebSocket):
                 await websocket.send_json(
                     {"type": "error", "code": e.status_code, "detail": e.detail}
                 )
-            except Exception as e:
-                logger.error(f"WebSocket generation error: {e}")
+            except Exception:
+                logger.exception(
+                    "Unexpected WebSocket generation error for user %s",
+                    user["user_id"],
+                )
                 await websocket.send_json(
-                    {"type": "error", "code": 500, "detail": str(e)}
+                    {
+                        "type": "error",
+                        "code": 500,
+                        "detail": GENERATION_ERROR_MESSAGE,
+                    }
                 )
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket connection error: {e}")
+    except Exception:
+        logger.exception("WebSocket connection error")
 
 
 # ============ Health Check ============
