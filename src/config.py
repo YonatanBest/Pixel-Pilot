@@ -62,6 +62,11 @@ class Config:
         4096,
         int(os.getenv("LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES", "65536") or "65536"),
     )
+    LIVE_AUDIO_LOSSLESS_MODE = _env_bool("LIVE_AUDIO_LOSSLESS_MODE", True)
+    LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS = max(
+        0,
+        int(os.getenv("LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS", "220") or "220"),
+    )
     LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE = max(
         30,
         int(os.getenv("LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE", "105") or "105"),
