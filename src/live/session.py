@@ -18,8 +18,14 @@ import pyaudio
 from PIL import Image
 from PySide6.QtCore import QObject, Signal
 
+from backend_client import RateLimitError
 from config import Config, OperationMode
 from .broker import LiveActionBroker
+from .transports import (
+    BaseLiveTransport,
+    BackendGeminiLiveTransport,
+    DirectGeminiLiveTransport,
+)
 from .tools import LiveToolRegistry
 from tools import ui_automation
 
@@ -82,11 +88,9 @@ class LiveSessionManager(QObject):
         self._voice_enabled = False
         self._workspace = getattr(agent, "active_workspace", "user")
         self._mode = getattr(agent, "mode", None)
-        self._client = None
+        self._transport: Optional[BaseLiveTransport] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
-        self._session = None
-        self._session_cm = None
         self._session_started_at = 0.0
         self._resume_handle: Optional[str] = None
         self._speaker_queue: Optional[asyncio.Queue[tuple[bytes, int]]] = None
@@ -132,19 +136,28 @@ class LiveSessionManager(QObject):
     def _is_guidance_mode(self, mode: Optional[object] = None) -> bool:
         return self._mode_key(mode) == OperationMode.GUIDE.value
 
+    def _transport_cls(self):
+        return DirectGeminiLiveTransport if Config.USE_DIRECT_API else BackendGeminiLiveTransport
+
+    def _create_transport(self) -> BaseLiveTransport:
+        cls = self._transport_cls()
+        if self._transport is None or not isinstance(self._transport, cls):
+            self._transport = cls()
+        return self._transport
+
     @property
     def is_available(self) -> bool:
-        return bool(Config.LIVE_MODE_AVAILABLE and genai is not None and types is not None)
+        if not Config.ENABLE_GEMINI_LIVE_MODE:
+            return False
+        transport_cls = self._transport_cls()
+        return bool(transport_cls.is_supported())
 
     @property
     def unavailable_reason(self) -> str:
         if not Config.ENABLE_GEMINI_LIVE_MODE:
             return "Live mode is disabled by config."
-        if not Config.USE_DIRECT_API:
-            return "Live mode requires direct Gemini API access."
-        if genai is None or types is None:
-            return f"Gemini Live dependencies unavailable: {_IMPORT_ERROR}"
-        return ""
+        transport_cls = self._transport_cls()
+        return transport_cls.unavailable_reason()
 
     @property
     def voice_enabled(self) -> bool:
@@ -194,7 +207,7 @@ class LiveSessionManager(QObject):
 
     def request_stop(self) -> None:
         self.broker.cancel_current_action("Stop requested. Finish at a safe boundary.")
-        if self.enabled and self._session is not None:
+        if self.enabled and self._transport is not None:
             self.session_state_changed.emit("interrupted")
             self._submit_async(
                 self._send_text(
@@ -205,6 +218,12 @@ class LiveSessionManager(QObject):
 
     def notify_workspace_changed(self, workspace: str) -> None:
         self._workspace = (workspace or "user").strip().lower() or "user"
+
+    def notify_mode_changed(self, mode: object) -> None:
+        self._mode = mode
+        self.tools.set_guidance_mode(self._is_guidance_mode())
+        if self.enabled and self._transport is not None:
+            self._submit_async(self._reconnect_with_resume(), ensure_loop=False)
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
@@ -283,6 +302,14 @@ class LiveSessionManager(QObject):
             future.result()
         except asyncio.CancelledError:
             return
+        except RateLimitError as exc:
+            logger.warning("Gemini Live rate limited: %s", exc)
+            self.session_state_changed.emit("disconnected")
+            self.error_received.emit(str(exc))
+        except RuntimeError as exc:
+            logger.warning("Gemini Live error: %s", exc)
+            self.session_state_changed.emit("disconnected")
+            self.error_received.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             logger.exception("Live background task failed")
             self.error_received.emit(f"Gemini Live background task failed: {exc}")
@@ -295,9 +322,11 @@ class LiveSessionManager(QObject):
         if not payload:
             return
 
-        session = await self._ensure_session_with_retry()
+        transport = await self._ensure_session_with_retry()
         try:
-            await asyncio.wait_for(session.send_realtime_input(text=payload), timeout=8.0)
+            await asyncio.wait_for(transport.send_text(payload), timeout=8.0)
+        except RateLimitError:
+            raise
         except asyncio.TimeoutError as exc:
             if allow_retry and self.enabled and not self._shutdown_event.is_set():
                 logger.warning("Timed out sending realtime text; reconnecting live session.")
@@ -334,7 +363,7 @@ class LiveSessionManager(QObject):
                     exc,
                     delay_s,
                 )
-                await self._disconnect_session()
+                await self._disconnect_session(reconnecting=True)
                 await asyncio.sleep(delay_s)
                 attempt += 1
 
@@ -348,16 +377,13 @@ class LiveSessionManager(QObject):
             self.session_state_changed.emit("listening")
 
     async def _ensure_session(self):
-        if self._session is not None:
-            return self._session
+        if self._transport is not None:
+            return self._transport
 
         self.session_state_changed.emit("connecting")
-        if self._client is None:
-            self._client = genai.Client(api_key=Config.GEMINI_API_KEY)
-
+        transport = self._create_transport()
         config = self._build_connect_config()
-        self._session_cm = self._client.aio.live.connect(model=Config.GEMINI_LIVE_MODEL, config=config)
-        self._session = await self._session_cm.__aenter__()
+        await transport.connect(model=Config.GEMINI_LIVE_MODEL, config=config)
         self._session_started_at = time.monotonic()
         queue_maxsize = 0 if Config.LIVE_AUDIO_LOSSLESS_MODE else Config.LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS
         self._speaker_queue = asyncio.Queue(maxsize=queue_maxsize)
@@ -375,9 +401,14 @@ class LiveSessionManager(QObject):
             self._mic_task = asyncio.create_task(self._microphone_loop())
         self.session_state_changed.emit("listening")
 
-        return self._session
+        return transport
 
-    async def _disconnect_session(self, *, close_client: bool = False) -> None:
+    async def _disconnect_session(
+        self,
+        *,
+        close_client: bool = False,
+        reconnecting: bool = False,
+    ) -> None:
         current_task = asyncio.current_task()
         tasks = [
             self._mic_task,
@@ -406,23 +437,16 @@ class LiveSessionManager(QObject):
         self.audio_level_changed.emit(0.0)
         self.assistant_audio_level_changed.emit(0.0)
 
-        if self._session_cm is not None:
+        if self._transport is not None:
             try:
-                await self._session_cm.__aexit__(None, None, None)
+                await self._transport.close(close_client=close_client)
             except Exception:
-                logger.debug("Failed to close live session", exc_info=True)
-        self._session_cm = None
-        self._session = None
-        if close_client and self._client is not None:
-            try:
-                await self._client.aio.aclose()
-            except Exception:
-                logger.debug("Failed to close Gemini client", exc_info=True)
-            self._client = None
-        if not self.enabled or self._shutdown_event.is_set():
-            self.session_state_changed.emit("disconnected")
-        else:
+                logger.debug("Failed to close live transport", exc_info=True)
+        self._transport = None
+        if reconnecting and self.enabled and not self._shutdown_event.is_set():
             self.session_state_changed.emit("connecting")
+        else:
+            self.session_state_changed.emit("disconnected")
 
     def _build_connect_config(self) -> dict[str, Any]:
         guidance_mode = self._is_guidance_mode()
@@ -450,65 +474,69 @@ class LiveSessionManager(QObject):
             "input_audio_transcription": {},
             "output_audio_transcription": {},
         }
-        if hasattr(types, "MediaResolution"):
-            config["media_resolution"] = types.MediaResolution.MEDIA_RESOLUTION_LOW
-        if hasattr(types, "SessionResumptionConfig"):
-            try:
-                if self._resume_handle:
-                    config["session_resumption"] = types.SessionResumptionConfig(handle=self._resume_handle)
-                else:
-                    config["session_resumption"] = types.SessionResumptionConfig()
-            except TypeError:
-                config["session_resumption"] = {"handle": self._resume_handle} if self._resume_handle else {}
+        if types is not None and hasattr(types, "MediaResolution"):
+            media_resolution = getattr(types.MediaResolution, "MEDIA_RESOLUTION_LOW", None)
+            config["media_resolution"] = (
+                media_resolution if Config.USE_DIRECT_API and media_resolution is not None else "MEDIA_RESOLUTION_LOW"
+            )
+        else:
+            config["media_resolution"] = "MEDIA_RESOLUTION_LOW"
+        config["session_resumption"] = (
+            {"handle": self._resume_handle} if self._resume_handle else {}
+        )
         return config
 
     async def _receive_loop(self) -> None:
-        assert self._session is not None
+        transport = await self._ensure_session_with_retry()
         try:
             while not self._shutdown_event.is_set():
                 received_messages = False
-                async for response in self._session.receive():
+                async for response in transport.events():
                     received_messages = True
                     if self._shutdown_event.is_set():
                         break
 
-                    if getattr(response, "session_resumption_update", None):
-                        update = response.session_resumption_update
-                        handle = getattr(update, "new_handle", None) or getattr(update, "resumption_handle", None)
+                    update = response.get("session_resumption_update")
+                    if isinstance(update, dict):
+                        handle = update.get("handle")
                         if handle:
                             self._resume_handle = str(handle)
 
-                    tool_call = getattr(response, "tool_call", None)
+                    tool_call = response.get("tool_call")
                     if tool_call:
                         self.session_state_changed.emit("acting")
                         await self._handle_tool_call(tool_call)
 
-                    server_content = getattr(response, "server_content", None)
-                    if not server_content:
+                    server_content = response.get("server_content")
+                    if not isinstance(server_content, dict):
                         continue
 
-                    if getattr(server_content, "input_transcription", None):
-                        text = str(getattr(server_content.input_transcription, "text", "") or "")
+                    input_transcription = server_content.get("input_transcription")
+                    if isinstance(input_transcription, dict):
+                        text = str(input_transcription.get("text") or "")
                         if text:
                             self._user_buffer = self._merge_transcript_text(self._user_buffer, text)
                             self.transcript_received.emit("user", self._user_buffer, False)
 
                     output_text = ""
-                    if getattr(server_content, "output_transcription", None):
-                        output_text = str(getattr(server_content.output_transcription, "text", "") or "")
+                    output_transcription = server_content.get("output_transcription")
+                    if isinstance(output_transcription, dict):
+                        output_text = str(output_transcription.get("text") or "")
                         if output_text:
                             self._assistant_buffer = self._merge_transcript_text(self._assistant_buffer, output_text)
                             self.transcript_received.emit("assistant", self._assistant_buffer, False)
 
-                    model_turn = getattr(server_content, "model_turn", None)
+                    model_turn = server_content.get("model_turn")
                     has_output_transcription = bool(output_text)
-                    if model_turn:
-                        for part in getattr(model_turn, "parts", []) or []:
-                            part_text = str(getattr(part, "text", "") or "")
+                    if isinstance(model_turn, dict):
+                        for part in model_turn.get("parts") or []:
+                            if not isinstance(part, dict):
+                                continue
+                            part_text = str(part.get("text") or "")
                             if (
                                 part_text
                                 and not has_output_transcription
-                                and not bool(getattr(part, "thought", False))
+                                and not bool(part.get("thought"))
                             ):
                                 self._assistant_buffer = self._merge_transcript_text(
                                     self._assistant_buffer,
@@ -516,9 +544,13 @@ class LiveSessionManager(QObject):
                                 )
                                 self.transcript_received.emit("assistant", self._assistant_buffer, False)
 
-                            inline_data = getattr(part, "inline_data", None)
-                            data = getattr(inline_data, "data", None) if inline_data is not None else None
-                            mime_type = str(getattr(inline_data, "mime_type", "") or "").lower()
+                            inline_data = part.get("inline_data")
+                            data = inline_data.get("data") if isinstance(inline_data, dict) else None
+                            mime_type = (
+                                str(inline_data.get("mime_type") or "").lower()
+                                if isinstance(inline_data, dict)
+                                else ""
+                            )
                             if data and self._speaker_queue is not None and (
                                 not mime_type or mime_type.startswith("audio/")
                             ):
@@ -527,14 +559,14 @@ class LiveSessionManager(QObject):
                                 sample_rate = self._extract_audio_rate(mime_type)
                                 await self._enqueue_speaker_audio(data, sample_rate)
 
-                    if getattr(server_content, "interrupted", False):
+                    if bool(server_content.get("interrupted")):
                         self.session_state_changed.emit("interrupted")
                         self._assistant_buffer = ""
                         self._user_buffer = ""
                         self.assistant_audio_level_changed.emit(0.0)
                         self._clear_speaker_queue()
 
-                    if getattr(server_content, "turn_complete", False):
+                    if bool(server_content.get("turn_complete")):
                         if self._user_buffer:
                             self.transcript_received.emit("user", self._user_buffer, True)
                             self._user_buffer = ""
@@ -548,6 +580,12 @@ class LiveSessionManager(QObject):
                     break
         except asyncio.CancelledError:
             raise
+        except RateLimitError as exc:
+            logger.warning("Live receive loop rate limited: %s", exc)
+            self.error_received.emit(str(exc))
+            if self.enabled and not self._shutdown_event.is_set():
+                await self._disconnect_session()
+            return
         except Exception as exc:  # noqa: BLE001
             if self._maybe_disable_image_input_for_error(exc):
                 if self.enabled and not self._shutdown_event.is_set():
@@ -565,29 +603,37 @@ class LiveSessionManager(QObject):
 
     async def _handle_tool_call(self, tool_call: Any) -> None:
         responses = []
-        function_calls = getattr(tool_call, "function_calls", None) or []
+        function_calls = []
+        if isinstance(tool_call, dict):
+            function_calls = tool_call.get("function_calls") or []
         for function_call in function_calls:
-            args = self._parse_args(getattr(function_call, "args", None))
+            if not isinstance(function_call, dict):
+                continue
+            args = self._parse_args(function_call.get("args"))
             if not args:
-                args = self._parse_args(getattr(function_call, "arguments", None))
-            result = await asyncio.to_thread(self.tools.execute, getattr(function_call, "name", ""), args)
+                args = self._parse_args(function_call.get("arguments"))
+            result = await asyncio.to_thread(
+                self.tools.execute,
+                str(function_call.get("name") or ""),
+                args,
+            )
             responses.append(
-                types.FunctionResponse(
-                    id=getattr(function_call, "id", None),
-                    name=getattr(function_call, "name", ""),
-                    response={"result": result},
-                )
+                {
+                    "id": function_call.get("id"),
+                    "name": str(function_call.get("name") or ""),
+                    "response": {"result": result},
+                }
             )
 
-        if responses and self._session is not None:
-            await self._session.send_tool_response(function_responses=responses)
+        if responses and self._transport is not None:
+            await self._transport.send_tool_responses(responses)
 
-        while self._pending_capture_paths and self._session is not None:
+        while self._pending_capture_paths and self._transport is not None:
             path, summary = self._pending_capture_paths.popleft()
             await self._send_capture_context(path, summary)
 
     async def _video_loop(self) -> None:
-        assert self._session is not None
+        transport = await self._ensure_session_with_retry()
         if not self._video_stream_enabled:
             return
         interval = max(0.5, 1.0 / max(1, Config.LIVE_VIDEO_FPS))
@@ -595,8 +641,7 @@ class LiveSessionManager(QObject):
             while True:
                 frame = await asyncio.to_thread(self._capture_video_frame)
                 if frame is not None:
-                    blob = types.Blob(data=frame, mime_type="image/jpeg")
-                    await self._session.send_realtime_input(video=blob)
+                    await transport.send_video(frame, "image/jpeg")
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
@@ -613,7 +658,7 @@ class LiveSessionManager(QObject):
             logger.debug("Live video loop stopped: %s", exc, exc_info=True)
 
     async def _microphone_loop(self) -> None:
-        assert self._session is not None
+        await self._ensure_session_with_retry()
         pya = pyaudio.PyAudio()
         stream = None
         try:
@@ -650,10 +695,12 @@ class LiveSessionManager(QObject):
             pya.terminate()
 
     async def _send_audio_chunk(self, data: bytes) -> None:
-        if self._session is None or not data:
+        if self._transport is None or not data:
             return
-        blob = types.Blob(data=data, mime_type=f"audio/pcm;rate={Config.LIVE_AUDIO_INPUT_RATE}")
-        await self._session.send_realtime_input(audio=blob)
+        await self._transport.send_audio(
+            data,
+            f"audio/pcm;rate={Config.LIVE_AUDIO_INPUT_RATE}",
+        )
 
     async def _speaker_loop(self) -> None:
         pya = pyaudio.PyAudio()
@@ -744,7 +791,11 @@ class LiveSessionManager(QObject):
         try:
             while True:
                 await asyncio.sleep(1.0)
-                if not self.enabled or self._session is None:
+                if (
+                    not self.enabled
+                    or self._transport is None
+                    or not getattr(self._transport, "should_rotate_sessions", True)
+                ):
                     continue
                 age = time.monotonic() - self._session_started_at
                 if age < Config.LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE:
@@ -762,7 +813,7 @@ class LiveSessionManager(QObject):
             return
         self._reconnect_in_progress = True
         try:
-            await self._disconnect_session()
+            await self._disconnect_session(reconnecting=True)
             if self.enabled and not self._shutdown_event.is_set():
                 await self._ensure_session()
         finally:
@@ -824,7 +875,7 @@ class LiveSessionManager(QObject):
             while True:
                 await asyncio.sleep(poll_interval_s)
 
-                if self._shutdown_event.is_set() or not self.enabled or self._session is None:
+                if self._shutdown_event.is_set() or not self.enabled or self._transport is None:
                     continue
                 if not self._is_guidance_mode():
                     continue
@@ -905,14 +956,13 @@ class LiveSessionManager(QObject):
         self._pending_capture_paths.append((screenshot_path, summary))
 
     async def _send_capture_context(self, screenshot_path: str, summary: dict[str, Any]) -> None:
-        if self._session is None:
+        if self._transport is None:
             return
         try:
             if self._image_input_enabled:
                 with Image.open(screenshot_path) as image:
                     frame = self._image_to_bytes(image, max_size=(1280, 720), fmt="PNG")
-                blob = types.Blob(data=frame, mime_type="image/png")
-                await self._session.send_realtime_input(video=blob)
+                await self._transport.send_video(frame, "image/png")
             await self._send_realtime_text(
                 "Detailed capture refreshed for the active workspace. "
                 f"Summary: {json.dumps(summary, ensure_ascii=True)}",

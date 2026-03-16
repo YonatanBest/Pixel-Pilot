@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -11,6 +13,7 @@ import redis.asyncio as redis
 import uvicorn
 import service
 import auth
+import live_service
 import rate_limiter
 from database import lifespan, get_db, get_redis
 
@@ -54,7 +57,7 @@ def _build_rate_limit_message(reservation: rate_limiter.RateLimitReservation) ->
 
 
 def _build_rate_limit_detail(
-    reservation: rate_limiter.RateLimitReservation,
+    reservation,
 ) -> Dict[str, Any]:
     return {
         "message": _build_rate_limit_message(reservation),
@@ -62,6 +65,7 @@ def _build_rate_limit_detail(
         "limit": reservation.limit,
         "remaining": reservation.remaining,
         "retry_after_seconds": reservation.retry_after_seconds,
+        "scope": getattr(reservation, "scope", "generate"),
     }
 
 
@@ -74,6 +78,31 @@ def _build_rate_limit_headers(detail: Dict[str, Any]) -> Dict[str, str]:
     if retry_after_seconds > 0:
         headers["Retry-After"] = str(retry_after_seconds)
     return headers
+
+
+def _decode_live_media_payload(payload: Any, *, kind: str) -> tuple[bytes, str]:
+    if not isinstance(payload, dict):
+        raise live_service.LiveSessionError(
+            422,
+            f"Invalid live_input: {kind} must be an object",
+        )
+
+    mime_type = str(payload.get("mime_type") or "").strip()
+    if not mime_type:
+        raise live_service.LiveSessionError(
+            422,
+            f"Invalid live_input: {kind}.mime_type is required",
+        )
+
+    try:
+        data = base64.b64decode(str(payload.get("data") or ""), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise live_service.LiveSessionError(
+            422,
+            f"Invalid live_input: {kind}.data must be base64",
+        ) from exc
+
+    return data, mime_type
 
 
 async def _generate_with_rate_limit(
@@ -328,6 +357,210 @@ async def ws_generate(websocket: WebSocket):
         logger.info("WebSocket client disconnected")
     except Exception:
         logger.exception("WebSocket connection error")
+
+
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket):
+    await websocket.accept()
+
+    user = None
+    redis_client = await get_redis()
+    session: Optional[live_service.BackendLiveSession] = None
+
+    try:
+        while True:
+            if user is None:
+                try:
+                    raw = await asyncio.wait_for(
+                        websocket.receive_text(),
+                        timeout=WS_AUTH_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": 401,
+                            "detail": "Authentication timeout",
+                        }
+                    )
+                    await websocket.close(code=1008)
+                    return
+            else:
+                raw = await websocket.receive_text()
+
+            try:
+                message = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send_json(
+                    {"type": "error", "code": 400, "detail": "Invalid JSON payload"}
+                )
+                continue
+
+            msg_type = message.get("type")
+
+            if msg_type == "auth":
+                if user is not None:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": 400,
+                            "detail": "Already authenticated",
+                        }
+                    )
+                    continue
+
+                token = str(message.get("token") or "").strip()
+                user = auth.verify_access_token(token)
+                if not user:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": 401,
+                            "detail": "Invalid or expired token",
+                        }
+                    )
+                    await websocket.close(code=1008)
+                    return
+
+                try:
+                    session = live_service.BackendLiveSession(
+                        websocket=websocket,
+                        user_id=str(user.get("user_id") or ""),
+                        redis_client=redis_client,
+                    )
+                except live_service.LiveSessionError as exc:
+                    await websocket.send_json(
+                        {"type": "error", "code": exc.code, "detail": exc.detail}
+                    )
+                    await websocket.close(code=1011 if exc.code >= 500 else 1008)
+                    return
+                await websocket.send_json(
+                    {"type": "auth_ok", "user_id": user.get("user_id")}
+                )
+                continue
+
+            if msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            if not user or session is None:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": 401,
+                        "detail": "Authenticate first with {'type':'auth','token':'...'}",
+                    }
+                )
+                continue
+
+            try:
+                if msg_type == "live_start":
+                    request_payload = message.get("request") or {}
+                    config_payload = request_payload.get("config") or {}
+                    if not isinstance(config_payload, dict):
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": 422,
+                                "detail": "Invalid live_start request: config must be an object",
+                            }
+                        )
+                        continue
+                    await session.start(config_payload)
+                    continue
+
+                if msg_type == "live_input":
+                    if not session.started:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": 400,
+                                "detail": "Start a live session first.",
+                            }
+                        )
+                        continue
+
+                    payload_kinds = [
+                        kind for kind in ("text", "audio", "video") if kind in message
+                    ]
+                    if len(payload_kinds) != 1:
+                        raise live_service.LiveSessionError(
+                            422,
+                            "Invalid live_input: expected exactly one of text, audio, or video",
+                        )
+
+                    if payload_kinds[0] == "text":
+                        await session.send_text(str(message.get("text") or ""))
+                        continue
+
+                    if payload_kinds[0] == "audio":
+                        data, mime_type = _decode_live_media_payload(
+                            message.get("audio"),
+                            kind="audio",
+                        )
+                        await session.send_audio(data, mime_type)
+                        continue
+
+                    if payload_kinds[0] == "video":
+                        data, mime_type = _decode_live_media_payload(
+                            message.get("video"),
+                            kind="video",
+                        )
+                        await session.send_video(data, mime_type)
+                        continue
+
+                if msg_type == "live_tool_response":
+                    if not session.started:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": 400,
+                                "detail": "Start a live session first.",
+                            }
+                        )
+                        continue
+                    responses = message.get("responses") or []
+                    if not isinstance(responses, list):
+                        raise live_service.LiveSessionError(
+                            422,
+                            "Invalid live_tool_response: responses must be an array",
+                        )
+                    await session.send_tool_responses(responses)
+                    continue
+
+                if msg_type == "live_stop":
+                    await session.stop(notify_client=True)
+                    continue
+
+                await websocket.send_json(
+                    {"type": "error", "code": 400, "detail": "Unknown message type"}
+                )
+            except live_service.LiveSessionError as exc:
+                await websocket.send_json(
+                    {"type": "error", "code": exc.code, "detail": exc.detail}
+                )
+            except Exception:
+                logger.exception(
+                    "Unexpected WebSocket live error for user %s",
+                    user["user_id"],
+                )
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": 500,
+                        "detail": live_service.LIVE_PROVIDER_ERROR_MESSAGE,
+                    }
+                )
+    except WebSocketDisconnect:
+        logger.info("Live WebSocket client disconnected")
+    except Exception:
+        logger.exception("Live WebSocket connection error")
+    finally:
+        if session is not None:
+            try:
+                await session.shutdown()
+            except Exception:
+                logger.debug("Failed to shut down live session", exc_info=True)
 
 
 # ============ Health Check ============

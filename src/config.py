@@ -72,7 +72,7 @@ class Config:
         30,
         int(os.getenv("LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE", "105") or "105"),
     )
-    LIVE_MODE_AVAILABLE = bool(ENABLE_GEMINI_LIVE_MODE and USE_DIRECT_API)
+    LIVE_MODE_AVAILABLE = bool(ENABLE_GEMINI_LIVE_MODE)
 
     DEFAULT_MODE = OperationMode(os.getenv("DEFAULT_MODE", OperationMode.AUTO.value))
     VISION_MODE = os.getenv("VISION_MODE", "ocr").strip().lower()
@@ -242,7 +242,7 @@ class Config:
         """Clears the GEMINI_API_KEY from environment and .env file."""
         cls.GEMINI_API_KEY = None
         cls.USE_DIRECT_API = False
-        cls.LIVE_MODE_AVAILABLE = bool(cls.ENABLE_GEMINI_LIVE_MODE and cls.USE_DIRECT_API)
+        cls.LIVE_MODE_AVAILABLE = bool(cls.ENABLE_GEMINI_LIVE_MODE)
         os.environ.pop("GEMINI_API_KEY", None)
 
         env_path = cls.PROJECT_ROOT / ".env"

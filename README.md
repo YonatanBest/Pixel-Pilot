@@ -148,7 +148,7 @@ PIXELPILOT_GATEWAY_TOKEN=pixelpilot-secret
 ```
 
 Notes:
-- Live mode availability currently requires direct API mode (`GEMINI_API_KEY` present).
+- Live mode works in direct mode with a local `GEMINI_API_KEY`, or in backend mode after sign-in when `BACKEND_URL` is configured.
 - `LIVE_MODE_DEFAULT_ENABLED=true` means Live starts enabled whenever available.
 - `LIVE_ENABLE_IMAGE_INPUT=false` avoids image/video realtime sends for native-audio models (prevents policy-violation disconnects).
 - `LIVE_AUDIO_LOSSLESS_MODE=true` avoids dropping assistant audio chunks (smoothness over low latency).
@@ -163,7 +163,7 @@ Notes:
 Startup behavior:
 - Direct mode (`GEMINI_API_KEY` present): no login dialog.
 - When Live is available, Live mode is enabled by default at startup.
-- Backend mode (no local key): login dialog appears.
+- Backend mode (no local key): login dialog appears, and Gemini Live uses the backend Gemini key after sign-in.
 - Login dialog also lets user paste/store an API key.
 
 ### Testing Credentials
@@ -191,6 +191,13 @@ GEMINI_API_KEY=your_backend_key
 MONGODB_URI=your_mongodb_uri
 REDIS_URI=redis://localhost:6379
 JWT_SECRET=change_me
+GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+LIVE_MAX_CONCURRENT_SESSIONS=1
+LIVE_MAX_ACTIVE_SESSIONS_PER_USER=1
+LIVE_SESSION_STARTS_PER_MINUTE=2
+LIVE_SESSION_STARTS_PER_DAY=5
+LIVE_SESSION_LEASE_TTL_SECONDS=30
+LIVE_SESSION_HEARTBEAT_SECONDS=10
 ```
 
 3. Run:
@@ -208,9 +215,12 @@ Backend endpoints:
 - `POST /auth/login`
 - `GET /auth/me`
 - `POST /v1/generate` (JWT protected, Redis rate limited)
+- `WS /ws/live` (JWT protected, backend Gemini Live relay with Redis-backed Live session limits)
 - `GET /health`
 
-Default rate limit logic in backend: 200 requests/day per user.
+Default backend limits:
+- Generate: `1000` requests/day per user and `60` requests/minute per user.
+- Live: `1` active session globally, `1` active session per user, `2` session starts/minute per user, `5` session starts/day per user, with `30s` leases refreshed every `10s`.
 
 
 ## Optional Gateway
