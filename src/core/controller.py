@@ -111,6 +111,10 @@ class MainController(QObject):
 
             available = bool(getattr(self.live_session, "is_available", False))
             reason = str(getattr(self.live_session, "unavailable_reason", "") or "")
+            try:
+                self.live_session.notify_mode_changed(self.agent.mode)
+            except Exception:
+                pass
             self._handle_live_availability(available, reason)
             self._handle_live_session_state("disconnected")
         except Exception as exc:
@@ -333,6 +337,11 @@ class MainController(QObject):
             return
         try:
             self.agent.set_mode(mode)
+            if self.live_session:
+                try:
+                    self.live_session.notify_mode_changed(mode)
+                except Exception:
+                    pass
             self.gui_adapter.current_mode = mode
             self.gui_adapter.add_activity_message("Settings updated")
         except Exception as e:

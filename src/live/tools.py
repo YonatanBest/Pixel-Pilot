@@ -17,6 +17,24 @@ logger = logging.getLogger("pixelpilot.live.tools")
 
 
 class LiveToolRegistry:
+    READ_ONLY_TOOL_NAMES = {
+        "ui_get_snapshot",
+        "ui_list_windows",
+        "ui_read_text",
+        "capture_screen",
+        "get_action_status",
+        "wait_for_action",
+    }
+    MUTATING_TOOL_NAMES = {
+        "mouse_click",
+        "keyboard_type_text",
+        "keyboard_press_key",
+        "keyboard_key_combo",
+        "app_open",
+        "workspace_switch",
+        "ui_focus_window",
+    }
+
     def __init__(
         self,
         *,
@@ -27,8 +45,12 @@ class LiveToolRegistry:
         self.agent = agent
         self.broker = broker
         self.on_capture_ready = on_capture_ready
+        self._guidance_mode = False
         self.last_snapshot_summary: Optional[dict[str, Any]] = None
         self.last_capture_summary: Optional[dict[str, Any]] = None
+
+    def set_guidance_mode(self, enabled: bool) -> None:
+        self._guidance_mode = bool(enabled)
 
     @property
     def declarations(self) -> list[dict[str, Any]]:
@@ -194,9 +216,35 @@ class LiveToolRegistry:
             },
         ]
 
+    def get_declarations(self, *, read_only_only: bool = False) -> list[dict[str, Any]]:
+        all_declarations = self.declarations
+        if not read_only_only:
+            return all_declarations
+        return [
+            item
+            for item in all_declarations
+            if str(item.get("name") or "") in self.READ_ONLY_TOOL_NAMES
+        ]
+
+    @staticmethod
+    def _guidance_mode_rejection(tool_name: str) -> dict[str, Any]:
+        clean_name = str(tool_name or "").strip() or "unknown_tool"
+        return {
+            "ok": False,
+            "success": False,
+            "error": "guidance_mode_read_only",
+            "message": (
+                f"Tool '{clean_name}' is disabled while Gemini Live is in guidance mode. "
+                "Guide the user with text/voice instead of taking actions."
+            ),
+        }
+
     def execute(self, name: str, args: Optional[dict[str, Any]]) -> dict[str, Any]:
         tool_name = str(name or "").strip()
         payload = dict(args or {})
+
+        if self._guidance_mode and tool_name in self.MUTATING_TOOL_NAMES:
+            return self._guidance_mode_rejection(tool_name)
 
         if tool_name == "mouse_click":
             return self._queue_action(tool_name, payload, self._handle_mouse_click)
@@ -236,6 +284,8 @@ class LiveToolRegistry:
         args: dict[str, Any],
         handler: Callable[[dict[str, Any], Any], dict[str, Any]],
     ) -> dict[str, Any]:
+        if self._guidance_mode and str(name or "").strip() in self.MUTATING_TOOL_NAMES:
+            return self._guidance_mode_rejection(name)
         return self.broker.submit(
             name=name,
             args=args,

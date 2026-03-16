@@ -95,6 +95,7 @@ class ChatWidget(QWidget):
         self._guidance_active: bool = False
         self._guidance_input_active: bool = False
         self._guidance_input_payload: dict | None = None
+        self._live_guidance_active: bool = False
         self._live_available = False
         self._live_enabled = False
         self._live_voice_active = False
@@ -137,9 +138,15 @@ class ChatWidget(QWidget):
             self.mode_combo.blockSignals(False)
         self.update_mode_tooltip()
         self._sync_settings_menu()
+        self._sync_live_guidance_state()
+        self._refresh_input_placeholder()
+        self._apply_view_mode()
 
     def _emit_mode_changed(self):
         text = self.mode_combo.currentText().strip().upper()
+        self._sync_live_guidance_state()
+        self._refresh_input_placeholder()
+        self._apply_view_mode()
         if text == "GUIDANCE":
             self.mode_changed.emit(OperationMode.GUIDE)
         elif text == "SAFE":
@@ -182,6 +189,7 @@ class ChatWidget(QWidget):
             self.live_state_badge.style().unpolish(self.live_state_badge)
             self.live_state_badge.style().polish(self.live_state_badge)
             self.live_btn.setToolTip(reason or "Gemini Live mode unavailable")
+        self._sync_live_guidance_state()
         self._refresh_live_controls()
         self._refresh_mic_visual_state()
         self._apply_view_mode()
@@ -201,6 +209,7 @@ class ChatWidget(QWidget):
             self.live_btn.setChecked(target)
         finally:
             self.live_btn.blockSignals(False)
+        self._sync_live_guidance_state()
         self._refresh_live_controls()
         self._refresh_mic_visual_state()
         self._apply_view_mode()
@@ -273,9 +282,46 @@ class ChatWidget(QWidget):
             self.live_voice_toggled.emit(False)
             self._live_voice_active = False
         self._live_enabled = enabled and self._live_available
+        self._sync_live_guidance_state()
         self.live_mode_changed.emit(self._live_enabled)
         self._refresh_live_controls()
         self._apply_view_mode()
+
+    def _is_guidance_mode_selected(self) -> bool:
+        return self.mode_combo.currentText().strip().upper() == "GUIDANCE"
+
+    def _is_live_guidance_mode(self) -> bool:
+        return bool(self._live_enabled and self._is_guidance_mode_selected())
+
+    def _clear_guidance_state(self, *, cancel_pending: bool) -> None:
+        payload = self._guidance_payload
+        if cancel_pending and isinstance(payload, dict):
+            payload["cancelled"] = True
+            payload["result"] = False
+            event = payload.get("event")
+            if event is not None:
+                event.set()
+        self._guidance_payload = None
+        self._guidance_active = False
+
+        input_payload = self._guidance_input_payload
+        if cancel_pending and isinstance(input_payload, dict):
+            input_payload["cancelled"] = True
+            event = input_payload.get("event")
+            if event is not None:
+                event.set()
+        self._guidance_input_payload = None
+        self._guidance_input_active = False
+
+        self.guidance_bar.hide()
+        self.guidance_btn.hide()
+        self.continue_btn.hide()
+
+    def _sync_live_guidance_state(self) -> None:
+        active = self._is_live_guidance_mode()
+        if active and not self._live_guidance_active:
+            self._clear_guidance_state(cancel_pending=True)
+        self._live_guidance_active = active
 
     def set_workspace_status(self, workspace: str):
         key = (workspace or "").strip().lower()
@@ -820,6 +866,8 @@ class ChatWidget(QWidget):
             return
 
     def _guidance_placeholder_text(self) -> str:
+        if self._is_live_guidance_mode():
+            return ""
         if not self._guidance_input_active or not isinstance(self._guidance_input_payload, dict):
             return ""
         if self._guidance_input_payload.get("final"):
@@ -1514,6 +1562,8 @@ class ChatWidget(QWidget):
 
     def _send_guidance_input(self, text: str) -> bool:
         """Handle input for conversational guidance mode."""
+        if self._is_live_guidance_mode():
+            return False
         if not self._guidance_input_active:
             return False
         if not isinstance(self._guidance_input_payload, dict):
@@ -1533,6 +1583,8 @@ class ChatWidget(QWidget):
 
     def _send_guidance_feedback(self, text: str) -> bool:
         """Handle legacy guidance button feedback."""
+        if self._is_live_guidance_mode():
+            return False
         if not self._guidance_active:
             return False
         if not isinstance(self._guidance_payload, dict):
@@ -1541,7 +1593,6 @@ class ChatWidget(QWidget):
         payload = self._guidance_payload
         self._guidance_payload = None
         self._guidance_active = False
-        self._update_guidance_steps(None)
         self.guidance_bar.hide()
         self.guidance_btn.hide()
         self._refresh_input_placeholder()
@@ -1805,6 +1856,7 @@ class ChatWidget(QWidget):
 
     def _apply_view_mode(self):
         listening = self._live_voice_active if self._live_enabled else self.audio_service.is_listening
+        live_guidance = self._is_live_guidance_mode()
         expanded = self.view_mode == "extended"
 
         self.extended_panel.setVisible(expanded)
@@ -1847,9 +1899,19 @@ class ChatWidget(QWidget):
             self.input_hint.show()
         self.compact_stop_btn.hide()
 
-        if self._guidance_active or self._guidance_input_active:
+        if live_guidance:
+            self.guidance_bar.hide()
+            self.guidance_btn.hide()
+            self.continue_btn.hide()
+        elif self._guidance_active or self._guidance_input_active:
             self.guidance_bar.show()
             self.guidance_btn.show()
+            show_continue = bool(
+                self._guidance_input_active
+                and isinstance(self._guidance_input_payload, dict)
+                and self._guidance_input_payload.get("show_continue")
+            )
+            self.continue_btn.setVisible(show_continue)
         else:
             self.guidance_bar.hide()
             self.guidance_btn.hide()
@@ -1876,6 +1938,17 @@ class ChatWidget(QWidget):
             return
 
     def show_guidance_button(self, label: str, payload: dict):
+        if self._is_live_guidance_mode():
+            if isinstance(payload, dict):
+                payload["cancelled"] = True
+                payload["result"] = False
+                event = payload.get("event")
+                if event is not None:
+                    event.set()
+            self._clear_guidance_state(cancel_pending=False)
+            self._refresh_input_placeholder()
+            self._apply_view_mode()
+            return
         text = (label or "Next").strip() or "Next"
         self._guidance_payload = payload
         self._guidance_active = True
@@ -1886,11 +1959,7 @@ class ChatWidget(QWidget):
         self._apply_view_mode()
 
     def hide_guidance_button(self):
-        self._guidance_payload = None
-        self._guidance_active = False
-        self.guidance_bar.hide()
-        self.guidance_btn.hide()
-        self.continue_btn.hide()
+        self._clear_guidance_state(cancel_pending=False)
         self._refresh_input_placeholder()
         self._apply_view_mode()
 
@@ -1900,6 +1969,16 @@ class ChatWidget(QWidget):
         The next message from the user will be sent to the guidance session
         instead of starting a new agent task. Also shows a "Next" button.
         """
+        if self._is_live_guidance_mode():
+            if isinstance(payload, dict):
+                payload["cancelled"] = True
+                event = payload.get("event")
+                if event is not None:
+                    event.set()
+            self._clear_guidance_state(cancel_pending=False)
+            self._refresh_input_placeholder()
+            self._apply_view_mode()
+            return
         self._guidance_input_payload = payload
         self._guidance_input_active = True
         label = (payload.get("label") or "Next").strip() or "Next"
@@ -1917,6 +1996,8 @@ class ChatWidget(QWidget):
         self._apply_view_mode()
 
     def _on_guidance_btn_clicked(self):
+        if self._is_live_guidance_mode():
+            return
         # Handle new conversational guidance input mode
         if self._guidance_input_active and isinstance(self._guidance_input_payload, dict):
             payload = self._guidance_input_payload
@@ -1950,6 +2031,8 @@ class ChatWidget(QWidget):
 
     def _on_continue_btn_clicked(self):
         """Handle continue button click."""
+        if self._is_live_guidance_mode():
+            return
         if self._guidance_input_active and isinstance(self._guidance_input_payload, dict):
             payload = self._guidance_input_payload
             self._guidance_input_payload = None

@@ -16,7 +16,7 @@ import pyaudio
 from PIL import Image
 from PySide6.QtCore import QObject, Signal
 
-from config import Config
+from config import Config, OperationMode
 from .broker import LiveActionBroker
 from .tools import LiveToolRegistry
 
@@ -44,6 +44,14 @@ LIVE_SYSTEM_INSTRUCTION = (
     "Respect the current workspace, ask for confirmation before destructive actions, and keep replies concise."
 )
 
+LIVE_GUIDANCE_SYSTEM_INSTRUCTION = (
+    "You are Pixel Pilot operating in Gemini Live guidance mode on a Windows PC. "
+    "You are a tutor only: guide the user step-by-step with concise voice/text instructions. "
+    "Do not perform desktop actions on the user's behalf. "
+    "If tools are available, use them only for read-only observation and adapt your guidance from what you see. "
+    "Ask short follow-up questions when needed and wait for user confirmation before moving to the next step."
+)
+
 LIVE_SYSTEM_CONTEXT_PREFIX = (
     "Runtime continuity context. This is state, not a fresh user request. "
     "Use it only to preserve continuity across reconnects and turns."
@@ -66,6 +74,7 @@ class LiveSessionManager(QObject):
         self.enabled = False
         self._voice_enabled = False
         self._workspace = getattr(agent, "active_workspace", "user")
+        self._mode = getattr(agent, "mode", None)
         self._client = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
@@ -95,7 +104,18 @@ class LiveSessionManager(QObject):
             broker=self.broker,
             on_capture_ready=self._on_capture_ready,
         )
+        self.tools.set_guidance_mode(self._is_guidance_mode())
         self.availability_changed.emit(self.is_available, self.unavailable_reason)
+
+    def _mode_key(self, mode: Optional[object] = None) -> str:
+        value = self._mode if mode is None else mode
+        if isinstance(value, OperationMode):
+            return value.value
+        enum_value = getattr(value, "value", value)
+        return str(enum_value or "").strip().lower()
+
+    def _is_guidance_mode(self, mode: Optional[object] = None) -> bool:
+        return self._mode_key(mode) == OperationMode.GUIDE.value
 
     @property
     def is_available(self) -> bool:
@@ -120,6 +140,7 @@ class LiveSessionManager(QObject):
         if target and not self.is_available:
             self.error_received.emit(self.unavailable_reason)
             return False
+        self.tools.set_guidance_mode(self._is_guidance_mode())
         self.enabled = target
         if not target:
             self.stop_voice()
@@ -169,6 +190,25 @@ class LiveSessionManager(QObject):
 
     def notify_workspace_changed(self, workspace: str) -> None:
         self._workspace = (workspace or "user").strip().lower() or "user"
+
+    def notify_mode_changed(self, mode: object) -> None:
+        was_guidance = self._is_guidance_mode()
+        self._mode = mode
+        is_guidance = self._is_guidance_mode()
+        self.tools.set_guidance_mode(is_guidance)
+
+        if is_guidance and not was_guidance:
+            self.broker.cancel_current_action("Live guidance mode enabled. Actions are disabled.")
+
+        policy_boundary_changed = is_guidance != was_guidance
+        if (
+            policy_boundary_changed
+            and self.enabled
+            and self._session is not None
+            and self._loop
+            and self._loop.is_running()
+        ):
+            self._submit_async(self._reconnect_with_resume(), ensure_loop=False)
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
@@ -356,7 +396,10 @@ class LiveSessionManager(QObject):
             self.session_state_changed.emit("connecting")
 
     def _build_connect_config(self) -> dict[str, Any]:
-        system_instruction = LIVE_SYSTEM_INSTRUCTION
+        guidance_mode = self._is_guidance_mode()
+        system_instruction = (
+            LIVE_GUIDANCE_SYSTEM_INSTRUCTION if guidance_mode else LIVE_SYSTEM_INSTRUCTION
+        )
         resume_summary = self._build_resume_summary()
         if resume_summary:
             system_instruction = (
@@ -368,7 +411,13 @@ class LiveSessionManager(QObject):
         config: dict[str, Any] = {
             "response_modalities": ["AUDIO"],
             "system_instruction": system_instruction,
-            "tools": [{"function_declarations": self.tools.declarations}],
+            "tools": [
+                {
+                    "function_declarations": self.tools.get_declarations(
+                        read_only_only=guidance_mode
+                    )
+                }
+            ],
             "input_audio_transcription": {},
             "output_audio_transcription": {},
         }
