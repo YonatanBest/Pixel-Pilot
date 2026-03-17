@@ -18,7 +18,6 @@ class GuiAdapter(QObject):
     assistant_audio_level_received = Signal(float)
     live_availability_received = Signal(bool, str)
     live_voice_active_received = Signal(bool)
-    overlay_command_requested = Signal(object)
     
 
     confirmation_requested = Signal(str, str, object) 
@@ -79,11 +78,6 @@ class GuiAdapter(QObject):
 
     def update_live_voice_active(self, active: bool):
         self.live_voice_active_received.emit(bool(active))
-
-    def send_overlay_command(self, payload: dict):
-        if not isinstance(payload, dict):
-            return
-        self.overlay_command_requested.emit(dict(payload))
 
     def ask_confirmation(self, title, text):
         event = threading.Event()

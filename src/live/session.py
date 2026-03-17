@@ -44,7 +44,9 @@ LIVE_SYSTEM_INSTRUCTION = (
     "Use capture_screen only when UI Automation or coarse live video is insufficient. "
     "Never issue a second mutating tool call while any action is queued, running, or cancel_requested. "
     "After a mutating tool call, inspect get_action_status or wait_for_action before planning the next action. "
-    "Respect the current workspace, ask for confirmation before destructive actions, and keep replies concise."
+    "Respect the current workspace, ask for confirmation before destructive actions, and keep replies concise. "
+    "If the user asks for Gmail (including phrasing like 'through Gmail'), use a browser workflow instead of Mail app assumptions. "
+    "If login/2FA/captcha blocks progress, ask the user to complete it, then continue."
 )
 
 LIVE_GUIDANCE_SYSTEM_INSTRUCTION = (

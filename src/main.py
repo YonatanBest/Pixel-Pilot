@@ -5,7 +5,6 @@ import logging
 from PySide6.QtWidgets import QApplication, QSplashScreen, QSystemTrayIcon, QMenu
 from PySide6.QtCore import qInstallMessageHandler, Qt
 from PySide6.QtGui import QPixmap, QShortcut, QKeySequence, QPainter, QColor, QAction, QIcon
-from PySide6.QtSvg import QSvgRenderer
 from dotenv import load_dotenv
 from config import Config
 
@@ -129,14 +128,19 @@ def main():
     splash = None
     if os.path.exists(splash_logo_path):
         if splash_logo_path.endswith(".svg"):
-            renderer = QSvgRenderer(splash_logo_path)
-            if renderer.isValid():
-                pixmap = QPixmap(800, 300)
-                pixmap.fill(QColor("transparent"))
-                painter = QPainter(pixmap)
-                renderer.render(painter)
-                painter.end()
-                splash = QSplashScreen(pixmap, Qt.WindowStaysOnTopHint)
+            try:
+                from PySide6.QtSvg import QSvgRenderer
+
+                renderer = QSvgRenderer(splash_logo_path)
+                if renderer.isValid():
+                    pixmap = QPixmap(800, 300)
+                    pixmap.fill(QColor("transparent"))
+                    painter = QPainter(pixmap)
+                    renderer.render(painter)
+                    painter.end()
+                    splash = QSplashScreen(pixmap, Qt.WindowStaysOnTopHint)
+            except Exception:
+                splash = None
         else:
             pixmap = QPixmap(splash_logo_path)
             if not pixmap.isNull():

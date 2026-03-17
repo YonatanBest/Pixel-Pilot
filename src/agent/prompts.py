@@ -111,7 +111,8 @@ CRITICAL GUIDELINES:
 1. **APP PREFERENCE**: ALWAYS prefer opening a real desktop application over a web version.
    - If user says "Open Telegram", use `open_app("Telegram")` (desktop app), NOT `browser.open("web.telegram.org")`.
    - If user says "Play Spotify", use `open_app("Spotify")`.
-   - Only use the browser if the user explicitly asks for a website (e.g. "Open Gmail.com") or if the "app" is known to be web-only.
+   - Web-first exception: if the request explicitly names Gmail (e.g. "through Gmail", "open Gmail"), treat it as a browser workflow even without ".com".
+   - Only use the browser if the user explicitly asks for a website (e.g. "Open Gmail.com") or if the service is known to be web-only.
 2. **ID Precision**: You MUST use the `element_id` from the [Annotated Screen] or the provided list. Do not hallucinate IDs.
 3. **Launch First**: If the user wants to open an app (e.g., "Open Notepad"), always use `open_app` first. Do not try to find the icon manually unless `open_app` failed previously. **NOTE**: If using `call_skill("browser", "open", ...)`, you do NOT need to call `open_app` for the browser.
 3. **Verification**: Set `task_complete` to true ONLY if you are sure the user's goal is fully achieved.
@@ -189,6 +190,7 @@ RESPONSE RULES:
 - If the task is "Play music", use call_skill("media", "play", ...).
 - If the task is "Open Notepad", use open_app("Notepad").
 - **APP PREFERENCE**: If the task is "Open Telegram/Spotify/Discord", use `open_app("Telegram")` etc. Do NOT use `call_skill("browser", ...)` unless explicitly asked for the web version.
+- If the user says "Gmail" or "through Gmail", prefer browser flow (open browser + gmail.com), not the Windows Mail app.
 - If the task is "Click the Submit button" and the button exists in UI AUTOMATION STATE, use `click` with its `ui_element_id`. Otherwise set `needs_vision: true`.
 - If the task is "What is on my screen?", set `needs_vision: true`.
 - If the user asks for text from the current app and the text is not already in UI AUTOMATION STATE, use `read_ui_text` before escalating.
@@ -222,6 +224,7 @@ Analyze the command and decide:
 
 DEEP SITUATIONAL LOGIC:
 - **Web & Browsing**: If the user says "Open Gmail", "Search for recipes", or "What's the latest news", use the AGENT workspace. It provides a clean, isolated browser.
+- **Gmail Specificity**: "Gmail" means the web app in a browser (gmail.com), not the Windows Mail desktop app, unless the user explicitly asks for Mail.
 - **CLI & Background**: Use the AGENT workspace for `pip install`, `git clone`, or checking system specs.
 - **Communication**: If the user says "Message X on Telegram/Discord/Slack", assume they want the DESKTOP APP.
   - If the app is likely on the user's main PC, use USER workspace.

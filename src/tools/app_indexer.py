@@ -381,6 +381,26 @@ class AppIndexer:
         self._build_index()
         self._save_cache()
 
+    def _resolve_shortcut(self, shortcut_path: str) -> str:
+        """
+        Resolves a Windows shortcut (.lnk) to its target path.
+        """
+        if not shortcut_path.lower().endswith(".lnk"):
+            return shortcut_path
+
+        try:
+            import win32com.client
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortCut(shortcut_path)
+            target_path = shortcut.Targetpath
+            if target_path and os.path.exists(target_path):
+                self.logger.info(f"Resolved shortcut '{shortcut_path}' to '{target_path}'")
+                return target_path
+        except Exception as e:
+            self.logger.warning(f"Failed to resolve shortcut '{shortcut_path}': {e}")
+
+        return shortcut_path
+
     def open_app(self, query: str, desktop_manager=None) -> bool:
         """
         Find and launch an application.
@@ -399,6 +419,14 @@ class AppIndexer:
 
         app = results[0]
         method, cmd = self.get_launch_command(app)
+
+        # Resolve shortcut if we are launching on a custom desktop
+        if desktop_manager and desktop_manager.is_created and method == "startfile":
+            cmd = self._resolve_shortcut(cmd)
+            # If it resolved to an .exe, change method to executable
+            if cmd.lower().endswith(".exe"):
+                method = "executable"
+
         self.logger.info(f"Launching {app['name']} via {method}...")
 
         try:

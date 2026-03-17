@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import ctypes
 import hashlib
@@ -1020,6 +1020,8 @@ def get_snapshot(
     workspace = (workspace or "user").strip().lower()
     if not Config.ENABLE_UIA_BLIND_MODE:
         return _unavailable_snapshot(workspace, "UIA blind mode disabled")
+    if workspace == "agent" and not Config.ENABLE_UIA_FOR_AGENT_WORKSPACE:
+        return _unavailable_snapshot(workspace, "UIA disabled for agent workspace (vision-only mode)")
     if auto is None:
         return _unavailable_snapshot(workspace, f"uiautomation unavailable: {UIA_IMPORT_ERROR}")
 
@@ -1233,6 +1235,15 @@ def read_text(
             "available": False,
             "status": "error",
             "reason": "disabled",
+            "text": "",
+            "source": "",
+            "workspace": workspace,
+        }
+    if workspace == "agent" and not Config.ENABLE_UIA_FOR_AGENT_WORKSPACE:
+        return {
+            "available": False,
+            "status": "error",
+            "reason": "disabled_for_agent_workspace",
             "text": "",
             "source": "",
             "workspace": workspace,

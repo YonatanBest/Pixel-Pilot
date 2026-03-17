@@ -1,8 +1,8 @@
 """
 Sidecar Preview Widget
 
-Displays a live, read-only preview of the Agent Desktop attached to
-the right edge of the main PixelPilot window.
+Displays a live, read-only preview of the Agent Desktop attached below
+the main PixelPilot window.
 """
 
 import logging
@@ -180,7 +180,7 @@ class SidecarPreview(QWidget):
     A frameless, read-only preview window that shows the Agent Desktop.
 
     The sidecar:
-    - Attaches to the right edge of the main window
+    - Attaches below the main window
     - Updates at configurable FPS (default 5)
     - Ignores all mouse/keyboard input
     - Scales the desktop capture to fit preview size
@@ -367,13 +367,25 @@ class SidecarPreview(QWidget):
             self.refresh_timer.start()
 
     def attach_to_window(self):
-        """Position the sidecar to the right of the parent window."""
+        """Position the sidecar below the parent window."""
         if not self.parent_window:
             return
 
         parent_geo = self.parent_window.geometry()
-        new_x = parent_geo.right() + 10
-        new_y = parent_geo.top()
+        new_x = parent_geo.left()
+        new_y = parent_geo.bottom() + 10
+
+        screen = (
+            self.parent_window.screen()
+            or QGuiApplication.screenAt(parent_geo.center())
+            or QGuiApplication.primaryScreen()
+        )
+        if screen is not None:
+            available = screen.availableGeometry()
+            max_x = available.right() - self.width() + 1
+            max_y = available.bottom() - self.height() + 1
+            new_x = min(max(new_x, available.left()), max(available.left(), max_x))
+            new_y = min(max(new_y, available.top()), max(available.top(), max_y))
 
         self.move(new_x, new_y)
 
