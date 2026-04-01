@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import pyautogui
 
-from config import Config
+from config import Config, OperationMode
 from live.broker import LiveActionBroker
 import tools.mouse as mouse
 from tools import ui_automation
@@ -51,6 +51,66 @@ class LiveToolRegistry:
 
     def set_guidance_mode(self, enabled: bool) -> None:
         self._guidance_mode = bool(enabled)
+
+    def _mode_key(self) -> str:
+        mode = getattr(self.agent, "mode", None)
+        if isinstance(mode, OperationMode):
+            return mode.value
+        return str(getattr(mode, "value", mode) or "").strip().lower()
+
+    def _requires_confirmation(self, tool_name: str) -> bool:
+        return (
+            self._mode_key() == OperationMode.SAFE.value
+            and str(tool_name or "").strip() in self.MUTATING_TOOL_NAMES
+        )
+
+    def _confirm_mutating_action(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not self._requires_confirmation(tool_name):
+            return None
+
+        chat_window = getattr(self.agent, "chat_window", None)
+        if not chat_window or not hasattr(chat_window, "ask_confirmation"):
+            return {
+                "ok": False,
+                "success": False,
+                "error": "confirmation_unavailable",
+                "message": "SAFE mode could not prompt for confirmation.",
+            }
+
+        lines = [
+            "SAFE mode requires confirmation before each desktop action.",
+            "",
+            f"Action: {str(tool_name or '').strip()}",
+            f"Workspace: {str(getattr(self.agent, 'active_workspace', 'user') or 'user')}",
+        ]
+        if args:
+            lines.append("")
+            lines.append("Parameters:")
+            for key in sorted(args):
+                lines.append(f"- {key}: {args[key]}")
+
+        try:
+            approved = bool(
+                chat_window.ask_confirmation(
+                    "Approve Action",
+                    "\n".join(lines),
+                )
+            )
+        except Exception:
+            approved = False
+
+        if approved:
+            return None
+        return {
+            "ok": False,
+            "success": False,
+            "error": "user_cancelled",
+            "message": "Action cancelled by user.",
+        }
 
     @property
     def declarations(self) -> list[dict[str, Any]]:
@@ -286,6 +346,9 @@ class LiveToolRegistry:
     ) -> dict[str, Any]:
         if self._guidance_mode and str(name or "").strip() in self.MUTATING_TOOL_NAMES:
             return self._guidance_mode_rejection(name)
+        confirmation_result = self._confirm_mutating_action(name, args)
+        if confirmation_result is not None:
+            return confirmation_result
         return self.broker.submit(
             name=name,
             args=args,

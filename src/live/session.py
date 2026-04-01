@@ -19,6 +19,11 @@ from PIL import Image
 from PySide6.QtCore import QObject, Signal
 
 from backend_client import RateLimitError
+from agent.prompts import (
+    LIVE_GUIDANCE_SYSTEM_INSTRUCTION,
+    LIVE_SYSTEM_CONTEXT_PREFIX,
+    LIVE_SYSTEM_INSTRUCTION,
+)
 from config import Config, OperationMode
 from .broker import LiveActionBroker
 from .transports import (
@@ -40,36 +45,6 @@ except Exception as exc:  # noqa: BLE001
     _IMPORT_ERROR = str(exc)
 else:
     _IMPORT_ERROR = ""
-
-
-LIVE_SYSTEM_INSTRUCTION = (
-    "You are Pixy operating in Gemini Live mode on a Windows PC. "
-    "Work UIA-first: prefer UI Automation state, window listing, window focus, keyboard actions, "
-    "app launch, and brokered status checks before requesting detailed vision. "
-    "Treat the low-FPS video feed as coarse awareness only, not precise click targeting. "
-    "Use capture_screen only when UI Automation or coarse live video is insufficient. "
-    "Never issue a second mutating tool call while any action is queued, running, or cancel_requested. "
-    "After a mutating tool call, inspect get_action_status or wait_for_action before planning the next action. "
-    "Respect the current workspace, ask for confirmation before destructive actions, and keep replies concise. "
-    "If the user asks for Gmail (including phrasing like 'through Gmail'), use a browser workflow instead of Mail app assumptions. "
-    "If login/2FA/captcha blocks progress, ask the user to complete it, then continue."
-)
-
-LIVE_GUIDANCE_SYSTEM_INSTRUCTION = (
-    "You are Pixy operating in Gemini Live guidance mode on a Windows PC. "
-    "You are a tutor only: guide the user step-by-step with concise voice/text instructions. "
-    "Do not perform desktop actions on the user's behalf. "
-    "Do not wait for the user to say 'done' if you can already observe progress. "
-    "When you detect the user completed a step, acknowledge it immediately and continue to the next step. "
-    "If tools are available, use them only for read-only observation and adapt your guidance from what you see. "
-    "Ask short follow-up questions only when the observed state is ambiguous."
-)
-
-LIVE_SYSTEM_CONTEXT_PREFIX = (
-    "Runtime continuity context. This is state, not a fresh user request. "
-    "Use it only to preserve continuity across reconnects and turns."
-)
-
 
 class LiveSessionManager(QObject):
     transcript_received = Signal(str, str, bool)
@@ -116,6 +91,10 @@ class LiveSessionManager(QObject):
         self._audio_resample_logged_at = 0.0
         self._last_guidance_snapshot_signature = ""
         self._last_guidance_probe_sent_at = 0.0
+        self._turn_state_lock = threading.Lock()
+        self._active_text_turn_id: Optional[int] = None
+        self._next_text_turn_id = 0
+        self._turn_waiters: dict[int, dict[str, Any]] = {}
 
         self.broker = LiveActionBroker(on_action_update=self._on_action_update)
         self.tools = LiveToolRegistry(
@@ -135,6 +114,17 @@ class LiveSessionManager(QObject):
 
     def _is_guidance_mode(self, mode: Optional[object] = None) -> bool:
         return self._mode_key(mode) == OperationMode.GUIDE.value
+
+    def _mode_instruction_suffix(self) -> str:
+        mode_key = self._mode_key()
+        if mode_key == OperationMode.SAFE.value:
+            return (
+                "SAFE mode is active. Every mutating desktop action requires user confirmation. "
+                "If a tool call is rejected, explain briefly and choose a safer next step."
+            )
+        if mode_key == OperationMode.AUTO.value:
+            return "AUTO mode is active. Mutating desktop actions may proceed without per-action confirmation."
+        return ""
 
     def _transport_cls(self):
         return DirectGeminiLiveTransport if Config.USE_DIRECT_API else BackendGeminiLiveTransport
@@ -172,29 +162,146 @@ class LiveSessionManager(QObject):
         self.enabled = target
         if not target:
             self.stop_voice()
+            self._finish_text_turn(error="AI power was turned off.")
             self._submit_async(self._disconnect_session(close_client=True), ensure_loop=False)
             self.session_state_changed.emit("disconnected")
         return True
 
-    def submit_text(self, text: str) -> bool:
+    def _begin_text_turn(
+        self,
+        text: str,
+        *,
+        wait_for_result: bool,
+    ) -> tuple[Optional[dict[str, Any]], str]:
         clean = str(text or "").strip()
         if not clean:
-            return False
+            return None, "Message is empty."
         if not self.enabled:
-            self.error_received.emit("Live mode is disabled.")
-            return False
+            return None, "AI power is off."
+        if self._voice_enabled:
+            return None, "Stop live voice before sending a typed command."
+        with self._turn_state_lock:
+            if self._active_text_turn_id is not None:
+                return None, "Wait for the current reply before sending another command."
+            self._next_text_turn_id += 1
+            turn_id = self._next_text_turn_id
+            waiter = {
+                "turn_id": turn_id,
+                "submitted_text": clean,
+                "assistant_text": "",
+                "error": "",
+                "event": threading.Event() if wait_for_result else None,
+            }
+            self._turn_waiters[turn_id] = waiter
+            self._active_text_turn_id = turn_id
 
         if not self._current_goal:
             self._current_goal = clean
+        clear_stop = getattr(self.agent, "clear_stop_request", None)
+        if callable(clear_stop):
+            try:
+                clear_stop()
+            except Exception:
+                pass
         self.agent.current_task = clean
         self._recent_user_steering.append(clean)
         self.session_state_changed.emit("thinking")
-        return self._submit_async(self._send_text(clean))
+        return waiter, ""
+
+    def _finish_text_turn(
+        self,
+        *,
+        assistant_text: str = "",
+        error: str = "",
+    ) -> None:
+        with self._turn_state_lock:
+            turn_id = self._active_text_turn_id
+            if turn_id is None:
+                return
+            waiter = self._turn_waiters.pop(turn_id, None)
+            self._active_text_turn_id = None
+
+        if not waiter:
+            return
+        waiter["assistant_text"] = str(assistant_text or "").strip()
+        waiter["error"] = str(error or "").strip()
+        event = waiter.get("event")
+        if event is not None:
+            event.set()
+
+    def submit_text(self, text: str) -> bool:
+        waiter, error_message = self._begin_text_turn(text, wait_for_result=False)
+        if waiter is None:
+            if error_message:
+                self.error_received.emit(error_message)
+            return False
+        submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
+        if not submitted:
+            self._finish_text_turn(error="Failed to send the command to Gemini Live.")
+        return submitted
+
+    def submit_text_and_wait(self, text: str, timeout_s: Optional[float] = None) -> dict[str, Any]:
+        waiter, error_message = self._begin_text_turn(text, wait_for_result=True)
+        if waiter is None:
+            return {
+                "ok": False,
+                "error": "turn_rejected",
+                "message": error_message or "Unable to submit command.",
+                "text": "",
+            }
+
+        submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
+        if not submitted:
+            self._finish_text_turn(error="Failed to send the command to Gemini Live.")
+            return {
+                "ok": False,
+                "error": "submit_failed",
+                "message": "Failed to send the command to Gemini Live.",
+                "text": "",
+            }
+
+        timeout_value = max(1.0, float(timeout_s or 90.0))
+        event = waiter.get("event")
+        if event is None or not event.wait(timeout=timeout_value):
+            self._finish_text_turn(error="Timed out waiting for Gemini Live to finish the turn.")
+            return {
+                "ok": False,
+                "error": "timeout",
+                "message": "Timed out waiting for Gemini Live to finish the turn.",
+                "text": "",
+            }
+
+        assistant_text = str(waiter.get("assistant_text") or "").strip()
+        error_text = str(waiter.get("error") or "").strip()
+        if error_text:
+            return {
+                "ok": False,
+                "error": "turn_failed",
+                "message": error_text,
+                "text": assistant_text,
+            }
+        return {
+            "ok": True,
+            "error": "",
+            "message": "Turn completed.",
+            "text": assistant_text,
+        }
 
     def start_voice(self) -> bool:
         if not self.enabled:
             self.error_received.emit("Enable Live mode before starting voice.")
             return False
+        with self._turn_state_lock:
+            active_turn = self._active_text_turn_id is not None
+        if active_turn:
+            self.error_received.emit("Wait for the current reply before starting live voice.")
+            return False
+        clear_stop = getattr(self.agent, "clear_stop_request", None)
+        if callable(clear_stop):
+            try:
+                clear_stop()
+            except Exception:
+                pass
         self._voice_enabled = True
         self.voice_active_changed.emit(True)
         self.session_state_changed.emit("connecting")
@@ -227,6 +334,7 @@ class LiveSessionManager(QObject):
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
+        self._finish_text_turn(error="Gemini Live session shut down.")
         self._voice_enabled = False
         self.voice_active_changed.emit(False)
         if self._loop and self._loop.is_running():
@@ -309,9 +417,11 @@ class LiveSessionManager(QObject):
         except RuntimeError as exc:
             logger.warning("Gemini Live error: %s", exc)
             self.session_state_changed.emit("disconnected")
+            self._finish_text_turn(error=str(exc))
             self.error_received.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             logger.exception("Live background task failed")
+            self._finish_text_turn(error=f"Gemini Live background task failed: {exc}")
             self.error_received.emit(f"Gemini Live background task failed: {exc}")
 
     async def _send_text(self, text: str) -> None:
@@ -324,7 +434,10 @@ class LiveSessionManager(QObject):
 
         transport = await self._ensure_session_with_retry()
         try:
-            await asyncio.wait_for(transport.send_text(payload), timeout=8.0)
+            await asyncio.wait_for(
+                transport.send_text(payload),
+                timeout=Config.LIVE_TEXT_SEND_TIMEOUT_SECONDS,
+            )
         except RateLimitError:
             raise
         except asyncio.TimeoutError as exc:
@@ -357,7 +470,7 @@ class LiveSessionManager(QObject):
             except Exception as exc:  # noqa: BLE001
                 if attempt >= retries or not self._is_recoverable_connection_error(exc):
                     raise
-                delay_s = 0.75 * (attempt + 1)
+                delay_s = Config.LIVE_CONNECT_RETRY_BASE_DELAY_SECONDS * (attempt + 1)
                 logger.warning(
                     "Live session connect failed (%s); retrying in %.2fs",
                     exc,
@@ -453,6 +566,9 @@ class LiveSessionManager(QObject):
         system_instruction = (
             LIVE_GUIDANCE_SYSTEM_INSTRUCTION if guidance_mode else LIVE_SYSTEM_INSTRUCTION
         )
+        mode_suffix = self._mode_instruction_suffix()
+        if mode_suffix:
+            system_instruction = f"{system_instruction}\n\n{mode_suffix}"
         resume_summary = self._build_resume_summary()
         if resume_summary:
             system_instruction = (
@@ -561,18 +677,21 @@ class LiveSessionManager(QObject):
 
                     if bool(server_content.get("interrupted")):
                         self.session_state_changed.emit("interrupted")
+                        self._finish_text_turn(error="Gemini Live interrupted the current turn.")
                         self._assistant_buffer = ""
                         self._user_buffer = ""
                         self.assistant_audio_level_changed.emit(0.0)
                         self._clear_speaker_queue()
 
                     if bool(server_content.get("turn_complete")):
+                        assistant_text = str(self._assistant_buffer or "").strip()
                         if self._user_buffer:
                             self.transcript_received.emit("user", self._user_buffer, True)
                             self._user_buffer = ""
                         if self._assistant_buffer:
                             self.transcript_received.emit("assistant", self._assistant_buffer, True)
                             self._assistant_buffer = ""
+                        self._finish_text_turn(assistant_text=assistant_text)
                         self.assistant_audio_level_changed.emit(0.0)
                         self.session_state_changed.emit("listening")
 
@@ -582,6 +701,7 @@ class LiveSessionManager(QObject):
             raise
         except RateLimitError as exc:
             logger.warning("Live receive loop rate limited: %s", exc)
+            self._finish_text_turn(error=str(exc))
             self.error_received.emit(str(exc))
             if self.enabled and not self._shutdown_event.is_set():
                 await self._disconnect_session()
@@ -597,6 +717,7 @@ class LiveSessionManager(QObject):
                     await self._reconnect_with_resume()
                 return
             logger.exception("Live receive loop failed")
+            self._finish_text_turn(error=f"Live session error: {exc}")
             self.error_received.emit(f"Live session error: {exc}")
             if self.enabled and not self._shutdown_event.is_set():
                 await self._reconnect_with_resume()
@@ -869,8 +990,8 @@ class LiveSessionManager(QObject):
     async def _guidance_observer_loop(self) -> None:
         # In live guidance mode, detect UIA state changes and proactively nudge the model
         # so it can acknowledge step completion without waiting for explicit "done".
-        poll_interval_s = 1.0
-        nudge_cooldown_s = 2.5
+        poll_interval_s = Config.LIVE_GUIDANCE_OBSERVER_POLL_SECONDS
+        nudge_cooldown_s = Config.LIVE_GUIDANCE_OBSERVER_NUDGE_COOLDOWN_SECONDS
         try:
             while True:
                 await asyncio.sleep(poll_interval_s)
@@ -1072,9 +1193,12 @@ class LiveSessionManager(QObject):
             await queue.put(item)
             if queue.maxsize == 0:
                 backlog = queue.qsize()
-                if backlog >= 512:
+                if backlog >= Config.LIVE_AUDIO_LOSSLESS_BACKLOG_WARNING_CHUNKS:
                     now = time.monotonic()
-                    if now - self._speaker_backlog_logged_at > 3.0:
+                    if (
+                        now - self._speaker_backlog_logged_at
+                        > Config.LIVE_AUDIO_LOSSLESS_BACKLOG_WARNING_COOLDOWN_SECONDS
+                    ):
                         logger.warning(
                             "Live speaker backlog high in lossless mode (qsize=%d)",
                             backlog,
@@ -1087,7 +1211,10 @@ class LiveSessionManager(QObject):
             return
 
         try:
-            await asyncio.wait_for(queue.put(item), timeout=0.20)
+            await asyncio.wait_for(
+                queue.put(item),
+                timeout=Config.LIVE_AUDIO_QUEUE_PUT_TIMEOUT_SECONDS,
+            )
             return
         except asyncio.TimeoutError:
             pass
@@ -1107,7 +1234,7 @@ class LiveSessionManager(QObject):
 
         if dropped:
             now = time.monotonic()
-            if now - self._speaker_drop_logged_at > 2.0:
+            if now - self._speaker_drop_logged_at > Config.LIVE_AUDIO_QUEUE_DROP_LOG_COOLDOWN_SECONDS:
                 logger.warning(
                     "Live speaker queue pressure: dropped %d stale chunks (qsize=%d/%d)",
                     dropped,
@@ -1149,7 +1276,7 @@ class LiveSessionManager(QObject):
 
     def _maybe_log_audio_resample(self, src_rate: int, dst_rate: int) -> None:
         now = time.monotonic()
-        if now - self._audio_resample_logged_at < 5.0:
+        if now - self._audio_resample_logged_at < Config.LIVE_AUDIO_RESAMPLE_LOG_COOLDOWN_SECONDS:
             return
         logger.info("Resampling assistant audio from %s Hz to %s Hz", src_rate, dst_rate)
         self._audio_resample_logged_at = now

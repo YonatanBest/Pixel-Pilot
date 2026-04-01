@@ -3,11 +3,10 @@
 ![PixelPilot Logo](src/logos/pixelpilot-logo-creative.svg)
 
 PixelPilot is a Windows desktop AI agent that executes computer tasks from natural language using:
-- Gemini Live session mode by default (when available; can be toggled off)
+- Gemini Live as the only desktop AI runtime for typed and voice input
 - Hybrid blind + vision execution
 - Native desktop automation (keyboard/mouse/UIA)
 - Optional isolated Agent Desktop
-- Gemini request/response planning and verification (`gemini-3-flash-preview` when the mode is not Live)
 
 ## Architecture
 
@@ -17,19 +16,19 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
 
 ### Mode and workspace policy
 - Modes are `GUIDANCE`, `SAFE`, `AUTO`.
-- Any mode change forces workspace to `user`.
-- Guidance is locked to `user` workspace:
-  - `switch_workspace` to `agent` is coerced to `user` in Guidance.
-  - Guidance task startup defensively re-checks and forces `user`.
+- All modes are Gemini Live-backed:
+  - `GUIDANCE`: read-only tutoring, no desktop actions.
+  - `SAFE`: every mutating desktop action requires confirmation.
+  - `AUTO`: mutating desktop actions run without per-action confirmation.
+- Switching into `GUIDANCE` forces the workspace back to `user`.
 
 ### Passthrough/click-through policy
 - `agent` workspace: click-through is always OFF.
-- `user` workspace, non-Live: click-through is ON only while a task is actively running, then OFF when done/stopped.
-- `user` workspace, Live enabled: click-through is ON only while a mutating Live action is `queued`, `running`, or `cancel_requested`; otherwise OFF.
+- `user` workspace: click-through is ON only while a mutating Live action is `queued`, `running`, or `cancel_requested`; otherwise OFF.
 
 ### Live startup default
-- When Live is available, Live mode starts ON by default.
-- Users can toggle Live OFF from the Live button to return to non-Live task execution.
+- When Live is available, AI power starts ON by default.
+- Turning AI OFF disconnects Gemini Live, stops voice, and disables typed/voice input until AI is turned back on.
 
 ### Focus restore on passthrough transitions
 - When click-through is disabled, PixelPilot stores the last external foreground window handle.
@@ -38,21 +37,17 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
 
 ## Key Features
 
-- Blind-first orchestration with step-1 workspace decision.
 - UI Automation blind mode with:
   - snapshots
   - `ui_element_id` targeting
   - text extraction (`read_ui_text`)
   - window listing/focus (`list_windows`, `focus_window`)
 - Vision pipeline:
-  - local OCR/CV (`EasyOCR` + OpenCV) first
-  - optional Robotics-ER (`gemini-robotics-er-1.5-preview`) fallback
+  - backend-hosted eye pipeline (`EasyOCR` + OpenCV icon detection) for signed-in users
+  - local OCR/CV (`EasyOCR` + OpenCV) for direct API-key mode
+  - optional Robotics-ER fallback
   - annotated overlay + optional reference sheet
-- Verification pipeline:
-  - blind verification first when appropriate
-  - visual verification when blind evidence is insufficient
-- Loop detection and clarification flow.
-- UAC secure desktop support through orchestrator/agent helpers (`src/uac/`).
+- UAC secure desktop support through hardened orchestrator/agent helpers (`src/uac/`) with per-request IPC and explicit user confirmation before allow.
 - Optional Agent Desktop isolation with sidecar preview and process tracking.
 - Skills:
   - `media`
@@ -65,7 +60,7 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
 ## Hotkeys
 
 - `Ctrl+Shift+Z`: Toggle click-through manually
-- `Ctrl+Shift+X`: Stop current task / request stop in Live
+- `Ctrl+Shift+X`: Stop the current Live action / session turn
 - `Ctrl+Shift+Q`: Quit
 - `Ctrl+Shift+M`: Hide/restore app (background toggle)
 - `Ctrl+Shift+D`: Toggle details panel
@@ -120,10 +115,10 @@ Create `.env` in repo root (you can start from `env.example`).
 ```env
 GEMINI_API_KEY=your_api_key_here
 GEMINI_MODEL=gemini-3-flash-preview
-GEMINI_BASE_MODEL=gemini-3-flash-preview
 
 ENABLE_GEMINI_LIVE_MODE=true
 LIVE_MODE_DEFAULT_ENABLED=true
+LIVE_MODE_DEFAULT_VOICE_ENABLED=true
 GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
 LIVE_ENABLE_IMAGE_INPUT=false
 LIVE_ENABLE_VIDEO_STREAM=false
@@ -139,17 +134,21 @@ LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS=220
 LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE=105
 
 DEFAULT_MODE=auto
-AGENT_MODE=auto
 VISION_MODE=ocr
 BACKEND_URL=your_backend_url
 
 # optional
-PIXELPILOT_GATEWAY_TOKEN=pixelpilot-secret
+ENABLE_GATEWAY=false
+GATEWAY_HOST=localhost
+GATEWAY_PORT=8765
+GATEWAY_COMMAND_TIMEOUT_SECONDS=120
+PIXELPILOT_GATEWAY_TOKEN=
 ```
 
 Notes:
 - Live mode works in direct mode with a local `GEMINI_API_KEY`, or in backend mode after sign-in when `BACKEND_URL` is configured.
-- `LIVE_MODE_DEFAULT_ENABLED=true` means Live starts enabled whenever available.
+- `LIVE_MODE_DEFAULT_ENABLED=true` means AI power starts enabled whenever Live is available.
+- `LIVE_MODE_DEFAULT_VOICE_ENABLED=true` means the mic starts with AI power at startup.
 - `LIVE_ENABLE_IMAGE_INPUT=false` avoids image/video realtime sends for native-audio models (prevents policy-violation disconnects).
 - `LIVE_AUDIO_LOSSLESS_MODE=true` avoids dropping assistant audio chunks (smoothness over low latency).
 - If `GEMINI_API_KEY` is missing, app uses backend auth/proxy mode.
@@ -162,9 +161,10 @@ Notes:
 
 Startup behavior:
 - Direct mode (`GEMINI_API_KEY` present): no login dialog.
-- When Live is available, Live mode is enabled by default at startup.
-- Backend mode (no local key): login dialog appears, and Gemini Live uses the backend Gemini key after sign-in.
+- When Live is available, AI power and live voice are enabled by default at startup.
+- Backend mode (no local key): login dialog appears, Gemini Live uses the backend Gemini key after sign-in, and OCR mode runs the full eye pipeline on the backend.
 - Login dialog also lets user paste/store an API key.
+- The desktop UI stays least-privileged at startup; secure desktop/UAC automation uses the installed helper tasks when needed.
 
 ### Testing Credentials
 
@@ -172,8 +172,6 @@ Use these credentials when testing the public backend:
 
 - Email: `test@example.com`
 - Password: `test12345`
-
-The app attempts admin relaunch at startup; if elevation is denied, it continues with limited capability.
 
 ## Optional Backend (FastAPI)
 
@@ -191,6 +189,9 @@ GEMINI_API_KEY=your_backend_key
 MONGODB_URI=your_mongodb_uri
 REDIS_URI=redis://localhost:6379
 JWT_SECRET=change_me
+OCR_USE_GPU=auto
+OCR_REQUESTS_PER_MINUTE=60
+OCR_REQUESTS_PER_DAY=1000
 GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
 LIVE_MAX_CONCURRENT_SESSIONS=1
 LIVE_MAX_ACTIVE_SESSIONS_PER_USER=1
@@ -215,6 +216,8 @@ Backend endpoints:
 - `POST /auth/login`
 - `GET /auth/me`
 - `POST /v1/generate` (JWT protected, Redis rate limited)
+- `POST /v1/vision/easyocr` (JWT protected, backend EasyOCR helper)
+- `POST /v1/vision/local-eye` (JWT protected, backend-hosted OCR + icon detection pipeline)
 - `WS /ws/live` (JWT protected, backend Gemini Live relay with Redis-backed Live session limits)
 - `GET /health`
 
@@ -226,13 +229,15 @@ Default backend limits:
 ## Optional Gateway
 
 Gateway implementation exists at `src/services/gateway.py`.
-It is not auto-started by `src/main.py`; integrate/start it explicitly in your own launcher process.
+Set `ENABLE_GATEWAY=true` to start it with the desktop app.
+Gateway commands are executed through the same Gemini Live session used by the desktop UI, so AI power must be on and voice must be idle before a remote command can run.
+Set `PIXELPILOT_GATEWAY_TOKEN` explicitly if you want authenticated gateway access.
 
 Expected payload format:
 
 ```json
 {
-  "auth": "pixelpilot-secret",
+  "auth": "set-your-token-here",
   "command": "Open calculator and compute 25*34",
   "params": {
     "mode": "auto"

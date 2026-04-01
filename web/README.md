@@ -35,4 +35,4 @@ npm run build
 
 ---
 
-**Note**: The web portal communicates with the PixelPilot agent via the WebSocket gateway (configured in `src/services/gateway.py`).
+**Note**: The web portal communicates with the PixelPilot live runtime via the WebSocket gateway (configured in `src/services/gateway.py`).

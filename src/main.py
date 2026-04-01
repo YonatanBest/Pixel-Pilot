@@ -168,34 +168,6 @@ def main():
         except Exception:
             return False
 
-    def relaunch_as_admin() -> bool:
-        try:
-            python_exe = sys.executable
-            candidate_pythonw = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
-            if os.path.exists(candidate_pythonw):
-                python_exe = candidate_pythonw
-
-            script_path = os.path.abspath(__file__)
-            params = f'"{script_path}"'
-
-            rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", python_exe, params, None, 1)
-            return int(rc) > 32
-        except Exception:
-            return False
-
-    if not is_admin():
-        if relaunch_as_admin():
-            return
-
-        from ui.custom_dialogs import MessageDialog
-        dialog = MessageDialog(
-            None,
-            "Administrator Privileges",
-            "Pixel Pilot is running without Administrator privileges.\n\n"
-            "Some desktop automation features may be limited.",
-        )
-        dialog.exec()
-
     try:
         window = MainWindow()
     except Exception:
@@ -307,7 +279,7 @@ def main():
 
     stop_request = QShortcut(QKeySequence("Ctrl+Shift+X"), window)
     stop_request.setContext(Qt.ShortcutContext.ApplicationShortcut)
-    stop_request.activated.connect(controller.stop_current_request)
+    stop_request.activated.connect(controller.stop_current_turn)
     window._qt_shortcuts.append(stop_request)
 
     close_app = QShortcut(QKeySequence("Ctrl+Shift+Q"), window)
@@ -345,7 +317,7 @@ def main():
         if hotkey_id == HK_TOGGLE:
             controller.toggle_click_through()
         elif hotkey_id == HK_STOP:
-            controller.stop_current_request()
+            controller.stop_current_turn()
         elif hotkey_id == HK_CLOSE:
             QApplication.quit()
         elif hotkey_id == HK_BACKGROUND:
@@ -384,13 +356,6 @@ def main():
         else:
             logger.debug(msg)
             
-    if hasattr(window, "chat_widget"):
-        cw = window.chat_widget
-        live_off = getattr(cw, "_live_enabled", False) and not getattr(cw, "_live_voice_active", False)
-        stt_off = not getattr(cw, "_live_enabled", False) and not getattr(cw.audio_service, "is_listening", False)
-        if live_off or stt_off:
-            cw.toggle_listening()
-    
     window.show()
     if splash:
         splash.finish(window)

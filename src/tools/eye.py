@@ -4,10 +4,11 @@ import json
 import os
 from PIL import Image
 from pydantic import BaseModel, Field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import base64
 
-from backend_client import get_client
+from backend_client import get_backend_proxy_client, get_client
+from config import Config
 from agent.prompts import ROBOTICS_EYE_DYNAMIC_PROMPT, ROBOTICS_EYE_GENERAL_PROMPT
 
 warnings.filterwarnings(
@@ -19,12 +20,14 @@ logger = logging.getLogger("pixelpilot.eye")
 
 
 class LocalCVEye:
-    """Local computer-vision based eye using EasyOCR + contour/icon detection."""
+    """Local CV eye, with a hosted full-pipeline mode for signed-in users."""
 
     def __init__(self, lang: str = "en", use_gpu: Optional[bool] = None):
         self.lang = lang
         self._use_gpu = use_gpu
         self._reader = None
+        self.last_ocr_source = "local"
+        self.last_ocr_device = "cpu"
 
     @property
     def reader(self):
@@ -36,19 +39,78 @@ class LocalCVEye:
             self._reader = easyocr.Reader([self.lang], gpu=use_gpu)
         return self._reader
 
-    def _run_ocr(self, img):
-        logger.info("Running OCR...")
+    def _should_use_backend_eye(self) -> bool:
+        if Config.USE_DIRECT_API:
+            return False
+        try:
+            from auth_manager import get_auth_manager
+
+            return bool(get_auth_manager().access_token)
+        except Exception:
+            return False
+
+    def _run_local_ocr(self, img):
+        logger.info("Running local OCR...")
+        self.last_ocr_source = "local"
+        try:
+            import torch
+
+            self.last_ocr_device = (
+                "cuda"
+                if (torch.cuda.is_available() if self._use_gpu is None else bool(self._use_gpu))
+                else "cpu"
+            )
+        except Exception:
+            self.last_ocr_device = "cpu"
         return self.reader.readtext(img)
 
-    def _run_icon_detection(self, img, text_boxes):
-        logger.info("Detecting Icons (Dual-Pass High Sensitivity)...")
-        return self.find_mystery_icons_sensitive(img, text_boxes)
+    def _run_backend_eye(self, image_path: str):
+        logger.info("Running backend eye...")
+        self.last_ocr_source = "backend"
+        self.last_ocr_device = "cpu"
+        with open(image_path, "rb") as image_file:
+            image_bytes = image_file.read()
+        response = get_backend_proxy_client().local_eye_elements(
+            image_bytes=image_bytes,
+            mime_type=self._get_mime_type(image_path),
+            lang=self.lang,
+        )
+        self.last_ocr_device = str(response.get("device") or "cpu")
+        return list(response.get("elements") or [])
 
-    def get_screen_elements(self, image_path: str) -> List[Dict[str, Any]]:
+    def current_vision_label(self) -> str:
+        if self.last_ocr_source == "backend":
+            return "Backend Eye"
+        return "Local Eye"
+
+    @staticmethod
+    def _get_mime_type(image_path: str) -> str:
+        ext = os.path.splitext(image_path)[1].lower()
+        return {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".bmp": "image/bmp",
+        }.get(ext, "image/png")
+
+    def get_screen_elements(
+        self,
+        image_path: str,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> List[Dict[str, Any]]:
         """Scans the screen for Text (OCR) and high-sensitivity Icon candidates.
 
         Uses parallel processing for faster detection.
         """
+        backend_eye = self._should_use_backend_eye()
+        if backend_eye:
+            if progress_callback:
+                progress_callback("Uploading screenshot for vision...")
+                progress_callback("Running backend eye...")
+                progress_callback("Applying backend eye results...")
+            return self._run_backend_eye(image_path)
+
         import cv2
         img = cv2.imread(image_path)
         if img is None:
@@ -57,12 +119,19 @@ class LocalCVEye:
         elements: List[Dict[str, Any]] = []
         element_id = 0
 
+        if progress_callback:
+            progress_callback("Running local OCR...")
+            progress_callback("Detecting icons...")
+
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            ocr_future = executor.submit(self._run_ocr, img)
+            ocr_future = executor.submit(self._run_local_ocr, img)
             icon_future = executor.submit(self.find_mystery_icons_sensitive, img, [])
 
             ocr_results = ocr_future.result()
             raw_icons = icon_future.result()
+
+            if progress_callback:
+                progress_callback("Merging results...")
 
             text_boxes = []
             for bbox, text, prob in ocr_results:

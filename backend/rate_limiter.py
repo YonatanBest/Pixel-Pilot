@@ -17,6 +17,12 @@ import redis.asyncio as redis
 
 DAILY_LIMIT = 1000
 MINUTE_LIMIT = 60
+OCR_REQUESTS_PER_DAY = max(
+    1, int(os.getenv("OCR_REQUESTS_PER_DAY", str(DAILY_LIMIT)) or str(DAILY_LIMIT))
+)
+OCR_REQUESTS_PER_MINUTE = max(
+    1, int(os.getenv("OCR_REQUESTS_PER_MINUTE", str(MINUTE_LIMIT)) or str(MINUTE_LIMIT))
+)
 LIVE_MAX_CONCURRENT_SESSIONS = max(
     1, int(os.getenv("LIVE_MAX_CONCURRENT_SESSIONS", "1") or "1")
 )
@@ -219,6 +225,7 @@ return {refreshed}
 @dataclass(frozen=True)
 class RateLimitReservation:
     allowed: bool
+    scope: str
     window: Optional[str]
     current: int
     limit: int
@@ -271,12 +278,16 @@ def _seconds_until_next_utc_midnight(now: datetime) -> int:
 def _get_rate_limit_keys(
     user_id: str,
     *,
+    scope: str = "generate",
     now: Optional[datetime] = None,
 ) -> tuple[str, str]:
     current_time = now or _utc_now()
-    day_key = current_time.strftime(f"ratelimit:generate:{WINDOW_DAY}:{user_id}:%Y-%m-%d")
+    scope_key = str(scope or "generate").strip().lower() or "generate"
+    day_key = current_time.strftime(
+        f"ratelimit:{scope_key}:{WINDOW_DAY}:{user_id}:%Y-%m-%d"
+    )
     minute_key = current_time.strftime(
-        f"ratelimit:generate:{WINDOW_MINUTE}:{user_id}:%Y-%m-%dT%H:%M"
+        f"ratelimit:{scope_key}:{WINDOW_MINUTE}:{user_id}:%Y-%m-%dT%H:%M"
     )
     return day_key, minute_key
 
@@ -313,6 +324,9 @@ def _to_int(value: object) -> int:
 def _normalize_reservation(
     raw_result: list[object],
     *,
+    scope: str,
+    daily_limit: int,
+    minute_limit: int,
     day_key: str,
     minute_key: str,
 ) -> RateLimitReservation:
@@ -325,8 +339,8 @@ def _normalize_reservation(
     day_count = _to_int(raw_result[6])
     minute_count = _to_int(raw_result[7])
 
-    daily_remaining = max(0, DAILY_LIMIT - day_count)
-    minute_remaining = max(0, MINUTE_LIMIT - minute_count)
+    daily_remaining = max(0, daily_limit - day_count)
+    minute_remaining = max(0, minute_limit - minute_count)
 
     if allowed:
         current = 0
@@ -337,6 +351,7 @@ def _normalize_reservation(
 
     return RateLimitReservation(
         allowed=allowed,
+        scope=str(scope or "generate"),
         window=window,
         current=current,
         limit=limit,
@@ -409,7 +424,7 @@ async def reserve_generate_request(
     A successful reservation must be refunded if the downstream generation fails.
     """
     now = _utc_now()
-    day_key, minute_key = _get_rate_limit_keys(user_id, now=now)
+    day_key, minute_key = _get_rate_limit_keys(user_id, scope="generate", now=now)
     day_ttl = _seconds_until_next_utc_midnight(now)
     minute_ttl = _seconds_until_next_utc_minute(now)
 
@@ -425,6 +440,9 @@ async def reserve_generate_request(
     )
     return _normalize_reservation(
         raw_result,
+        scope="generate",
+        daily_limit=DAILY_LIMIT,
+        minute_limit=MINUTE_LIMIT,
         day_key=day_key,
         minute_key=minute_key,
     )
@@ -448,6 +466,7 @@ async def refund_generate_request(
 
     return RateLimitReservation(
         allowed=True,
+        scope="generate",
         window=None,
         current=0,
         limit=0,
@@ -455,6 +474,63 @@ async def refund_generate_request(
         retry_after_seconds=0,
         daily_remaining=max(0, DAILY_LIMIT - day_count),
         minute_remaining=max(0, MINUTE_LIMIT - minute_count),
+        day_key=reservation.day_key,
+        minute_key=reservation.minute_key,
+    )
+
+
+async def reserve_ocr_request(
+    user_id: str,
+    redis_client: redis.Redis,
+) -> RateLimitReservation:
+    now = _utc_now()
+    day_key, minute_key = _get_rate_limit_keys(user_id, scope="ocr", now=now)
+    day_ttl = _seconds_until_next_utc_midnight(now)
+    minute_ttl = _seconds_until_next_utc_minute(now)
+
+    raw_result = await redis_client.eval(
+        RESERVE_SCRIPT,
+        2,
+        day_key,
+        minute_key,
+        OCR_REQUESTS_PER_DAY,
+        OCR_REQUESTS_PER_MINUTE,
+        day_ttl,
+        minute_ttl,
+    )
+    return _normalize_reservation(
+        raw_result,
+        scope="ocr",
+        daily_limit=OCR_REQUESTS_PER_DAY,
+        minute_limit=OCR_REQUESTS_PER_MINUTE,
+        day_key=day_key,
+        minute_key=minute_key,
+    )
+
+
+async def refund_ocr_request(
+    reservation: RateLimitReservation,
+    redis_client: redis.Redis,
+) -> RateLimitReservation:
+    raw_result = await redis_client.eval(
+        REFUND_SCRIPT,
+        2,
+        reservation.day_key,
+        reservation.minute_key,
+    )
+    day_count = _to_int(raw_result[0])
+    minute_count = _to_int(raw_result[1])
+
+    return RateLimitReservation(
+        allowed=True,
+        scope="ocr",
+        window=None,
+        current=0,
+        limit=0,
+        remaining=max(0, OCR_REQUESTS_PER_DAY - day_count),
+        retry_after_seconds=0,
+        daily_remaining=max(0, OCR_REQUESTS_PER_DAY - day_count),
+        minute_remaining=max(0, OCR_REQUESTS_PER_MINUTE - minute_count),
         day_key=reservation.day_key,
         minute_key=reservation.minute_key,
     )

@@ -340,7 +340,7 @@ class AgentDesktopManager:
         Avoids explorer.exe to prevent session leakage and singleton issues.
         """
         logger.info(f"Initializing custom shell on {self.desktop_name}...")
-        self._cleanup_legacy_shells()
+        self._cleanup_stale_shell_windows()
         
         try:
             from config import Config
@@ -358,17 +358,17 @@ class AgentDesktopManager:
             
         return success
 
-    def _cleanup_legacy_shells(self):
+    def _cleanup_stale_shell_windows(self):
         """Attempts to close lingering explorer windows from previous failed shell startups."""
         try:
             windows = self.list_windows()
             for w in windows:
                 title = w['title'].lower()
                 if any(x in title for x in ["documents", "file explorer", "this pc", "cmd.exe"]):
-                    logger.info(f"Cleaning up legacy window: {w['title']}")
+                    logger.info(f"Cleaning up stale shell window: {w['title']}")
                     user32.PostMessageW(w['hwnd'], 0x0010, 0, 0) # WM_CLOSE
         except Exception as e:
-            logger.debug(f"Error during legacy cleanup: {e}")
+            logger.debug(f"Error during stale shell cleanup: {e}")
 
     def _ensure_focus(self):
         try:

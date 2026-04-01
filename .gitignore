@@ -14,5 +14,4 @@ uac_trigger.txt
 *.log
 logs/
 tests/
-!backend/tests/
-!backend/tests/**
+.easyocr

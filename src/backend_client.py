@@ -2,6 +2,7 @@ import json
 import base64
 import logging
 from typing import Any, Dict, Optional
+from urllib import request as urlrequest, error as urlerror
 from urllib.parse import urlsplit, urlunsplit
 
 from websockets.sync.client import connect as ws_connect
@@ -161,6 +162,70 @@ class BackendClient:
         self._get_auth = get_auth_manager
         self.base_url = (base_url or Config.BACKEND_URL).rstrip("/")
 
+    def _http_url(self, path: str) -> str:
+        parts = urlsplit(self.base_url)
+        if not parts.scheme or not parts.netloc:
+            raise RuntimeError(f"Invalid BACKEND_URL: {self.base_url}")
+        base_path = parts.path.rstrip("/")
+        target_path = f"{base_path}{path}" if base_path else path
+        return urlunsplit((parts.scheme, parts.netloc, target_path, "", ""))
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[dict] = None,
+        *,
+        timeout: float = 20.0,
+    ) -> dict[str, Any]:
+        auth = self._get_auth()
+        if not auth.access_token:
+            raise RuntimeError("Not signed in. Please log in to continue.")
+
+        data = None
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+
+        request_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {auth.access_token}",
+        }
+        req = urlrequest.Request(
+            self._http_url(path),
+            data=data,
+            method=method,
+            headers=request_headers,
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=timeout) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+        except urlerror.HTTPError as exc:
+            detail_payload: Any = "Request failed"
+            try:
+                body = exc.read().decode("utf-8")
+                if body:
+                    parsed = json.loads(body)
+                    detail_payload = parsed.get("detail", detail_payload)
+            except Exception:
+                pass
+
+            if exc.code == 401:
+                auth.logout()
+                raise RuntimeError("Session expired. Please log in again.") from exc
+            if exc.code == 429:
+                detail = _parse_rate_limit_detail(detail_payload)
+                raise RateLimitError(
+                    _format_rate_limit_message(detail),
+                    remaining=detail.get("remaining"),
+                    limit=detail.get("limit"),
+                    window=detail.get("window"),
+                    retry_after_seconds=detail.get("retry_after_seconds"),
+                ) from exc
+            raise RuntimeError(str(detail_payload)) from exc
+        except urlerror.URLError as exc:
+            raise RuntimeError("Backend unavailable. Is it running?") from exc
+
     def _ws_url(self) -> str:
         parts = urlsplit(self.base_url)
         if not parts.scheme or not parts.netloc:
@@ -250,8 +315,53 @@ class BackendClient:
         except Exception as e:
             raise RuntimeError("Backend unavailable. Is it running?") from e
 
+    def easyocr_image(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str = "image/png",
+        lang: str = "en",
+    ) -> Dict[str, Any]:
+        payload = {
+            "image_base64": base64.b64encode(image_bytes).decode("ascii"),
+            "mime_type": str(mime_type or "image/png"),
+            "lang": str(lang or "en"),
+        }
+        response = self._request_json(
+            "POST",
+            "/v1/vision/easyocr",
+            payload,
+            timeout=60.0,
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError("Unexpected OCR backend response type")
+        return response
+
+    def local_eye_elements(
+        self,
+        *,
+        image_bytes: bytes,
+        mime_type: str = "image/png",
+        lang: str = "en",
+    ) -> Dict[str, Any]:
+        payload = {
+            "image_base64": base64.b64encode(image_bytes).decode("ascii"),
+            "mime_type": str(mime_type or "image/png"),
+            "lang": str(lang or "en"),
+        }
+        response = self._request_json(
+            "POST",
+            "/v1/vision/local-eye",
+            payload,
+            timeout=60.0,
+        )
+        if not isinstance(response, dict):
+            raise RuntimeError("Unexpected hosted eye backend response type")
+        return response
+
 
 _client_instance: Optional[Any] = None
+_backend_proxy_client_instance: Optional[BackendClient] = None
 
 
 def get_client():
@@ -264,3 +374,10 @@ def get_client():
             logger.info("Using backend proxy for Gemini API")
             _client_instance = BackendClient()
     return _client_instance
+
+
+def get_backend_proxy_client() -> BackendClient:
+    global _backend_proxy_client_instance
+    if _backend_proxy_client_instance is None:
+        _backend_proxy_client_instance = BackendClient()
+    return _backend_proxy_client_instance

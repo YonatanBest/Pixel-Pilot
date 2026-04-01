@@ -12,6 +12,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 import redis.asyncio as redis
 import uvicorn
 import service
+import ocr_service
+import vision_service
 import auth
 import live_service
 import rate_limiter
@@ -22,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("backend")
 
 app = FastAPI(title="PixelPilot AI Backend", version="1.0.0", lifespan=lifespan)
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 GENERATION_ERROR_MESSAGE = "Generation failed"
 SERVICE_UNAVAILABLE_MESSAGE = "Service temporarily unavailable"
@@ -44,16 +46,58 @@ class GenerateResponse(BaseModel):
     remaining_requests: Optional[int] = None
 
 
+class EasyOCRRequest(BaseModel):
+    image_base64: str
+    mime_type: str = "image/png"
+    lang: str = "en"
+
+
+class EasyOCRResult(BaseModel):
+    bbox: List[List[float]]
+    text: str
+    confidence: float
+
+
+class EasyOCRResponse(BaseModel):
+    provider: str
+    device: str
+    hosted: bool = True
+    results: List[EasyOCRResult]
+    timings_ms: Dict[str, int]
+    remaining_requests: Optional[int] = None
+
+
+class HostedEyeElement(BaseModel):
+    id: int
+    type: str
+    label: str
+    confidence: float = 0.0
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+class HostedEyeResponse(BaseModel):
+    provider: str
+    device: str
+    hosted: bool = True
+    elements: List[HostedEyeElement]
+    timings_ms: Dict[str, int]
+    remaining_requests: Optional[int] = None
+
+
 def _build_rate_limit_message(reservation: rate_limiter.RateLimitReservation) -> str:
+    scope = getattr(reservation, "scope", "generate")
     if reservation.window == rate_limiter.WINDOW_MINUTE:
+        prefix = "OCR" if scope == "ocr" else "Rate"
+        return f"{prefix} limit exceeded. Try again in {max(1, reservation.retry_after_seconds)}s."
+    if scope == "ocr":
         return (
-            f"Rate limit exceeded. Try again in "
-            f"{max(1, reservation.retry_after_seconds)}s."
+            f"OCR daily limit exceeded ({reservation.limit} requests). "
+            f"Resets at midnight UTC."
         )
-    return (
-        f"Daily limit exceeded ({reservation.limit} requests). "
-        f"Resets at midnight UTC."
-    )
+    return f"Daily limit exceeded ({reservation.limit} requests). Resets at midnight UTC."
 
 
 def _build_rate_limit_detail(
@@ -148,11 +192,89 @@ async def _generate_with_rate_limit(
     return {"text": str(result), "remaining_requests": reservation.daily_remaining}
 
 
+async def _easyocr_with_rate_limit(
+    *,
+    request: EasyOCRRequest,
+    image_bytes: bytes,
+    user_id: str,
+    redis_client: redis.Redis,
+) -> Dict[str, Any]:
+    if redis_client is None:
+        raise HTTPException(status_code=503, detail=SERVICE_UNAVAILABLE_MESSAGE)
+
+    reservation = await rate_limiter.reserve_ocr_request(user_id, redis_client)
+    if not reservation.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=_build_rate_limit_detail(reservation),
+        )
+
+    try:
+        logger.info("Running backend EasyOCR for user %s", user_id)
+        result = await asyncio.to_thread(
+            ocr_service.run_easyocr,
+            image_bytes,
+            lang=str(request.lang or "en"),
+        )
+    except Exception:
+        logger.exception("EasyOCR error for user %s", user_id)
+        try:
+            await rate_limiter.refund_ocr_request(reservation, redis_client)
+        except Exception:
+            logger.exception("Failed to refund OCR quota for user %s", user_id)
+        raise HTTPException(status_code=500, detail="OCR failed")
+
+    if isinstance(result, dict):
+        result["remaining_requests"] = reservation.daily_remaining
+        return result
+    raise HTTPException(status_code=500, detail="OCR failed")
+
+
+async def _hosted_eye_with_rate_limit(
+    *,
+    request: EasyOCRRequest,
+    image_bytes: bytes,
+    user_id: str,
+    redis_client: redis.Redis,
+) -> Dict[str, Any]:
+    if redis_client is None:
+        raise HTTPException(status_code=503, detail=SERVICE_UNAVAILABLE_MESSAGE)
+
+    reservation = await rate_limiter.reserve_ocr_request(user_id, redis_client)
+    if not reservation.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=_build_rate_limit_detail(reservation),
+        )
+
+    try:
+        logger.info("Running backend LocalCVEye for user %s", user_id)
+        result = await asyncio.to_thread(
+            vision_service.run_local_eye,
+            image_bytes,
+            lang=str(request.lang or "en"),
+        )
+    except Exception:
+        logger.exception("Hosted eye error for user %s", user_id)
+        try:
+            await rate_limiter.refund_ocr_request(reservation, redis_client)
+        except Exception:
+            logger.exception("Failed to refund hosted eye quota for user %s", user_id)
+        raise HTTPException(status_code=500, detail="Hosted eye failed")
+
+    if isinstance(result, dict):
+        result["remaining_requests"] = reservation.daily_remaining
+        return result
+    raise HTTPException(status_code=500, detail="Hosted eye failed")
+
+
 # Auth dependency
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> dict:
     """Validate JWT token and return user info."""
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Missing bearer token")
     token = credentials.credentials
     user = auth.verify_access_token(token)
     if not user:
@@ -230,6 +352,78 @@ async def generate(
     except Exception:
         logger.exception("Unexpected generation handler error")
         raise HTTPException(status_code=500, detail=GENERATION_ERROR_MESSAGE)
+
+
+@app.post("/v1/vision/easyocr", response_model=EasyOCRResponse)
+async def easyocr_route(
+    request: EasyOCRRequest,
+    user: dict = Depends(get_current_user),
+    redis_client: redis.Redis = Depends(get_redis),
+):
+    safe_mime = str(request.mime_type or "").strip()
+    try:
+        image_bytes = base64.b64decode(str(request.image_base64 or ""), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail="image_base64 must be valid base64"
+        ) from exc
+
+    try:
+        ocr_service.validate_image_bytes(image_bytes, safe_mime)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        return await _easyocr_with_rate_limit(
+            request=request,
+            image_bytes=image_bytes,
+            user_id=user["user_id"],
+            redis_client=redis_client,
+        )
+    except HTTPException as e:
+        headers = None
+        if e.status_code == 429 and isinstance(e.detail, dict):
+            headers = _build_rate_limit_headers(e.detail)
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=headers)
+    except Exception:
+        logger.exception("Unexpected EasyOCR handler error")
+        raise HTTPException(status_code=500, detail="OCR failed")
+
+
+@app.post("/v1/vision/local-eye", response_model=HostedEyeResponse)
+async def hosted_eye_route(
+    request: EasyOCRRequest,
+    user: dict = Depends(get_current_user),
+    redis_client: redis.Redis = Depends(get_redis),
+):
+    safe_mime = str(request.mime_type or "").strip()
+    try:
+        image_bytes = base64.b64decode(str(request.image_base64 or ""), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail="image_base64 must be valid base64"
+        ) from exc
+
+    try:
+        ocr_service.validate_image_bytes(image_bytes, safe_mime)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        return await _hosted_eye_with_rate_limit(
+            request=request,
+            image_bytes=image_bytes,
+            user_id=user["user_id"],
+            redis_client=redis_client,
+        )
+    except HTTPException as e:
+        headers = None
+        if e.status_code == 429 and isinstance(e.detail, dict):
+            headers = _build_rate_limit_headers(e.detail)
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=headers)
+    except Exception:
+        logger.exception("Unexpected hosted eye handler error")
+        raise HTTPException(status_code=500, detail="Hosted eye failed")
 
 
 @app.websocket("/ws/generate")

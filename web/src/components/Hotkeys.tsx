@@ -2,9 +2,9 @@ import { motion, useMotionValue, useSpring, useTransform } from 'framer-motion';
 import './Hotkeys.css';
 
 const hotkeys = [
-    { keys: ['MODE', 'GUIDE'], action: 'Hands-on walkthrough for first-time tasks.' },
-    { keys: ['MODE', 'SAFE'], action: 'Confirms risky operations before execution.' },
-    { keys: ['MODE', 'AUTO'], action: 'Autonomous flow for repeatable workflows.' },
+    { keys: ['MODE', 'GUIDE'], action: 'Live read-only coaching with no desktop actions.' },
+    { keys: ['MODE', 'SAFE'], action: 'Confirms every mutating desktop action before execution.' },
+    { keys: ['MODE', 'AUTO'], action: 'Runs live actions without per-action confirmation.' },
 ];
 
 const TiltCard = ({ children }: { children: React.ReactNode }) => {

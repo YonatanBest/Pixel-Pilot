@@ -8,8 +8,6 @@ class GuiAdapter(QObject):
     error_message_received = Signal(str)
     activity_message_received = Signal(str)
     final_answer_received = Signal(str)
-    guidance_next_requested = Signal(str, object)
-    guidance_input_requested = Signal(object) 
     workspace_changed = Signal(str)
     live_transcript_received = Signal(str, str, bool)
     live_session_state_received = Signal(str)
@@ -21,7 +19,6 @@ class GuiAdapter(QObject):
     
 
     confirmation_requested = Signal(str, str, object) 
-    input_requested = Signal(str, str, object)
     screenshot_prep_requested = Signal(object)
     screenshot_restore_requested = Signal(object)
     click_through_requested = Signal(bool, object)
@@ -47,13 +44,6 @@ class GuiAdapter(QObject):
 
     def add_final_answer(self, message: str):
         self.final_answer_received.emit(message)
-
-    def request_guidance_next(self, label: str, payload: dict):
-        self.guidance_next_requested.emit(label, payload)
-
-    def request_guidance_input(self, payload: dict):
-        """Request user input for conversational guidance mode."""
-        self.guidance_input_requested.emit(payload)
 
     def notify_workspace_changed(self, workspace: str):
         self.workspace_changed.emit(workspace)
@@ -83,13 +73,6 @@ class GuiAdapter(QObject):
         event = threading.Event()
         payload = {'result': False, 'event': event}
         self.confirmation_requested.emit(title, text, payload)
-        event.wait()
-        return payload['result']
-
-    def ask_input(self, title, question):
-        event = threading.Event()
-        payload = {'result': None, 'event': event}
-        self.input_requested.emit(title, question, payload)
         event.wait()
         return payload['result']
 

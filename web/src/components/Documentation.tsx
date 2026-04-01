@@ -4,8 +4,9 @@ const envVars = [
     { key: 'GEMINI_API_KEY', note: 'Required' },
     { key: 'GEMINI_MODEL', note: 'Default: gemini-3-flash-preview' },
     { key: 'DEFAULT_MODE', note: 'guide | safe | auto' },
-    { key: 'AGENT_MODE', note: 'Overrides DEFAULT_MODE' },
     { key: 'VISION_MODE', note: 'robo | ocr' },
+    { key: 'LIVE_MODE_DEFAULT_VOICE_ENABLED', note: 'Optional: true | false' },
+    { key: 'ENABLE_GATEWAY', note: 'Optional: true | false' },
     { key: 'PIXELPILOT_GATEWAY_TOKEN', note: 'Optional' }
 ];
 
@@ -65,18 +66,18 @@ export const Documentation = () => {
                     <article className="doc-card">
                         <h3>Architecture</h3>
                         <ul className="doc-list">
-                            <li><strong>Modular Agent Core</strong>: Decoupled <code>core</code>, <code>actions</code>, and <code>capture</code> modules.</li>
-                            <li><strong>UAC Orchestrator</strong>: SYSTEM-level service for Secure Desktop interaction.</li>
+                            <li><strong>Live-Only Runtime</strong>: Gemini Live powers both typed and voice control paths.</li>
+                            <li><strong>UAC Orchestrator</strong>: SYSTEM-level service for Secure Desktop interaction with per-request IPC.</li>
                             <li><strong>Vision Pipeline</strong>: Dynamic selection between Gemini Robotics-ER and local OCR.</li>
                             <li><strong>Agent Desktop</strong>: Isolated workspace sandbox for safe background automation.</li>
-                            <li><strong>Interactive-First</strong>: Mandatory blind planning step for workspace decisions.</li>
+                            <li><strong>SAFE Mode</strong>: Mutating Live actions require explicit user confirmation.</li>
                         </ul>
                     </article>
 
                     <article className="doc-card">
                         <h3>Gateway (Optional)</h3>
-                        <p>Run the WebSocket gateway from <code>src/services/gateway.py</code> to drive the agent remotely.</p>
-                        <p className="doc-muted">Protect the gateway with <code>PIXELPILOT_GATEWAY_TOKEN</code>.</p>
+                        <p>Enable the gateway to submit remote commands into the same Gemini Live runtime used by the desktop UI.</p>
+                        <p className="doc-muted">Protect it with <code>PIXELPILOT_GATEWAY_TOKEN</code>.</p>
                     </article>
 
                     <article className="doc-card">

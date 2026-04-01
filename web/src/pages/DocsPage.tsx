@@ -6,14 +6,17 @@ const envVars = [
     { key: 'GEMINI_API_KEY', note: 'Required' },
     { key: 'GEMINI_MODEL', note: 'Default: gemini-3-flash-preview' },
     { key: 'DEFAULT_MODE', note: 'guide | safe | auto' },
-    { key: 'AGENT_MODE', note: 'Overrides DEFAULT_MODE' },
     { key: 'VISION_MODE', note: 'robo | ocr' },
+    { key: 'LIVE_MODE_DEFAULT_VOICE_ENABLED', note: 'Optional: true | false' },
+    { key: 'ENABLE_GATEWAY', note: 'Optional: true | false' },
+    { key: 'GATEWAY_HOST', note: 'Optional: default localhost' },
+    { key: 'GATEWAY_PORT', note: 'Optional: default 8765' },
     { key: 'PIXELPILOT_GATEWAY_TOKEN', note: 'Optional' }
 ];
 
 const moduleMap = [
-    { name: 'src/main.py', detail: 'PySide6 UI, agent loop, and orchestration entry.' },
-    { name: 'src/agent', detail: 'Brain, guidance, verification, and clarification layers.' },
+    { name: 'src/main.py', detail: 'PySide6 UI, live-only runtime wiring, and app entry.' },
+    { name: 'src/agent', detail: 'Shared automation runtime, capture, action execution, and workspace state.' },
     { name: 'src/live/session.py', detail: 'Gemini Live session manager, reconnect flow, voice, and transcript lifecycle.' },
     { name: 'src/live/broker.py', detail: 'Serialized action broker with queued/running/cancel/succeeded states.' },
     { name: 'src/live/tools.py', detail: 'Live tool declarations for UI Automation and mutating action boundaries.' },
@@ -22,15 +25,15 @@ const moduleMap = [
     { name: 'src/skills', detail: 'Browser, media, system, timer skill surfaces.' },
     { name: 'src/desktop', detail: 'Agent Desktop sandbox and preview stream.' },
     { name: 'src/uac', detail: 'Orchestrator and Secure Desktop agent.' },
-    { name: 'src/services', detail: 'Audio + gateway service adapters.' },
+    { name: 'src/services', detail: 'Gateway and auxiliary service adapters.' },
     { name: 'backend', detail: 'FastAPI service and auth utilities.' }
 ];
 
 const modeGuide = [
-    { mode: 'GUIDANCE', detail: 'Step-by-step coaching mode. Workspace is locked to user and actions are instructional-first.' },
-    { mode: 'SAFE', detail: 'Executes tasks while confirming potentially dangerous operations.' },
-    { mode: 'AUTO', detail: 'Fully autonomous execution with verification and loop protection.' },
-    { mode: 'Live default', detail: 'When available, Gemini Live starts enabled by default and can be toggled off.' }
+    { mode: 'GUIDANCE', detail: 'Live read-only coaching mode. Pixie tutors the user but does not take desktop actions.' },
+    { mode: 'SAFE', detail: 'Live autonomous mode that confirms every mutating desktop action.' },
+    { mode: 'AUTO', detail: 'Live autonomous mode without per-action confirmation.' },
+    { mode: 'AI power', detail: 'When available, AI and live voice start enabled by default and the Live button becomes an AI on/off control.' }
 ];
 
 const visionGuide = [
@@ -122,8 +125,8 @@ export const DocsPage = () => {
                                 </article>
                                 <span className="arch-arrow" aria-hidden="true">→</span>
                                 <article className="arch-node">
-                                    <h4>Agent Brain</h4>
-                                    <p>plan - verify - clarify loop</p>
+                                    <h4>Live Session Manager</h4>
+                                    <p>turn state, reconnect, transcript flow</p>
                                 </article>
                                 <span className="arch-arrow" aria-hidden="true">→</span>
                                 <article className="arch-node">
@@ -253,15 +256,16 @@ export const DocsPage = () => {
                         <p>System-wide controls for quick access.</p>
                         <ul>
                             <li><code>Ctrl+Shift+Z</code> Toggle click-through</li>
-                            <li><code>Ctrl+Shift+X</code> Stop current request</li>
+                            <li><code>Ctrl+Shift+X</code> Stop current Live turn</li>
                             <li><code>Ctrl+Shift+Q</code> Quit PixelPilot</li>
                         </ul>
                     </article>
                     <article className="docs-card">
                         <h2>Gateway (Optional)</h2>
-                        <p>Run the WebSocket gateway for remote command execution.</p>
+                        <p>The gateway can submit remote commands into the live runtime when <code>ENABLE_GATEWAY=true</code>.</p>
                         <ul>
                             <li>File: <code>src/services/gateway.py</code></li>
+                            <li>Uses the active Gemini Live session for execution</li>
                             <li>Protect with <code>PIXELPILOT_GATEWAY_TOKEN</code></li>
                         </ul>
                     </article>
@@ -298,11 +302,11 @@ export const DocsPage = () => {
                 <div className="container docs-grid">
                     <article className="docs-card">
                         <h2>Security + UAC</h2>
-                        <p>Secure Desktop prompts are handled by the SYSTEM orchestrator task.</p>
+                        <p>Secure Desktop prompts are handled by the SYSTEM orchestrator task with one-shot IPC and explicit confirmation before allow.</p>
                         <ul>
                             <li>Tasks: PixelPilotUACOrchestrator and PixelPilotApp.</li>
-                            <li>Orchestrator listens for Secure Desktop triggers.</li>
-                            <li>Agent confirms allow/deny with snapshot context.</li>
+                            <li>Orchestrator watches per-request UAC IPC files.</li>
+                            <li>Allow responses require explicit user confirmation.</li>
                         </ul>
                     </article>
                     <article className="docs-card">

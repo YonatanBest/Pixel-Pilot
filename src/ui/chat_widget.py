@@ -19,7 +19,6 @@ from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QEvent
 from PySide6.QtGui import QAction, QActionGroup, QColor, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtSvgWidgets import QSvgWidget
 
-from services.audio import AudioService
 from .animated_mic_button import AnimatedMicButton
 from .animated_live_button import AnimatedLiveButton
 from .workspace_badge_button import WorkspaceBadgeButton
@@ -27,12 +26,9 @@ from .sidecar_preview import EmbeddedAgentPreview
 from config import OperationMode, Config
 
 
-DEFAULT_INPUT_PROMPT = "Ask Pixy to do anything..."
-LISTENING_INPUT_PROMPT = "Listening..."
 LIVE_IDLE_INPUT_PROMPT = "Type or speak to Gemini Live..."
 LIVE_VOICE_INPUT_PROMPT = "Live voice active..."
-GUIDANCE_FINAL_PROMPT = "Click Done to finish or type a reply..."
-GUIDANCE_INPUT_PROMPT = "Type 'done', ask a question, or describe what happened..."
+AI_OFF_INPUT_PROMPT = "Turn AI on to chat with Pixie..."
 DETAILS_COLLAPSED_ICON = "\u25A2"
 DETAILS_EXPANDED_ICON = "\u2750"
 MINIMIZE_ICON = "\u2212"
@@ -51,11 +47,6 @@ class ChatWidget(QWidget):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        self.audio_service = AudioService()
-        self.audio_service.text_received.connect(self.on_speech_text)
-        self.audio_service.status_changed.connect(self.on_listening_status)
-        self.audio_service.level_changed.connect(self.on_audio_level)
-
         self._agent_panel_width = 380
         self._agent_panel_min_width = 300
         self._agent_panel_max_width = 720
@@ -70,7 +61,6 @@ class ChatWidget(QWidget):
         self.input_field.returnPressed.connect(self.send_message)
         self.input_field.textEdited.connect(self._on_input_text_edited)
         self.mic_btn.clicked.connect(self.toggle_listening)
-        self.guidance_btn.clicked.connect(self._on_guidance_btn_clicked)
         self.mode_combo.currentIndexChanged.connect(self.update_mode_tooltip)
         self.mode_combo.currentIndexChanged.connect(self._emit_mode_changed)
         self.vision_combo.currentIndexChanged.connect(self.update_vision_tooltip)
@@ -91,12 +81,8 @@ class ChatWidget(QWidget):
         self._stream_target_id: str | None = None
         self._stream_full_text: str = ""
         self._stream_pos: int = 0
-        self._guidance_payload: dict | None = None
-        self._guidance_active: bool = False
-        self._guidance_input_active: bool = False
-        self._guidance_input_payload: dict | None = None
-        self._live_guidance_active: bool = False
         self._live_available = False
+        self._live_unavailable_reason = ""
         self._live_enabled = False
         self._live_voice_active = False
         self._live_session_state = "disconnected"
@@ -138,13 +124,11 @@ class ChatWidget(QWidget):
             self.mode_combo.blockSignals(False)
         self.update_mode_tooltip()
         self._sync_settings_menu()
-        self._sync_live_guidance_state()
         self._refresh_input_placeholder()
         self._apply_view_mode()
 
     def _emit_mode_changed(self):
         text = self.mode_combo.currentText().strip().upper()
-        self._sync_live_guidance_state()
         self._refresh_input_placeholder()
         self._apply_view_mode()
         if text == "GUIDANCE":
@@ -174,9 +158,10 @@ class ChatWidget(QWidget):
 
     def set_live_availability(self, available: bool, reason: str = ""):
         self._live_available = bool(available)
+        self._live_unavailable_reason = str(reason or "").strip()
         self.live_btn.setEnabled(self._live_available)
         if self._live_available:
-            self.live_btn.setToolTip("Enable Gemini Live mode")
+            self.live_btn.setToolTip("Turn AI on")
         else:
             self.live_btn.setChecked(False)
             self._live_enabled = False
@@ -188,8 +173,9 @@ class ChatWidget(QWidget):
             self.live_state_badge.setProperty("state", "disconnected")
             self.live_state_badge.style().unpolish(self.live_state_badge)
             self.live_state_badge.style().polish(self.live_state_badge)
-            self.live_btn.setToolTip(reason or "Gemini Live mode unavailable")
-        self._sync_live_guidance_state()
+            self.live_btn.setToolTip(
+                self._live_unavailable_reason or "Gemini Live unavailable"
+            )
         self._refresh_live_controls()
         self._refresh_mic_visual_state()
         self._apply_view_mode()
@@ -197,8 +183,6 @@ class ChatWidget(QWidget):
     def set_live_enabled(self, enabled: bool):
         target = bool(enabled and self._live_available)
         self._live_enabled = target
-        if target and self.audio_service.is_listening:
-            self.audio_service.stop_listening()
         if not target:
             self._live_voice_active = False
             self._user_audio_level = 0.0
@@ -209,7 +193,6 @@ class ChatWidget(QWidget):
             self.live_btn.setChecked(target)
         finally:
             self.live_btn.blockSignals(False)
-        self._sync_live_guidance_state()
         self._refresh_live_controls()
         self._refresh_mic_visual_state()
         self._apply_view_mode()
@@ -237,24 +220,24 @@ class ChatWidget(QWidget):
         if not self._live_available:
             return ("disabled", self.live_btn.toolTip() or "Gemini Live unavailable")
         if not self._live_enabled:
-            return ("off", "Enable Gemini Live mode")
+            return ("off", "Turn AI on")
 
         state_key = (self._live_session_state or "disconnected").strip().lower()
         if state_key == "disconnected":
-            return ("ready", "Gemini Live is enabled and ready")
+            return ("ready", "AI is on and ready")
         if state_key == "connecting":
-            return ("connecting", "Gemini Live is connecting")
+            return ("connecting", "AI is connecting")
         if state_key == "listening":
-            return ("connected", "Disable Gemini Live mode")
+            return ("connected", "Turn AI off")
         if state_key == "thinking":
-            return ("thinking", "Gemini Live is thinking")
+            return ("thinking", "AI is thinking")
         if state_key == "waiting":
-            return ("waiting", "Gemini Live is waiting for an action")
+            return ("waiting", "AI is waiting for an action")
         if state_key == "acting":
-            return ("acting", "Gemini Live is acting")
+            return ("acting", "AI is acting")
         if state_key == "interrupted":
-            return ("interrupted", "Gemini Live was interrupted")
-        return ("connected", "Disable Gemini Live mode")
+            return ("interrupted", "AI was interrupted")
+        return ("connected", "Turn AI off")
 
     def _apply_live_button_state(self):
         state, tooltip = self._live_button_presentation()
@@ -266,14 +249,17 @@ class ChatWidget(QWidget):
 
     def _refresh_live_controls(self):
         self._apply_live_button_state()
+        self._sync_ai_controls()
         if self._live_enabled and self._live_voice_active:
             self.mic_btn.setToolTip("Stop live voice session")
         elif self._live_enabled:
             self.mic_btn.setToolTip("Start live voice session")
-        elif not self.audio_service.is_listening:
-            self.mic_btn.setToolTip("Start listening")
+        elif self._live_available:
+            self.mic_btn.setToolTip("Turn AI on to start voice")
         else:
-            self.mic_btn.setToolTip("Stop listening")
+            self.mic_btn.setToolTip(
+                self._live_unavailable_reason or "Gemini Live unavailable"
+            )
         self._refresh_input_placeholder()
 
     def _emit_live_mode_changed(self):
@@ -282,46 +268,25 @@ class ChatWidget(QWidget):
             self.live_voice_toggled.emit(False)
             self._live_voice_active = False
         self._live_enabled = enabled and self._live_available
-        self._sync_live_guidance_state()
         self.live_mode_changed.emit(self._live_enabled)
         self._refresh_live_controls()
         self._apply_view_mode()
 
-    def _is_guidance_mode_selected(self) -> bool:
-        return self.mode_combo.currentText().strip().upper() == "GUIDANCE"
-
-    def _is_live_guidance_mode(self) -> bool:
-        return bool(self._live_enabled and self._is_guidance_mode_selected())
-
-    def _clear_guidance_state(self, *, cancel_pending: bool) -> None:
-        payload = self._guidance_payload
-        if cancel_pending and isinstance(payload, dict):
-            payload["cancelled"] = True
-            payload["result"] = False
-            event = payload.get("event")
-            if event is not None:
-                event.set()
-        self._guidance_payload = None
-        self._guidance_active = False
-
-        input_payload = self._guidance_input_payload
-        if cancel_pending and isinstance(input_payload, dict):
-            input_payload["cancelled"] = True
-            event = input_payload.get("event")
-            if event is not None:
-                event.set()
-        self._guidance_input_payload = None
-        self._guidance_input_active = False
-
-        self.guidance_bar.hide()
-        self.guidance_btn.hide()
-        self.continue_btn.hide()
-
-    def _sync_live_guidance_state(self) -> None:
-        active = self._is_live_guidance_mode()
-        if active and not self._live_guidance_active:
-            self._clear_guidance_state(cancel_pending=True)
-        self._live_guidance_active = active
+    def _sync_ai_controls(self) -> None:
+        typing_enabled = bool(self._live_enabled and self._live_available)
+        self.input_field.setReadOnly(not typing_enabled)
+        self.input_field.setToolTip(
+            "Type to Gemini Live"
+            if typing_enabled
+            else (
+                "Turn AI on to type a request"
+                if self._live_available
+                else (self._live_unavailable_reason or "Gemini Live unavailable")
+            )
+        )
+        self.send_btn.setEnabled(typing_enabled)
+        self.mic_btn.setEnabled(typing_enabled)
+        self.compact_stop_btn.setEnabled(bool(typing_enabled and self._live_voice_active))
 
     def set_workspace_status(self, workspace: str):
         key = (workspace or "").strip().lower()
@@ -507,15 +472,15 @@ class ChatWidget(QWidget):
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["GUIDANCE", "SAFE", "AUTO"])
         self.mode_combo.setObjectName("modeCombo")
-        self.mode_combo.setItemData(0, "Step-by-step guidance with continuous human input.", Qt.ItemDataRole.ToolTipRole)
-        self.mode_combo.setItemData(1, "Balanced autonomy. Confirms potentially dangerous actions.", Qt.ItemDataRole.ToolTipRole)
-        self.mode_combo.setItemData(2, "Minimal interaction. PIXIE runs tasks end-to-end.", Qt.ItemDataRole.ToolTipRole)
+        self.mode_combo.setItemData(0, "Live read-only guidance. Pixie tutors but does not act.", Qt.ItemDataRole.ToolTipRole)
+        self.mode_combo.setItemData(1, "Live autonomous mode with confirmation before each desktop action.", Qt.ItemDataRole.ToolTipRole)
+        self.mode_combo.setItemData(2, "Live autonomous mode with no per-action confirmations.", Qt.ItemDataRole.ToolTipRole)
 
         self.vision_combo = QComboBox()
         self.vision_combo.addItems(["ROBO", "OCR"])
         self.vision_combo.setObjectName("visionCombo")
         self.vision_combo.setItemData(0, "Robotics vision (Gemini Robotics-ER).", Qt.ItemDataRole.ToolTipRole)
-        self.vision_combo.setItemData(1, "Local OCR + CV (EasyOCR + OpenCV).", Qt.ItemDataRole.ToolTipRole)
+        self.vision_combo.setItemData(1, "OCR + CV.", Qt.ItemDataRole.ToolTipRole)
 
         self.workspace_badge = WorkspaceBadgeButton()
         self.workspace_badge.setObjectName("workspaceBadge")
@@ -526,12 +491,12 @@ class ChatWidget(QWidget):
         self.live_btn = AnimatedLiveButton()
         self.live_btn.setObjectName("liveToggleBtn")
         self.live_btn.setCheckable(True)
-        self.live_btn.setToolTip("Enable Gemini Live mode")
+        self.live_btn.setToolTip("Turn AI on")
         self.live_btn.setFixedSize(42, 32)
 
         self.live_state_badge = QLabel("DISCONNECTED")
         self.live_state_badge.setObjectName("liveStateBadge")
-        self.live_state_badge.setToolTip("Gemini Live session state")
+        self.live_state_badge.setToolTip("AI session state")
         self.live_state_badge.hide()
 
         self.logout_btn = QPushButton("Sign Out")
@@ -562,7 +527,7 @@ class ChatWidget(QWidget):
         self.compact_stop_btn.setObjectName("compactStopBtn")
         self.compact_stop_btn.setFixedHeight(28)
         self.compact_stop_btn.setVisible(False)
-        self.compact_stop_btn.setToolTip("Stop voice session")
+        self.compact_stop_btn.setToolTip("Stop live voice session")
         self.compact_stop_btn.clicked.connect(self._stop_voice_session)
         pp.addWidget(self.compact_stop_btn)
 
@@ -570,34 +535,6 @@ class ChatWidget(QWidget):
         self.input_hint.setObjectName("inputHint")
         self.input_hint.setWordWrap(True)
         pp.addWidget(self.input_hint)
-
-        self.guidance_bar = QFrame()
-        self.guidance_bar.setObjectName("guidanceBar")
-        g = QVBoxLayout(self.guidance_bar)
-        g.setContentsMargins(0, 0, 0, 0)
-        g.setSpacing(6)
-
-        self.guidance_btn = QPushButton("Next Step")
-        self.guidance_btn.setObjectName("guidanceBtn")
-        self.guidance_btn.setFixedSize(110, 32)
-        self.guidance_btn.setVisible(False)
-
-        self.continue_btn = QPushButton("Continue")
-        self.continue_btn.setObjectName("continueBtn")
-        self.continue_btn.setFixedSize(110, 32)
-        self.continue_btn.setVisible(False)
-        self.continue_btn.clicked.connect(self._on_continue_btn_clicked)
-
-        button_row = QWidget()
-        b = QHBoxLayout(button_row)
-        b.setContentsMargins(0, 0, 0, 0)
-        b.setSpacing(6)
-        b.addStretch()
-        b.addWidget(self.continue_btn)
-        b.addWidget(self.guidance_btn)
-        g.addWidget(button_row)
-        self.guidance_bar.setVisible(False)
-        pp.addWidget(self.guidance_bar)
 
         ep.addWidget(self.process_panel)
 
@@ -647,12 +584,12 @@ class ChatWidget(QWidget):
 
         self.input_field = QLineEdit()
         self.input_field.setObjectName("inputField")
-        self.input_field.setPlaceholderText(DEFAULT_INPUT_PROMPT)
+        self.input_field.setPlaceholderText(AI_OFF_INPUT_PROMPT)
 
         self.mic_btn = AnimatedMicButton()
         self.mic_btn.setObjectName("micBtn")
         self.mic_btn.setFixedSize(40, 30)
-        self.mic_btn.setToolTip("Start listening")
+        self.mic_btn.setToolTip("Turn AI on to start voice")
 
         self.send_btn = QPushButton("Go")
         self.send_btn.setObjectName("sendBtn")
@@ -838,24 +775,6 @@ class ChatWidget(QWidget):
                 font: 700 11px 'Segoe UI', sans-serif;
                 padding: 5px 10px;
             }
-            QPushButton#guidanceBtn {
-                background: #2563eb;
-                color: #ffffff;
-                border: 1px solid #1d4ed8;
-                border-radius: 8px;
-                font: 700 13px 'Segoe UI', sans-serif;
-                padding: 4px 12px;
-            }
-            QPushButton#guidanceBtn:hover { background: #1d4ed8; }
-            QPushButton#continueBtn {
-                background: #ffffff;
-                color: #334155;
-                border: 1px solid #cbd5e1;
-                border-radius: 8px;
-                font: 600 13px 'Segoe UI', sans-serif;
-                padding: 4px 12px;
-            }
-            QPushButton#continueBtn:hover { background: #f1f5f9; border-color: #94a3b8; }
         """)
     def _on_anchor_clicked(self, url: QUrl):
         u = url.toString()
@@ -868,28 +787,18 @@ class ChatWidget(QWidget):
             self._render_chat()
             return
 
-    def _guidance_placeholder_text(self) -> str:
-        if self._is_live_guidance_mode():
-            return ""
-        if not self._guidance_input_active or not isinstance(self._guidance_input_payload, dict):
-            return ""
-        if self._guidance_input_payload.get("final"):
-            return GUIDANCE_FINAL_PROMPT
-        return GUIDANCE_INPUT_PROMPT
-
     def _idle_placeholder_text(self) -> str:
+        if not self._live_available:
+            return self._live_unavailable_reason or "Gemini Live unavailable"
         if self._live_enabled and self._live_voice_active:
             return LIVE_VOICE_INPUT_PROMPT
         if self._live_enabled:
             return LIVE_IDLE_INPUT_PROMPT
-        if self.audio_service.is_listening:
-            return LISTENING_INPUT_PROMPT
-        return DEFAULT_INPUT_PROMPT
+        return AI_OFF_INPUT_PROMPT
 
     def _refresh_input_placeholder(self) -> None:
         placeholder = (
-            self._guidance_placeholder_text()
-            or self._reply_status_text
+            self._reply_status_text
             or self._thinking_status_text
             or self._idle_placeholder_text()
         )
@@ -929,9 +838,6 @@ class ChatWidget(QWidget):
             state = "speaking_assistant"
             level = self._assistant_audio_level
         elif self._live_enabled and self._live_voice_active:
-            state = "listening_user"
-            level = self._user_audio_level
-        elif self.audio_service.is_listening:
             state = "listening_user"
             level = self._user_audio_level
         else:
@@ -1319,11 +1225,27 @@ class ChatWidget(QWidget):
         self._render_chat()
 
     def update_vision_tooltip(self):
-        tip = self.vision_combo.itemData(self.vision_combo.currentIndex(), Qt.ItemDataRole.ToolTipRole)
+        current_text = self.vision_combo.currentText().strip().upper()
+        if current_text == "OCR":
+            tip = "Local OCR + CV (EasyOCR + OpenCV)."
+            if not Config.USE_DIRECT_API:
+                try:
+                    from auth_manager import get_auth_manager
+
+                    if get_auth_manager().access_token:
+                        tip = "Backend Eye (full OCR + CV pipeline runs on the backend)."
+                except Exception:
+                    tip = "OCR + CV."
+        else:
+            tip = self.vision_combo.itemData(
+                self.vision_combo.currentIndex(), Qt.ItemDataRole.ToolTipRole
+            )
         if tip:
             self.vision_combo.setToolTip(tip)
 
     def send_message(self):
+        if not self._live_enabled:
+            return
         text = self.input_field.text().strip()
         if text:
             self._hide_input_hint()
@@ -1331,16 +1253,9 @@ class ChatWidget(QWidget):
             self.add_user_message(text)
             self.input_field.clear()
             self._refresh_input_placeholder()
-            # Check for new conversational guidance input first
-            if self._send_guidance_input(text):
-                return
-            # Check for legacy guidance feedback
-            if self._send_guidance_feedback(text):
-                return
             self.send_to_agent(text)
 
     def _append_message(self, *, kind: str, text: str):
-        # Backwards-compat: this method now appends to an internal model then re-renders.
         self._append_to_model(kind=kind, text=text)
 
     def _insert_bubble(
@@ -1521,97 +1436,15 @@ class ChatWidget(QWidget):
         if self._live_enabled:
             self.live_voice_toggled.emit(False)
             self.set_live_voice_active(False)
-            return
-        self.audio_service.stop_listening()
+        return
 
     def toggle_listening(self):
-        if self._live_enabled:
-            target = not self._live_voice_active
-            self.live_voice_toggled.emit(target)
-            self.set_live_voice_active(target)
-            self._apply_view_mode()
+        if not self._live_enabled:
             return
-
-        if self.audio_service.is_listening:
-            self.audio_service.stop_listening()
-        else:
-            self.audio_service.start_listening()
-
-    def on_listening_status(self, listening):
-        if self._live_enabled:
-            return
-        if listening:
-            self.mic_btn.setToolTip("Stop listening")
-        else:
-            self.mic_btn.setToolTip("Start listening")
-            self._user_audio_level = 0.0
-        self._refresh_input_placeholder()
-        self._refresh_mic_visual_state()
+        target = not self._live_voice_active
+        self.live_voice_toggled.emit(target)
+        self.set_live_voice_active(target)
         self._apply_view_mode()
-
-    def on_speech_text(self, text):
-        if not text:
-            return
-        self._hide_input_hint()
-        self._start_turn()
-        self.add_user_message(text)
-        # Check for new conversational guidance input first
-        if self._send_guidance_input(text):
-            return
-        # Check for legacy guidance feedback
-        if self._send_guidance_feedback(text):
-            return
-        self.send_to_agent(text)
-
-    def _send_guidance_input(self, text: str) -> bool:
-        """Handle input for conversational guidance mode."""
-        if self._is_live_guidance_mode():
-            return False
-        if not self._guidance_input_active:
-            return False
-        if not isinstance(self._guidance_input_payload, dict):
-            return False
-
-        payload = self._guidance_input_payload
-        self._guidance_input_payload = None
-        self._guidance_input_active = False
-        self._refresh_input_placeholder()
-
-        payload["feedback"] = text
-        event = payload.get("event")
-        if event is not None:
-            event.set()
-
-        return True
-
-    def _send_guidance_feedback(self, text: str) -> bool:
-        """Handle legacy guidance button feedback."""
-        if self._is_live_guidance_mode():
-            return False
-        if not self._guidance_active:
-            return False
-        if not isinstance(self._guidance_payload, dict):
-            return False
-
-        payload = self._guidance_payload
-        self._guidance_payload = None
-        self._guidance_active = False
-        self.guidance_bar.hide()
-        self.guidance_btn.hide()
-        self._refresh_input_placeholder()
-
-        payload["result"] = False
-        payload["feedback"] = text
-        event = payload.get("event")
-        if event is not None:
-            event.set()
-
-        self._apply_view_mode()
-        return True
-
-    def on_audio_level(self, level):
-        self._user_audio_level = max(0.0, float(level or 0.0))
-        self._refresh_mic_visual_state()
 
     def on_live_audio_level(self, level: float):
         self._user_audio_level = max(0.0, float(level or 0.0))
@@ -1858,8 +1691,7 @@ class ChatWidget(QWidget):
         return 0
 
     def _apply_view_mode(self):
-        listening = self._live_voice_active if self._live_enabled else self.audio_service.is_listening
-        live_guidance = self._is_live_guidance_mode()
+        listening = self._live_voice_active if self._live_enabled else False
         expanded = self.view_mode == "extended"
 
         self.extended_panel.setVisible(expanded)
@@ -1881,18 +1713,12 @@ class ChatWidget(QWidget):
 
         if not expanded:
             self.compact_stop_btn.hide()
-            self.guidance_bar.hide()
-            self.guidance_btn.hide()
-            self.continue_btn.hide()
             return
 
         if listening:
             self.chat_display.show()
             self.input_hint.hide()
             self.compact_stop_btn.show()
-            self.guidance_bar.hide()
-            self.guidance_btn.hide()
-            self.continue_btn.hide()
             return
 
         self.chat_display.show()
@@ -1901,24 +1727,6 @@ class ChatWidget(QWidget):
         else:
             self.input_hint.show()
         self.compact_stop_btn.hide()
-
-        if live_guidance:
-            self.guidance_bar.hide()
-            self.guidance_btn.hide()
-            self.continue_btn.hide()
-        elif self._guidance_active or self._guidance_input_active:
-            self.guidance_bar.show()
-            self.guidance_btn.show()
-            show_continue = bool(
-                self._guidance_input_active
-                and isinstance(self._guidance_input_payload, dict)
-                and self._guidance_input_payload.get("show_continue")
-            )
-            self.continue_btn.setVisible(show_continue)
-        else:
-            self.guidance_bar.hide()
-            self.guidance_btn.hide()
-            self.continue_btn.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1929,127 +1737,5 @@ class ChatWidget(QWidget):
     def _hide_input_hint(self):
         if self.input_hint.isVisible():
             self.input_hint.hide()
-
-    def _mark_last_guidance_step_completed(self):
-        for msg in reversed(self._chat_model):
-            if (msg.get("kind") or "").lower().strip() != "assistant":
-                continue
-            if msg.get("completed"):
-                return
-            msg["completed"] = True
-            self._render_chat()
-            return
-
-    def show_guidance_button(self, label: str, payload: dict):
-        if self._is_live_guidance_mode():
-            if isinstance(payload, dict):
-                payload["cancelled"] = True
-                payload["result"] = False
-                event = payload.get("event")
-                if event is not None:
-                    event.set()
-            self._clear_guidance_state(cancel_pending=False)
-            self._refresh_input_placeholder()
-            self._apply_view_mode()
-            return
-        text = (label or "Next").strip() or "Next"
-        self._guidance_payload = payload
-        self._guidance_active = True
-        self.guidance_btn.setText(text)
-        self.guidance_btn.setEnabled(True)
-        self.guidance_bar.show()
-        self.guidance_btn.show()
-        self._apply_view_mode()
-
-    def hide_guidance_button(self):
-        self._clear_guidance_state(cancel_pending=False)
-        self._refresh_input_placeholder()
-        self._apply_view_mode()
-
-    def show_guidance_input(self, payload: dict):
-        """Enable conversational guidance input mode.
-        
-        The next message from the user will be sent to the guidance session
-        instead of starting a new agent task. Also shows a "Next" button.
-        """
-        if self._is_live_guidance_mode():
-            if isinstance(payload, dict):
-                payload["cancelled"] = True
-                event = payload.get("event")
-                if event is not None:
-                    event.set()
-            self._clear_guidance_state(cancel_pending=False)
-            self._refresh_input_placeholder()
-            self._apply_view_mode()
-            return
-        self._guidance_input_payload = payload
-        self._guidance_input_active = True
-        label = (payload.get("label") or "Next").strip() or "Next"
-        self.guidance_btn.setText(label)
-        self.guidance_btn.setEnabled(True)
-        
-        if payload.get("show_continue"):
-            self.continue_btn.show()
-        else:
-            self.continue_btn.hide()
-            
-        self.guidance_bar.show()
-        self.guidance_btn.show()
-        self._refresh_input_placeholder()
-        self._apply_view_mode()
-
-    def _on_guidance_btn_clicked(self):
-        if self._is_live_guidance_mode():
-            return
-        # Handle new conversational guidance input mode
-        if self._guidance_input_active and isinstance(self._guidance_input_payload, dict):
-            payload = self._guidance_input_payload
-            self._guidance_input_payload = None
-            self._guidance_input_active = False
-            self._mark_last_guidance_step_completed()
-            self.guidance_bar.hide()
-            self.guidance_btn.hide()
-            self.continue_btn.hide()
-            self._refresh_input_placeholder()
-            # Set "done" as the default input when clicking Next
-            self._start_turn()
-            self.add_activity_message("Planning next step...")
-            payload["feedback"] = "done"
-            if payload.get("event"):
-                payload["event"].set()
-            return
-            
-        # Handle legacy guidance button mode
-        payload = self._guidance_payload
-        self._guidance_payload = None
-        self._guidance_active = False
-        self._mark_last_guidance_step_completed()
-        self.guidance_bar.hide()
-        self.guidance_btn.hide()
-        if isinstance(payload, dict):
-            self._start_turn()
-            self.add_activity_message("Planning next step...")
-            payload["result"] = True
-            payload["event"].set()
-
-    def _on_continue_btn_clicked(self):
-        """Handle continue button click."""
-        if self._is_live_guidance_mode():
-            return
-        if self._guidance_input_active and isinstance(self._guidance_input_payload, dict):
-            payload = self._guidance_input_payload
-            self._guidance_input_payload = None
-            self._guidance_input_active = False
-            self._mark_last_guidance_step_completed()
-            self.guidance_bar.hide()
-            self.guidance_btn.hide()
-            self.continue_btn.hide()
-            self._refresh_input_placeholder()
-            
-            self._start_turn()
-            self.add_activity_message("Continuing task...")
-            payload["feedback"] = "no"
-            if payload.get("event"):
-                payload["event"].set()
 
 

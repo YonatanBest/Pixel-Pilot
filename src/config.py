@@ -16,66 +16,169 @@ class OperationMode(Enum):
 logger = logging.getLogger("pixelpilot.config")
 
 
+def _env_str(name: str, default: str = "") -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return str(default).strip()
+    value = raw.strip()
+    return value or str(default).strip()
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return bool(default)
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    value = raw.strip().lower()
+    if not value:
+        return bool(default)
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return bool(default)
+
+
+def _env_int(name: str, default: int, *, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or str(default))
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+    try:
+        value = float(os.getenv(name, str(default)) or str(default))
+    except Exception:
+        value = float(default)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    if maximum is not None:
+        value = min(float(maximum), value)
+    return value
 
 
 class Config:
-    BACKEND_URL = os.getenv("BACKEND_URL", "https://pixelpilot-backend-564947821962.us-central1.run.app")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
-    GEMINI_BASE_MODEL = os.getenv("GEMINI_BASE_MODEL", GEMINI_MODEL).strip() or GEMINI_MODEL
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    BACKEND_URL = _env_str(
+        "BACKEND_URL",
+        "https://pixelpilot-backend-564947821962.us-central1.run.app",
+    )
+    GEMINI_MODEL = _env_str("GEMINI_MODEL", "gemini-3-flash-preview")
+    GEMINI_API_KEY = _env_str("GEMINI_API_KEY")
     USE_DIRECT_API = bool(GEMINI_API_KEY)
     ENABLE_GEMINI_LIVE_MODE = _env_bool("ENABLE_GEMINI_LIVE_MODE", True)
     LIVE_MODE_DEFAULT_ENABLED = _env_bool("LIVE_MODE_DEFAULT_ENABLED", True)
-    GEMINI_LIVE_MODEL = os.getenv(
+    LIVE_MODE_DEFAULT_VOICE_ENABLED = _env_bool("LIVE_MODE_DEFAULT_VOICE_ENABLED", True)
+    GEMINI_LIVE_MODEL = _env_str(
         "GEMINI_LIVE_MODEL",
         "gemini-2.5-flash-native-audio-preview-12-2025",
-    ).strip() or "gemini-2.5-flash-native-audio-preview-12-2025"
+    )
     _LIVE_MODEL_LOWER = GEMINI_LIVE_MODEL.lower()
     LIVE_ENABLE_IMAGE_INPUT = _env_bool(
         "LIVE_ENABLE_IMAGE_INPUT",
         "native-audio" not in _LIVE_MODEL_LOWER,
     )
     LIVE_ENABLE_VIDEO_STREAM = _env_bool("LIVE_ENABLE_VIDEO_STREAM", LIVE_ENABLE_IMAGE_INPUT)
-    LIVE_VIDEO_FPS = max(1, int(os.getenv("LIVE_VIDEO_FPS", "1") or "1"))
-    LIVE_AUDIO_INPUT_RATE = max(8000, int(os.getenv("LIVE_AUDIO_INPUT_RATE", "16000") or "16000"))
-    LIVE_AUDIO_OUTPUT_RATE = max(8000, int(os.getenv("LIVE_AUDIO_OUTPUT_RATE", "24000") or "24000"))
-    LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS = max(
-        16,
-        int(os.getenv("LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS", "192") or "192"),
+    LIVE_VIDEO_FPS = _env_int("LIVE_VIDEO_FPS", 1, minimum=1)
+    LIVE_AUDIO_INPUT_RATE = _env_int("LIVE_AUDIO_INPUT_RATE", 16000, minimum=8000)
+    LIVE_AUDIO_OUTPUT_RATE = _env_int("LIVE_AUDIO_OUTPUT_RATE", 24000, minimum=8000)
+    LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS = _env_int(
+        "LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS",
+        192,
+        minimum=16,
     )
     LIVE_AUDIO_SPEAKER_QUEUE_TRIM_TO_CHUNKS = max(
         4,
         min(
             LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS - 1,
-            int(os.getenv("LIVE_AUDIO_SPEAKER_QUEUE_TRIM_TO_CHUNKS", "144") or "144"),
+            _env_int("LIVE_AUDIO_SPEAKER_QUEUE_TRIM_TO_CHUNKS", 144),
         ),
     )
-    LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS = max(
-        1,
-        int(os.getenv("LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS", "8") or "8"),
+    LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS = _env_int(
+        "LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS",
+        8,
+        minimum=1,
     )
-    LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES = max(
-        4096,
-        int(os.getenv("LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES", "65536") or "65536"),
+    LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES = _env_int(
+        "LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES",
+        65536,
+        minimum=4096,
     )
     LIVE_AUDIO_LOSSLESS_MODE = _env_bool("LIVE_AUDIO_LOSSLESS_MODE", True)
-    LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS = max(
-        0,
-        int(os.getenv("LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS", "220") or "220"),
+    LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS = _env_int("LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS", 220, minimum=0)
+    LIVE_TEXT_SEND_TIMEOUT_SECONDS = _env_float(
+        "LIVE_TEXT_SEND_TIMEOUT_SECONDS",
+        8.0,
+        minimum=1.0,
     )
-    LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE = max(
-        30,
-        int(os.getenv("LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE", "105") or "105"),
+    LIVE_CONNECT_RETRY_BASE_DELAY_SECONDS = _env_float(
+        "LIVE_CONNECT_RETRY_BASE_DELAY_SECONDS",
+        0.75,
+        minimum=0.1,
+    )
+    LIVE_GUIDANCE_OBSERVER_POLL_SECONDS = _env_float(
+        "LIVE_GUIDANCE_OBSERVER_POLL_SECONDS",
+        1.0,
+        minimum=0.1,
+    )
+    LIVE_GUIDANCE_OBSERVER_NUDGE_COOLDOWN_SECONDS = _env_float(
+        "LIVE_GUIDANCE_OBSERVER_NUDGE_COOLDOWN_SECONDS",
+        2.5,
+        minimum=0.1,
+    )
+    LIVE_AUDIO_LOSSLESS_BACKLOG_WARNING_CHUNKS = _env_int(
+        "LIVE_AUDIO_LOSSLESS_BACKLOG_WARNING_CHUNKS",
+        512,
+        minimum=1,
+    )
+    LIVE_AUDIO_LOSSLESS_BACKLOG_WARNING_COOLDOWN_SECONDS = _env_float(
+        "LIVE_AUDIO_LOSSLESS_BACKLOG_WARNING_COOLDOWN_SECONDS",
+        3.0,
+        minimum=0.1,
+    )
+    LIVE_AUDIO_QUEUE_PUT_TIMEOUT_SECONDS = _env_float(
+        "LIVE_AUDIO_QUEUE_PUT_TIMEOUT_SECONDS",
+        0.20,
+        minimum=0.01,
+    )
+    LIVE_AUDIO_QUEUE_DROP_LOG_COOLDOWN_SECONDS = _env_float(
+        "LIVE_AUDIO_QUEUE_DROP_LOG_COOLDOWN_SECONDS",
+        2.0,
+        minimum=0.1,
+    )
+    LIVE_AUDIO_RESAMPLE_LOG_COOLDOWN_SECONDS = _env_float(
+        "LIVE_AUDIO_RESAMPLE_LOG_COOLDOWN_SECONDS",
+        5.0,
+        minimum=0.1,
+    )
+    LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE = _env_int(
+        "LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE",
+        105,
+        minimum=30,
     )
     LIVE_MODE_AVAILABLE = bool(ENABLE_GEMINI_LIVE_MODE)
+    ENABLE_GATEWAY = _env_bool("ENABLE_GATEWAY", False)
+    GATEWAY_HOST = _env_str("GATEWAY_HOST", "localhost")
+    GATEWAY_PORT = _env_int("GATEWAY_PORT", 8765, minimum=1)
+    GATEWAY_COMMAND_TIMEOUT_SECONDS = _env_float(
+        "GATEWAY_COMMAND_TIMEOUT_SECONDS",
+        120.0,
+        minimum=5.0,
+    )
+    GATEWAY_TOKEN = _env_str("PIXELPILOT_GATEWAY_TOKEN")
 
-    DEFAULT_MODE = OperationMode(os.getenv("DEFAULT_MODE", OperationMode.AUTO.value))
-    VISION_MODE = os.getenv("VISION_MODE", "ocr").strip().lower()
+    DEFAULT_MODE = OperationMode(_env_str("DEFAULT_MODE", OperationMode.AUTO.value).lower())
+    VISION_MODE = _env_str("VISION_MODE", "ocr").lower()
 
     USE_ROBOTICS_EYE = VISION_MODE in {"robo", "robotics", "er", "robotics-er"}
     ROBOTICS_USE_BOUNDING_BOXES = True
@@ -96,8 +199,42 @@ class Config:
     SCREENSHOT_PATH = os.path.join(MEDIA_DIR, "screen.png")
     DEBUG_PATH = os.path.join(MEDIA_DIR, "debug_overlay.png")
     REF_PATH = os.path.join(MEDIA_DIR, "debug_reference.png")
-    UAC_TRIGGER_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Temp", "uac_trigger.txt")
     TEMP_SCREEN_PATH = os.path.join(MEDIA_DIR, "temp_screen.png")
+    UAC_IPC_DIR = _env_str(
+        "UAC_IPC_DIR",
+        os.path.join(
+            os.environ.get("ProgramData", r"C:\ProgramData"),
+            "PixelPilot",
+            "uac",
+        ),
+    )
+    UAC_REQUEST_MAX_AGE_SECONDS = _env_float("UAC_REQUEST_MAX_AGE_SECONDS", 90.0, minimum=30.0)
+    UAC_RESPONSE_TIMEOUT_SECONDS = _env_float("UAC_RESPONSE_TIMEOUT_SECONDS", 15.0, minimum=2.0)
+    UAC_IPC_POLL_INTERVAL_SECONDS = _env_float(
+        "UAC_IPC_POLL_INTERVAL_SECONDS",
+        0.5,
+        minimum=0.1,
+    )
+    UAC_HELPER_INITIAL_CAPTURE_DELAY_SECONDS = _env_float(
+        "UAC_HELPER_INITIAL_CAPTURE_DELAY_SECONDS",
+        1.0,
+        minimum=0.0,
+    )
+    UAC_HELPER_KEY_PRESS_DELAY_SECONDS = _env_float(
+        "UAC_HELPER_KEY_PRESS_DELAY_SECONDS",
+        0.05,
+        minimum=0.01,
+    )
+    UAC_HELPER_POST_ACTION_DELAY_SECONDS = _env_float(
+        "UAC_HELPER_POST_ACTION_DELAY_SECONDS",
+        0.1,
+        minimum=0.0,
+    )
+    UAC_CAPTURE_SETTLE_AFTER_RESPONSE_SECONDS = _env_float(
+        "UAC_CAPTURE_SETTLE_AFTER_RESPONSE_SECONDS",
+        2.0,
+        minimum=0.0,
+    )
 
     REQUIRE_CONFIRMATION_FOR = [
         "delete",
@@ -151,17 +288,12 @@ class Config:
     UIA_TEXT_OCR_MAX_NOISE_RATIO = 0.18
     UIA_TEXT_USE_OCR_FALLBACK_DEFAULT = False
 
-    try:
-        BLIND_VERIFICATION_RETRIES = max(0, int(os.getenv("BLIND_VERIFICATION_RETRIES", "2")))
-    except Exception:
-        BLIND_VERIFICATION_RETRIES = 2
-
-    try:
-        BLIND_VERIFICATION_RETRY_DELAY = max(
-            0.0, float(os.getenv("BLIND_VERIFICATION_RETRY_DELAY", "0.25"))
-        )
-    except Exception:
-        BLIND_VERIFICATION_RETRY_DELAY = 0.25
+    BLIND_VERIFICATION_RETRIES = _env_int("BLIND_VERIFICATION_RETRIES", 2, minimum=0)
+    BLIND_VERIFICATION_RETRY_DELAY = _env_float(
+        "BLIND_VERIFICATION_RETRY_DELAY",
+        0.25,
+        minimum=0.0,
+    )
 
     SAVE_SCREENSHOTS = True
     VERBOSE_LOGGING = True
@@ -185,7 +317,7 @@ class Config:
             OperationMode: The operation mode
         """
         if mode_str is None:
-            mode_str = os.getenv("AGENT_MODE", cls.DEFAULT_MODE.value)
+            mode_str = cls.DEFAULT_MODE.value
             
         if not isinstance(mode_str, str):
             mode_str = str(mode_str)

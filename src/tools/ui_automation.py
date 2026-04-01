@@ -150,8 +150,8 @@ def _process_name_from_pid(pid: int) -> str:
 def _collect_patterns(control: Any) -> list[str]:
     patterns: list[str] = []
     try:
-        legacy = control.GetLegacyIAccessiblePattern()
-        if legacy and _safe_attr(legacy, "DefaultAction", ""):
+        accessible_pattern = control.GetLegacyIAccessiblePattern()
+        if accessible_pattern and _safe_attr(accessible_pattern, "DefaultAction", ""):
             patterns.append("DefaultAction")
     except Exception:
         pass
@@ -561,12 +561,12 @@ def _extract_text_from_control(control: Any) -> tuple[str, str]:
         pass
 
     try:
-        legacy = control.GetLegacyIAccessiblePattern()
-        if legacy:
-            value_text = str(getattr(legacy, "Value", "") or "").strip()
+        accessible_pattern = control.GetLegacyIAccessiblePattern()
+        if accessible_pattern:
+            value_text = str(getattr(accessible_pattern, "Value", "") or "").strip()
             if value_text:
                 return value_text, "LegacyIAccessible.Value"
-            name_text = str(getattr(legacy, "Name", "") or "").strip()
+            name_text = str(getattr(accessible_pattern, "Name", "") or "").strip()
             if name_text:
                 return name_text, "LegacyIAccessible.Name"
     except Exception:
@@ -831,9 +831,9 @@ def activate_element(
             pass
 
         try:
-            legacy = control.GetLegacyIAccessiblePattern()
-            if legacy:
-                legacy.DoDefaultAction()
+            accessible_pattern = control.GetLegacyIAccessiblePattern()
+            if accessible_pattern:
+                accessible_pattern.DoDefaultAction()
                 return {
                     "success": True,
                     "reason": "ok",

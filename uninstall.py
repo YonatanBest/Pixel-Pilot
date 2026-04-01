@@ -146,6 +146,7 @@ def remove_uac_temp_files() -> None:
         "uac_agent_debug.log",
     ]:
         _remove_file(temp_dir / name)
+    _remove_dir(Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "PixelPilot" / "uac")
 
 
 def remove_app_index_cache() -> None:

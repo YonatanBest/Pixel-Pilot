@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QLabel, QLineEdit, QHBoxLayout, QPushButton, QFrame, QWidget, QGraphicsDropShadowEffect
+    QDialog, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QFrame, QGraphicsDropShadowEffect
 )
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QColor
@@ -112,39 +112,6 @@ class BaseDialog(QDialog):
             }
         """)
 
-class ClarificationDialog(BaseDialog):
-    def __init__(self, parent=None, title="Clarification Needed", question=""):
-        super().__init__(parent, title)
-        
-        self.question_label = QLabel(question)
-        self.question_label.setObjectName("messageLabel")
-        self.question_label.setWordWrap(True)
-        self.container_layout.addWidget(self.question_label)
-        
-        self.input_field = QLineEdit()
-        self.input_field.setObjectName("inputField")
-        self.input_field.setPlaceholderText("Type your answer...")
-        self.container_layout.addWidget(self.input_field)
-        
-        self.button_layout = QHBoxLayout()
-        self.button_layout.addStretch()
-        
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setObjectName("secondaryBtn")
-        self.cancel_btn.clicked.connect(self.reject)
-        
-        self.submit_btn = QPushButton("Submit")
-        self.submit_btn.setObjectName("primaryBtn")
-        self.submit_btn.clicked.connect(self.accept)
-        self.submit_btn.setDefault(True)
-        
-        self.button_layout.addWidget(self.cancel_btn)
-        self.button_layout.addWidget(self.submit_btn)
-        self.container_layout.addLayout(self.button_layout)
-
-    def get_text(self):
-        return self.input_field.text().strip()
-
 class ConfirmationDialog(BaseDialog):
     def __init__(self, parent=None, title="Confirm Action", text="Are you sure?"):
         super().__init__(parent, title)
@@ -168,24 +135,4 @@ class ConfirmationDialog(BaseDialog):
         
         self.button_layout.addWidget(self.no_btn)
         self.button_layout.addWidget(self.yes_btn)
-        self.container_layout.addLayout(self.button_layout)
-
-class MessageDialog(BaseDialog):
-    def __init__(self, parent=None, title="Info", text=""):
-        super().__init__(parent, title)
-        
-        self.label = QLabel(text)
-        self.label.setObjectName("messageLabel")
-        self.label.setWordWrap(True)
-        self.container_layout.addWidget(self.label)
-        
-        self.button_layout = QHBoxLayout()
-        self.button_layout.addStretch()
-        
-        self.ok_btn = QPushButton("OK")
-        self.ok_btn.setObjectName("primaryBtn")
-        self.ok_btn.clicked.connect(self.accept)
-        self.ok_btn.setDefault(True)
-        
-        self.button_layout.addWidget(self.ok_btn)
         self.container_layout.addLayout(self.button_layout)

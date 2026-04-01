@@ -23,6 +23,7 @@ MAIN_APP_TASK_NAME = "PixelPilotApp"
 
 DEFAULT_VENV_DIR = REPO_ROOT / "venv"
 DEFAULT_REQUIREMENTS = REPO_ROOT / "requirements.txt"
+UAC_IPC_DIR = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "PixelPilot" / "uac"
 
 
 def is_admin() -> bool:
@@ -181,6 +182,14 @@ def compile_script(script_path: Path, exe_name: str, python_exe: str | None = No
 
     print(f"[-] Compilation failed for {script_path}.")
     return None
+
+
+def ensure_uac_ipc_dir() -> None:
+    try:
+        UAC_IPC_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"[+] UAC IPC directory ready: {UAC_IPC_DIR}")
+    except Exception as exc:
+        print(f"[!] Failed to prepare UAC IPC directory: {exc}")
 
 
 def relax_power_settings(task_name: str) -> None:
@@ -474,6 +483,7 @@ def main() -> None:
     if not orchestrator_exe:
         return
 
+    ensure_uac_ipc_dir()
     create_system_task(orchestrator_exe)
 
     log_path = REPO_ROOT / "logs" / "app_launch.log"
