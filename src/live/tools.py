@@ -75,8 +75,10 @@ class LiveToolRegistry:
         chat_window = getattr(self.agent, "chat_window", None)
         if not chat_window or not hasattr(chat_window, "ask_confirmation"):
             return {
+                "tool_name": str(tool_name or "").strip() or "unknown_tool",
                 "ok": False,
                 "success": False,
+                "status": "failed",
                 "error": "confirmation_unavailable",
                 "message": "SAFE mode could not prompt for confirmation.",
             }
@@ -106,8 +108,10 @@ class LiveToolRegistry:
         if approved:
             return None
         return {
+            "tool_name": str(tool_name or "").strip() or "unknown_tool",
             "ok": False,
             "success": False,
+            "status": "failed",
             "error": "user_cancelled",
             "message": "Action cancelled by user.",
         }
@@ -287,11 +291,39 @@ class LiveToolRegistry:
         ]
 
     @staticmethod
+    def _immediate_status(success: bool) -> str:
+        return "succeeded" if bool(success) else "failed"
+
+    def _tool_response(
+        self,
+        tool_name: str,
+        *,
+        success: bool,
+        message: str,
+        result: Any = None,
+        error: Optional[str] = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        payload = {
+            "tool_name": str(tool_name or "").strip() or "unknown_tool",
+            "ok": bool(success),
+            "success": bool(success),
+            "status": self._immediate_status(success),
+            "message": str(message or ""),
+            "result": result,
+            "error": error,
+        }
+        payload.update(extra)
+        return payload
+
+    @staticmethod
     def _guidance_mode_rejection(tool_name: str) -> dict[str, Any]:
         clean_name = str(tool_name or "").strip() or "unknown_tool"
         return {
+            "tool_name": clean_name,
             "ok": False,
             "success": False,
+            "status": "failed",
             "error": "guidance_mode_read_only",
             "message": (
                 f"Tool '{clean_name}' is disabled while Gemini Live is in guidance mode. "
@@ -336,7 +368,12 @@ class LiveToolRegistry:
                 int(payload.get("timeout_ms") or 1000),
             )
 
-        return {"ok": False, "error": "unknown_tool", "message": f"Unknown tool: {tool_name}"}
+        return self._tool_response(
+            tool_name,
+            success=False,
+            message=f"Unknown tool: {tool_name}",
+            error="unknown_tool",
+        )
 
     def _queue_action(
         self,
@@ -460,7 +497,12 @@ class LiveToolRegistry:
         summary = self._summarize_snapshot(snapshot)
         self.agent.current_blind_snapshot = snapshot
         self.last_snapshot_summary = summary
-        return {"ok": True, "result": summary}
+        return self._tool_response(
+            "ui_get_snapshot",
+            success=True,
+            message="UI Automation snapshot captured.",
+            result=summary,
+        )
 
     def _handle_list_windows(self, args: dict[str, Any]) -> dict[str, Any]:
         result = ui_automation.list_windows(
@@ -471,11 +513,17 @@ class LiveToolRegistry:
             visible_only=bool(args.get("visible_only", False)),
             max_windows=int(args.get("max_windows") or Config.UIA_MAX_WINDOWS),
         )
-        return {
-            "ok": result.get("status") == "ok",
-            "result": result,
-            "message": f"Found {result.get('windows_count', 0)} window(s)." if result.get("status") == "ok" else "Window listing failed.",
-        }
+        ok = result.get("status") == "ok"
+        return self._tool_response(
+            "ui_list_windows",
+            success=ok,
+            message=(
+                f"Found {result.get('windows_count', 0)} window(s)."
+                if ok
+                else "Window listing failed."
+            ),
+            result=result,
+        )
 
     def _handle_read_text(self, args: dict[str, Any]) -> dict[str, Any]:
         result = ui_automation.read_text(
@@ -491,20 +539,23 @@ class LiveToolRegistry:
                 args.get("ocr_max_noise_ratio") or Config.UIA_TEXT_OCR_MAX_NOISE_RATIO
             ),
         )
-        return {
-            "ok": result.get("status") == "ok",
-            "result": result,
-            "message": result.get("reason") or ("Read text." if result.get("status") == "ok" else "Text read failed."),
-        }
+        ok = result.get("status") == "ok"
+        return self._tool_response(
+            "ui_read_text",
+            success=ok,
+            message=result.get("reason") or ("Read text." if ok else "Text read failed."),
+            result=result,
+        )
 
     def _handle_capture_screen(self) -> dict[str, Any]:
         if self.broker.has_pending():
-            return {
-                "ok": False,
-                "error": "action_in_progress",
-                "message": "Cannot capture while another action is queued or running.",
-                "active_action": self.broker.current_action_payload(),
-            }
+            return self._tool_response(
+                "capture_screen",
+                success=False,
+                message="Cannot capture while another action is queued or running.",
+                error="action_in_progress",
+                active_action=self.broker.current_action_payload(),
+            )
 
         elements, _ref_sheet = self.agent.capture_screen()
         screenshot_path = Config.SCREENSHOT_PATH if os.path.exists(Config.SCREENSHOT_PATH) else None
@@ -534,7 +585,12 @@ class LiveToolRegistry:
                 self.on_capture_ready(screenshot_path, summary)
             except Exception:
                 logger.debug("Failed to send capture callback", exc_info=True)
-        return {"ok": True, "result": summary, "message": "High-resolution capture completed."}
+        return self._tool_response(
+            "capture_screen",
+            success=True,
+            message="High-resolution capture completed.",
+            result=summary,
+        )
 
     @staticmethod
     def _summarize_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:

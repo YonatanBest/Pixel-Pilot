@@ -68,6 +68,8 @@ class LiveSessionManager(QObject):
         self._loop_thread: Optional[threading.Thread] = None
         self._session_started_at = 0.0
         self._resume_handle: Optional[str] = None
+        self._resume_pending_user_buffer = ""
+        self._resume_pending_assistant_buffer = ""
         self._speaker_queue: Optional[asyncio.Queue[tuple[bytes, int]]] = None
         self._receive_task: Optional[asyncio.Task] = None
         self._video_task: Optional[asyncio.Task] = None
@@ -330,6 +332,8 @@ class LiveSessionManager(QObject):
         self._mode = mode
         self.tools.set_guidance_mode(self._is_guidance_mode())
         if self.enabled and self._transport is not None:
+            # Force a fresh persona/system prompt when the runtime mode changes.
+            self._resume_handle = None
             self._submit_async(self._reconnect_with_resume(), ensure_loop=False)
 
     def shutdown(self) -> None:
@@ -678,19 +682,13 @@ class LiveSessionManager(QObject):
                     if bool(server_content.get("interrupted")):
                         self.session_state_changed.emit("interrupted")
                         self._finish_text_turn(error="Gemini Live interrupted the current turn.")
-                        self._assistant_buffer = ""
-                        self._user_buffer = ""
+                        self._drain_transcript_buffers(emit_final=True)
                         self.assistant_audio_level_changed.emit(0.0)
                         self._clear_speaker_queue()
 
                     if bool(server_content.get("turn_complete")):
                         assistant_text = str(self._assistant_buffer or "").strip()
-                        if self._user_buffer:
-                            self.transcript_received.emit("user", self._user_buffer, True)
-                            self._user_buffer = ""
-                        if self._assistant_buffer:
-                            self.transcript_received.emit("assistant", self._assistant_buffer, True)
-                            self._assistant_buffer = ""
+                        self._drain_transcript_buffers(emit_final=True)
                         self._finish_text_turn(assistant_text=assistant_text)
                         self.assistant_audio_level_changed.emit(0.0)
                         self.session_state_changed.emit("listening")
@@ -933,11 +931,22 @@ class LiveSessionManager(QObject):
         if self._reconnect_in_progress:
             return
         self._reconnect_in_progress = True
+        fragments = self._drain_transcript_buffers(emit_final=True)
+        self._resume_pending_user_buffer = fragments["user"]
+        self._resume_pending_assistant_buffer = fragments["assistant"]
+        reconnect_prompt = self._build_reconnect_prompt(
+            user_text=fragments["user"],
+            assistant_text=fragments["assistant"],
+        )
         try:
             await self._disconnect_session(reconnecting=True)
             if self.enabled and not self._shutdown_event.is_set():
                 await self._ensure_session()
+                if reconnect_prompt:
+                    await self._send_realtime_text(reconnect_prompt, allow_retry=False)
         finally:
+            self._resume_pending_user_buffer = ""
+            self._resume_pending_assistant_buffer = ""
             self._reconnect_in_progress = False
 
     def _guidance_desktop_manager(self):
@@ -1049,9 +1058,36 @@ class LiveSessionManager(QObject):
             logger.debug("Guidance observer loop stopped unexpectedly", exc_info=True)
 
     def _build_resume_summary(self) -> str:
+        pending_user_transcript = (
+            str(self._resume_pending_user_buffer or self._user_buffer or "").strip()
+        )
+        pending_assistant_transcript = (
+            str(self._resume_pending_assistant_buffer or self._assistant_buffer or "").strip()
+        )
+        resume_hint = ""
+        if pending_assistant_transcript:
+            resume_hint = (
+                "Connection was interrupted mid-reply. Continue naturally from the latest assistant "
+                "transcript instead of restarting the answer."
+            )
+        elif pending_user_transcript:
+            resume_hint = (
+                "Connection was interrupted while the user was speaking. Use the partial user "
+                "transcript for continuity, and ask the user to finish only if their request is incomplete."
+            )
         payload = {
+            "mode": self._mode_key().upper(),
             "goal": self._current_goal,
             "workspace": self._workspace,
+            "voice_active": self._voice_enabled,
+            "turn_in_progress": bool(
+                pending_user_transcript
+                or pending_assistant_transcript
+                or self._active_text_turn_id is not None
+            ),
+            "pending_user_transcript": pending_user_transcript,
+            "pending_assistant_transcript": pending_assistant_transcript,
+            "resume_hint": resume_hint,
             "recent_user_steering": list(self._recent_user_steering),
             "recent_action_updates": list(self._recent_action_updates),
             "last_uia_summary": self.tools.last_snapshot_summary,
@@ -1059,6 +1095,98 @@ class LiveSessionManager(QObject):
         }
         clean = {key: value for key, value in payload.items() if value}
         return json.dumps(clean, ensure_ascii=True)
+
+    def _drain_transcript_buffers(self, *, emit_final: bool) -> dict[str, str]:
+        fragments = {
+            "user": str(self._user_buffer or "").strip(),
+            "assistant": str(self._assistant_buffer or "").strip(),
+        }
+        if emit_final:
+            if fragments["user"]:
+                self.transcript_received.emit("user", fragments["user"], True)
+            if fragments["assistant"]:
+                self.transcript_received.emit("assistant", fragments["assistant"], True)
+        self._user_buffer = ""
+        self._assistant_buffer = ""
+        return fragments
+
+    @staticmethod
+    def _build_reconnect_prompt(*, user_text: str, assistant_text: str) -> str:
+        user_fragment = str(user_text or "").strip()
+        assistant_fragment = str(assistant_text or "").strip()
+        if assistant_fragment:
+            return (
+                "Connection resumed in the middle of your reply. Continue the interrupted answer naturally "
+                "from the current context instead of starting over. "
+                f"Latest assistant transcript: {json.dumps(assistant_fragment, ensure_ascii=True)}"
+            )
+        if user_fragment:
+            return (
+                "Connection resumed while the user was speaking. Use this partial user transcript for "
+                "continuity. If the request already seems complete, continue helping. If it seems cut off, "
+                "ask the user to finish the sentence briefly. "
+                f"Partial user transcript: {json.dumps(user_fragment, ensure_ascii=True)}"
+            )
+        return ""
+
+    @staticmethod
+    def _compact_action_update(payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+
+        result = payload.get("result")
+        if isinstance(result, dict):
+            result = dict(result)
+
+        compact = {
+            "action_id": str(payload.get("action_id") or "").strip(),
+            "name": str(payload.get("name") or "").strip(),
+            "args": payload.get("args"),
+            "status": str(payload.get("status") or "").strip(),
+            "message": str(payload.get("message") or "").strip(),
+            "error": payload.get("error"),
+            "result": result,
+            "created_at": payload.get("created_at"),
+            "started_at": payload.get("started_at"),
+            "finished_at": payload.get("finished_at"),
+            "done": bool(payload.get("done", False)),
+        }
+        return {
+            key: value
+            for key, value in compact.items()
+            if value not in (None, "", [], {})
+        }
+
+    @classmethod
+    def _build_action_update_prompt(cls, payload: dict[str, Any]) -> str:
+        compact = cls._compact_action_update(payload)
+        if not compact:
+            return ""
+        return (
+            "Runtime action update. This is internal execution state, not a new user request. "
+            "Do not read it back verbatim to the user, and do not generate a user-facing reply unless "
+            "the plan must change or the action failed. Use it as the authoritative outcome of the "
+            f"brokered tool call. Action update: {json.dumps(compact, ensure_ascii=True)}"
+        )
+
+    def _should_forward_action_update(self, payload: dict[str, Any]) -> bool:
+        if not self.enabled or self._transport is None or self._shutdown_event.is_set():
+            return False
+        if self._reconnect_in_progress:
+            return False
+        status = str(payload.get("status") or "").strip().lower()
+        return status in {"running", "cancel_requested", "succeeded", "failed", "cancelled"}
+
+    def _queue_action_update_prompt(self, payload: dict[str, Any]) -> None:
+        if not self._should_forward_action_update(payload):
+            return
+        prompt = self._build_action_update_prompt(payload)
+        if not prompt:
+            return
+        self._submit_async(
+            self._send_realtime_text(prompt, allow_retry=False),
+            ensure_loop=False,
+        )
 
     def _on_action_update(self, payload: dict[str, Any]) -> None:
         self._recent_action_updates.append(payload)
@@ -1071,6 +1199,7 @@ class LiveSessionManager(QObject):
             self.session_state_changed.emit("interrupted")
         elif self.enabled:
             self.session_state_changed.emit("listening")
+        self._queue_action_update_prompt(payload)
         self.action_state_changed.emit(payload)
 
     def _on_capture_ready(self, screenshot_path: str, summary: dict[str, Any]) -> None:
@@ -1157,6 +1286,21 @@ class LiveSessionManager(QObject):
             return left
         if left in right:
             return right
+
+        left_norm = re.sub(r"\s+", " ", left).strip().lower()
+        right_norm = re.sub(r"\s+", " ", right).strip().lower()
+        if left_norm == right_norm:
+            return right
+
+        left_compact = re.sub(r"[\W_]+", "", left_norm)
+        right_compact = re.sub(r"[\W_]+", "", right_norm)
+        if left_compact and right_compact:
+            if left_compact == right_compact:
+                return right
+            if right_compact.startswith(left_compact):
+                return right
+            if left_compact.startswith(right_compact):
+                return left
 
         overlap = min(len(left), len(right))
         for size in range(overlap, 0, -1):

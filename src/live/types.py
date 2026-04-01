@@ -64,11 +64,15 @@ class ActionRecord:
     def to_payload(self) -> dict[str, Any]:
         return {
             "action_id": self.action_id,
+            "name": self.name,
+            "args": dict(self.args or {}),
             "status": self.status,
             "message": self.message,
             "result": self.result,
             "error": self.error,
+            "created_at": self.created_at,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
+            "done": self.done_event.is_set(),
         }

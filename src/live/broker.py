@@ -214,11 +214,15 @@ class LiveActionBroker:
     def _unknown_action_payload(action_id: str) -> dict[str, Any]:
         return {
             "action_id": str(action_id or ""),
+            "name": "",
+            "args": {},
             "status": "failed",
             "message": "Unknown action.",
             "result": None,
             "error": "unknown_action",
+            "created_at": None,
             "started_at": None,
             "updated_at": None,
             "finished_at": None,
+            "done": True,
         }

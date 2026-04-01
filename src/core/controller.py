@@ -341,7 +341,6 @@ class MainController(QObject):
                 )
             self._live_action_passthrough_active = False
             self._apply_click_through_policy()
-            self.gui_adapter.add_activity_message("Mode updated")
         except Exception as exc:
             self.gui_adapter.add_error_message(f"Failed to change mode: {exc}")
 
@@ -382,7 +381,7 @@ class MainController(QObject):
             Config.LAZY_VISION = False
             try:
                 self.agent.robotics_eye = GeminiRoboticsEye()
-                self.gui_adapter.add_activity_message("Vision updated")
+                self.gui_adapter.add_system_message("Vision changed to ROBO")
             except Exception as exc:
                 Config.USE_ROBOTICS_EYE = False
                 Config.LAZY_VISION = True
@@ -398,7 +397,7 @@ class MainController(QObject):
             Config.USE_ROBOTICS_EYE = False
             Config.LAZY_VISION = True
             self.agent.robotics_eye = None
-            self.gui_adapter.add_activity_message("Vision updated")
+            self.gui_adapter.add_system_message("Vision changed to OCR")
 
     def update_sidecar_visibility(self):
         if not self.main_window or not hasattr(self.main_window, "chat_widget"):

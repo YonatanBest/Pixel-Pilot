@@ -911,6 +911,16 @@ class ChatWidget(QWidget):
         if low in {"stopped"}:
             return "show"
 
+        show_markers = (
+            "mode changed to ",
+            "vision changed to ",
+            "workspace set to ",
+            "mode updated",
+            "vision updated",
+        )
+        if low.startswith(show_markers) or low in show_markers:
+            return "show"
+
         hide_markers = (
             "blind mode",
             "[blind]",
