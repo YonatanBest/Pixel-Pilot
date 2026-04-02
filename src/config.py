@@ -141,6 +141,18 @@ class Config:
         2.5,
         minimum=0.1,
     )
+    LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS = _env_float(
+        "LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS",
+        0.15,
+        minimum=0.0,
+        maximum=2.0,
+    )
+    LIVE_TYPED_TURN_IDLE_FINISH_SECONDS = _env_float(
+        "LIVE_TYPED_TURN_IDLE_FINISH_SECONDS",
+        1.5,
+        minimum=0.0,
+        maximum=10.0,
+    )
     LIVE_ACTION_RESPONSE_WAIT_MS = _env_int(
         "LIVE_ACTION_RESPONSE_WAIT_MS",
         4000,

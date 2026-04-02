@@ -421,8 +421,18 @@ class MainController(QObject):
         if not self.live_mode_enabled or not self.live_session.enabled:
             self.gui_adapter.add_error_message("AI is off. Turn AI on to send instructions.")
             return
-        if not self.live_session.submit_text(clean):
-            self.gui_adapter.add_error_message("Failed to send input to Gemini Live.")
+        result = self.live_session.submit_text(clean)
+        if not isinstance(result, dict):
+            return
+        if not bool(result.get("ok", False)):
+            message = str(result.get("message") or "Failed to send input to Gemini Live.").strip()
+            if message:
+                self.gui_adapter.add_error_message(message)
+            return
+        status = str(result.get("status") or "").strip().lower()
+        message = str(result.get("message") or "").strip()
+        if status in {"nudge_queued", "nudge_sent"} and message:
+            self.gui_adapter.add_activity_message(message)
 
     def stop_current_turn(self):
         if self.live_mode_enabled and self.live_session and self.live_session.enabled:

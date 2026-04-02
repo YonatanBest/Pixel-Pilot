@@ -98,6 +98,13 @@ class LiveSessionManager(QObject):
         self._active_text_turn_id: Optional[int] = None
         self._next_text_turn_id = 0
         self._turn_waiters: dict[int, dict[str, Any]] = {}
+        self._last_typed_turn_activity_at = 0.0
+        self._typed_turn_idle_finish_timer: Optional[threading.Timer] = None
+        self._typed_turn_idle_finish_generation = 0
+        self._pending_text_nudge = ""
+        self._pending_text_nudge_timer: Optional[threading.Timer] = None
+        self._pending_text_nudge_generation = 0
+        self._soft_interrupt_requested = False
 
         self.broker = LiveActionBroker(on_action_update=self._on_action_update)
         self.tools = LiveToolRegistry(
@@ -165,10 +172,28 @@ class LiveSessionManager(QObject):
         self.enabled = target
         if not target:
             self.stop_voice()
+            self._cancel_typed_turn_idle_finish_timer()
+            self._clear_pending_text_nudge()
             self._finish_text_turn(error="AI power was turned off.")
             self._submit_async(self._disconnect_session(close_client=True), ensure_loop=False)
             self.session_state_changed.emit("disconnected")
         return True
+
+    def _record_user_steering(self, text: str) -> str:
+        clean = str(text or "").strip()
+        if not clean:
+            return ""
+        if not self._current_goal:
+            self._current_goal = clean
+        clear_stop = getattr(self.agent, "clear_stop_request", None)
+        if callable(clear_stop):
+            try:
+                clear_stop()
+            except Exception:
+                pass
+        self.agent.current_task = clean
+        self._recent_user_steering.append(clean)
+        return clean
 
     def _begin_text_turn(
         self,
@@ -183,6 +208,7 @@ class LiveSessionManager(QObject):
             return None, "AI power is off."
         if self._voice_enabled:
             return None, "Stop live voice before sending a typed command."
+        self._clear_stale_text_turn_if_idle(reason="new_submit")
         with self._turn_state_lock:
             if self._active_text_turn_id is not None:
                 return None, "Wait for the current reply before sending another command."
@@ -197,17 +223,9 @@ class LiveSessionManager(QObject):
             }
             self._turn_waiters[turn_id] = waiter
             self._active_text_turn_id = turn_id
+            self._last_typed_turn_activity_at = time.monotonic()
 
-        if not self._current_goal:
-            self._current_goal = clean
-        clear_stop = getattr(self.agent, "clear_stop_request", None)
-        if callable(clear_stop):
-            try:
-                clear_stop()
-            except Exception:
-                pass
-        self.agent.current_task = clean
-        self._recent_user_steering.append(clean)
+        self._record_user_steering(clean)
         self.session_state_changed.emit("thinking")
         return waiter, ""
 
@@ -217,13 +235,29 @@ class LiveSessionManager(QObject):
         assistant_text: str = "",
         error: str = "",
     ) -> None:
-        with self._turn_state_lock:
-            turn_id = self._active_text_turn_id
-            if turn_id is None:
-                return
-            waiter = self._turn_waiters.pop(turn_id, None)
-            self._active_text_turn_id = None
+        _turn_id, waiter, timer = self._take_active_text_turn()
+        if timer is not None:
+            timer.cancel()
+        if not waiter:
+            return
+        self._resolve_text_turn_waiter(
+            waiter,
+            assistant_text=assistant_text,
+            error=error,
+        )
+        if str(self._pending_text_nudge or "").strip():
+            self._schedule_pending_text_nudge_flush(
+                delay_s=Config.LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS,
+                reason="turn_finished",
+            )
 
+    @staticmethod
+    def _resolve_text_turn_waiter(
+        waiter: Optional[dict[str, Any]],
+        *,
+        assistant_text: str = "",
+        error: str = "",
+    ) -> None:
         if not waiter:
             return
         waiter["assistant_text"] = str(assistant_text or "").strip()
@@ -232,16 +266,410 @@ class LiveSessionManager(QObject):
         if event is not None:
             event.set()
 
-    def submit_text(self, text: str) -> bool:
+    def _take_active_text_turn(
+        self,
+        *,
+        expected_turn_id: Optional[int] = None,
+    ) -> tuple[Optional[int], Optional[dict[str, Any]], Optional[threading.Timer]]:
+        with self._turn_state_lock:
+            turn_id = self._active_text_turn_id
+            if turn_id is None:
+                return None, None, None
+            if expected_turn_id is not None and turn_id != expected_turn_id:
+                return None, None, None
+            waiter = self._turn_waiters.pop(turn_id, None)
+            timer = self._typed_turn_idle_finish_timer
+            self._typed_turn_idle_finish_timer = None
+            self._typed_turn_idle_finish_generation += 1
+            self._active_text_turn_id = None
+        return turn_id, waiter, timer
+
+    def _cancel_typed_turn_idle_finish_timer(self) -> None:
+        timer: Optional[threading.Timer] = None
+        with self._turn_state_lock:
+            if self._typed_turn_idle_finish_timer is None:
+                return
+            timer = self._typed_turn_idle_finish_timer
+            self._typed_turn_idle_finish_timer = None
+            self._typed_turn_idle_finish_generation += 1
+        if timer is not None:
+            timer.cancel()
+
+    def _note_typed_turn_activity(self) -> None:
+        timer: Optional[threading.Timer] = None
+        with self._turn_state_lock:
+            if self._active_text_turn_id is None:
+                return
+            self._last_typed_turn_activity_at = time.monotonic()
+            if self._typed_turn_idle_finish_timer is not None:
+                timer = self._typed_turn_idle_finish_timer
+                self._typed_turn_idle_finish_timer = None
+                self._typed_turn_idle_finish_generation += 1
+        if timer is not None:
+            timer.cancel()
+
+    def _speaker_queue_is_idle(self) -> bool:
+        queue = self._speaker_queue
+        if queue is None:
+            return True
+        try:
+            return queue.qsize() <= 0
+        except Exception:
+            return True
+
+    def _schedule_typed_turn_idle_finish(self, *, reason: str) -> None:
+        delay_s = max(0.0, float(Config.LIVE_TYPED_TURN_IDLE_FINISH_SECONDS))
+        timer_to_cancel: Optional[threading.Timer] = None
+        next_timer: Optional[threading.Timer] = None
+        turn_id: Optional[int] = None
+        generation: Optional[int] = None
+        with self._turn_state_lock:
+            self._last_typed_turn_activity_at = time.monotonic()
+            if self._typed_turn_idle_finish_timer is not None:
+                timer_to_cancel = self._typed_turn_idle_finish_timer
+                self._typed_turn_idle_finish_timer = None
+                self._typed_turn_idle_finish_generation += 1
+            turn_id = self._active_text_turn_id
+            if (
+                turn_id is None
+                or self._voice_enabled
+                or self._shutdown_event.is_set()
+                or self.broker.has_pending()
+                or not self._speaker_queue_is_idle()
+            ):
+                generation = None
+            else:
+                self._typed_turn_idle_finish_generation += 1
+                generation = self._typed_turn_idle_finish_generation
+                next_timer = threading.Timer(
+                    delay_s,
+                    self._maybe_finish_stale_typed_turn,
+                    kwargs={
+                        "turn_id": turn_id,
+                        "generation": generation,
+                        "reason": reason,
+                    },
+                )
+                next_timer.daemon = True
+                self._typed_turn_idle_finish_timer = next_timer
+        if timer_to_cancel is not None:
+            timer_to_cancel.cancel()
+        if next_timer is not None and turn_id is not None and generation is not None:
+            logger.debug(
+                "Scheduled typed-turn idle fallback for turn %s in %.2fs (%s).",
+                turn_id,
+                delay_s,
+                reason,
+            )
+            next_timer.start()
+
+    def _maybe_finish_stale_typed_turn(
+        self,
+        *,
+        turn_id: int,
+        generation: int,
+        reason: str,
+    ) -> None:
+        waiter: Optional[dict[str, Any]] = None
+        timer: Optional[threading.Timer] = None
+        with self._turn_state_lock:
+            if self._typed_turn_idle_finish_generation != generation:
+                return
+            if self._active_text_turn_id != turn_id:
+                return
+            if self._voice_enabled or self._shutdown_event.is_set() or self.broker.has_pending():
+                return
+            idle_seconds = max(0.0, float(Config.LIVE_TYPED_TURN_IDLE_FINISH_SECONDS))
+            if idle_seconds > 0.0 and (
+                time.monotonic() - self._last_typed_turn_activity_at
+            ) < idle_seconds:
+                return
+            if not self._speaker_queue_is_idle():
+                return
+        _resolved_turn_id, waiter, timer = self._take_active_text_turn(expected_turn_id=turn_id)
+        if waiter is None:
+            if timer is not None:
+                timer.cancel()
+            return
+        if timer is not None:
+            timer.cancel()
+        fragments = self._drain_transcript_buffers(emit_final=True)
+        self._resolve_text_turn_waiter(
+            waiter,
+            assistant_text=fragments.get("assistant", ""),
+        )
+        logger.debug(
+            "Released stale typed live turn %s after idle timeout (%s).",
+            turn_id,
+            reason,
+        )
+        if self.enabled:
+            self.session_state_changed.emit("listening")
+        if str(self._pending_text_nudge or "").strip():
+            self._schedule_pending_text_nudge_flush(
+                delay_s=Config.LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS,
+                reason="stale_turn_released",
+            )
+
+    def _clear_stale_text_turn_if_idle(self, *, reason: str) -> bool:
+        turn_id: Optional[int] = None
+        waiter: Optional[dict[str, Any]] = None
+        timer: Optional[threading.Timer] = None
+        with self._turn_state_lock:
+            turn_id = self._active_text_turn_id
+            if turn_id is None or self._voice_enabled or self._shutdown_event.is_set():
+                return False
+            if self.broker.has_pending() or not self._speaker_queue_is_idle():
+                return False
+            idle_seconds = max(0.0, float(Config.LIVE_TYPED_TURN_IDLE_FINISH_SECONDS))
+            if idle_seconds > 0.0 and (
+                time.monotonic() - self._last_typed_turn_activity_at
+            ) < idle_seconds:
+                return False
+        turn_id, waiter, timer = self._take_active_text_turn(expected_turn_id=turn_id)
+        if waiter is None:
+            if timer is not None:
+                timer.cancel()
+            return False
+        if timer is not None:
+            timer.cancel()
+        fragments = self._drain_transcript_buffers(emit_final=True)
+        self._resolve_text_turn_waiter(
+            waiter,
+            assistant_text=fragments.get("assistant", ""),
+        )
+        logger.debug("Cleared stale typed live turn %s before new input (%s).", turn_id, reason)
+        if self.enabled:
+            self.session_state_changed.emit("listening")
+        if str(self._pending_text_nudge or "").strip():
+            self._schedule_pending_text_nudge_flush(
+                delay_s=Config.LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS,
+                reason="stale_turn_cleared",
+            )
+        return True
+
+    def _cancel_pending_text_nudge_timer(self) -> None:
+        timer: Optional[threading.Timer] = None
+        with self._turn_state_lock:
+            if self._pending_text_nudge_timer is None:
+                return
+            timer = self._pending_text_nudge_timer
+            self._pending_text_nudge_timer = None
+            self._pending_text_nudge_generation += 1
+        if timer is not None:
+            timer.cancel()
+
+    def _clear_pending_text_nudge(self) -> None:
+        self._cancel_pending_text_nudge_timer()
+        with self._turn_state_lock:
+            self._pending_text_nudge = ""
+            self._soft_interrupt_requested = False
+
+    def _schedule_pending_text_nudge_flush(self, *, delay_s: float, reason: str) -> None:
+        timer_to_cancel: Optional[threading.Timer] = None
+        next_timer: Optional[threading.Timer] = None
+        generation: Optional[int] = None
+        with self._turn_state_lock:
+            if (
+                not str(self._pending_text_nudge or "").strip()
+                or self._voice_enabled
+                or self._shutdown_event.is_set()
+            ):
+                return
+            if self._pending_text_nudge_timer is not None:
+                timer_to_cancel = self._pending_text_nudge_timer
+                self._pending_text_nudge_timer = None
+                self._pending_text_nudge_generation += 1
+            self._pending_text_nudge_generation += 1
+            generation = self._pending_text_nudge_generation
+            next_timer = threading.Timer(
+                max(0.0, float(delay_s)),
+                self._submit_pending_text_nudge_if_ready,
+                kwargs={
+                    "generation": generation,
+                    "reason": reason,
+                },
+            )
+            next_timer.daemon = True
+            self._pending_text_nudge_timer = next_timer
+        if timer_to_cancel is not None:
+            timer_to_cancel.cancel()
+        if next_timer is not None:
+            logger.debug(
+                "Scheduled pending live steering update in %.2fs (%s).",
+                max(0.0, float(delay_s)),
+                reason,
+            )
+            next_timer.start()
+
+    def _restore_pending_text_nudge(self, text: str) -> None:
+        clean = str(text or "").strip()
+        if not clean:
+            return
+        with self._turn_state_lock:
+            if not str(self._pending_text_nudge or "").strip():
+                self._pending_text_nudge = clean
+
+    @staticmethod
+    def _build_soft_interrupt_prompt() -> str:
+        return (
+            "User steering update received. Stop the current plan at the next safe boundary. "
+            "Do not start another desktop action until you have incorporated the latest steering update."
+        )
+
+    @staticmethod
+    def _build_text_nudge_prompt(text: str) -> str:
+        clean = str(text or "").strip()
+        return (
+            "User steering update. This is the latest user instruction and overrides any earlier "
+            "steering update that conflicts with it. Revise your current reply or plan now. "
+            f"Latest user instruction: {json.dumps(clean, ensure_ascii=True)}"
+        )
+
+    def _request_soft_interrupt_for_pending_nudge(self) -> None:
+        should_send_prompt = False
+        with self._turn_state_lock:
+            if not self._soft_interrupt_requested:
+                self._soft_interrupt_requested = True
+                should_send_prompt = True
+        self.broker.cancel_current_action("User updated the task. Finish at a safe boundary.")
+        if should_send_prompt and self.enabled and self._transport is not None:
+            self.session_state_changed.emit("interrupted")
+            submitted = self._submit_async(
+                self._send_text(self._build_soft_interrupt_prompt()),
+                ensure_loop=False,
+            )
+            if not submitted:
+                logger.debug("Failed to send soft-interrupt steering prompt to Gemini Live.")
+
+    def _submit_pending_text_nudge_if_ready(
+        self,
+        *,
+        generation: Optional[int] = None,
+        reason: str,
+    ) -> bool:
+        pending_text = ""
+        active_turn = False
+        timer_to_cancel: Optional[threading.Timer] = None
+        with self._turn_state_lock:
+            if generation is not None and self._pending_text_nudge_generation != generation:
+                return False
+            pending_text = str(self._pending_text_nudge or "").strip()
+            if (
+                not pending_text
+                or self._voice_enabled
+                or self._shutdown_event.is_set()
+                or self.broker.has_pending()
+            ):
+                return False
+            active_turn = self._active_text_turn_id is not None
+            timer_to_cancel = self._pending_text_nudge_timer
+            self._pending_text_nudge_timer = None
+            self._pending_text_nudge_generation += 1
+            self._pending_text_nudge = ""
+            self._soft_interrupt_requested = False
+        if timer_to_cancel is not None:
+            timer_to_cancel.cancel()
+
+        if active_turn:
+            submitted = self._submit_async(self._send_text(self._build_text_nudge_prompt(pending_text)))
+            if submitted:
+                self._note_typed_turn_activity()
+                logger.debug("Delivered live steering update into the active turn (%s).", reason)
+                return True
+            self._restore_pending_text_nudge(pending_text)
+            self.error_received.emit("Failed to send the latest steering update to Gemini Live.")
+            return False
+
+        waiter, error_message = self._begin_text_turn(pending_text, wait_for_result=False)
+        if waiter is None:
+            self._restore_pending_text_nudge(pending_text)
+            if error_message:
+                logger.debug(
+                    "Deferred live steering update remains queued (%s): %s",
+                    reason,
+                    error_message,
+                )
+            return False
+
+        submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
+        if submitted:
+            logger.debug("Started a fresh live turn from the latest steering update (%s).", reason)
+            return True
+
+        self._finish_text_turn(error="Failed to send the latest steering update to Gemini Live.")
+        self._restore_pending_text_nudge(pending_text)
+        self.error_received.emit("Failed to send the latest steering update to Gemini Live.")
+        return False
+
+    def _handle_text_nudge_submission(self, text: str) -> dict[str, Any]:
+        clean = self._record_user_steering(text)
+        if not clean:
+            return {
+                "ok": False,
+                "status": "rejected",
+                "message": "Message is empty.",
+            }
+
+        replaced = False
+        with self._turn_state_lock:
+            replaced = bool(str(self._pending_text_nudge or "").strip())
+            self._pending_text_nudge = clean
+        self._note_typed_turn_activity()
+
+        if self.broker.has_pending():
+            self._request_soft_interrupt_for_pending_nudge()
+            return {
+                "ok": True,
+                "status": "nudge_queued",
+                "message": (
+                    "Updated the pending steering. I will switch at the next safe boundary."
+                    if replaced
+                    else "Steering update queued. I will switch at the next safe boundary."
+                ),
+            }
+
+        self._schedule_pending_text_nudge_flush(
+            delay_s=Config.LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS,
+            reason="user_nudge",
+        )
+        return {
+            "ok": True,
+            "status": "nudge_sent",
+            "message": (
+                "Updated the steering. I am adapting now."
+                if replaced
+                else "Steering update accepted. I am adapting now."
+            ),
+        }
+
+    def submit_text(self, text: str) -> dict[str, Any]:
         waiter, error_message = self._begin_text_turn(text, wait_for_result=False)
         if waiter is None:
+            clean = str(text or "").strip()
+            if error_message == "Wait for the current reply before sending another command.":
+                return self._handle_text_nudge_submission(clean)
             if error_message:
                 self.error_received.emit(error_message)
-            return False
+            return {
+                "ok": False,
+                "status": "rejected",
+                "message": error_message or "Unable to submit command.",
+            }
         submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
         if not submitted:
             self._finish_text_turn(error="Failed to send the command to Gemini Live.")
-        return submitted
+            self.error_received.emit("Failed to send the command to Gemini Live.")
+            return {
+                "ok": False,
+                "status": "submit_failed",
+                "message": "Failed to send the command to Gemini Live.",
+            }
+        return {
+            "ok": True,
+            "status": "submitted",
+            "message": "",
+        }
 
     def submit_text_and_wait(self, text: str, timeout_s: Optional[float] = None) -> dict[str, Any]:
         waiter, error_message = self._begin_text_turn(text, wait_for_result=True)
@@ -312,6 +740,8 @@ class LiveSessionManager(QObject):
 
     def stop_voice(self) -> bool:
         self._voice_enabled = False
+        self._cancel_typed_turn_idle_finish_timer()
+        self._cancel_pending_text_nudge_timer()
         self.voice_active_changed.emit(False)
         return self._submit_async(self._stop_voice_async(), ensure_loop=False)
 
@@ -339,6 +769,8 @@ class LiveSessionManager(QObject):
 
     def shutdown(self) -> None:
         self._shutdown_event.set()
+        self._cancel_typed_turn_idle_finish_timer()
+        self._clear_pending_text_nudge()
         self._finish_text_turn(error="Gemini Live session shut down.")
         self._voice_enabled = False
         self.voice_active_changed.emit(False)
@@ -620,6 +1052,7 @@ class LiveSessionManager(QObject):
                     received_messages = True
                     if self._shutdown_event.is_set():
                         break
+                    self._note_typed_turn_activity()
 
                     update = response.get("session_resumption_update")
                     if isinstance(update, dict):
@@ -1204,7 +1637,8 @@ class LiveSessionManager(QObject):
 
     def _on_action_update(self, payload: dict[str, Any]) -> None:
         self._recent_action_updates.append(payload)
-        status = str(payload.get("status") or "")
+        status = str(payload.get("status") or "").strip().lower()
+        self._note_typed_turn_activity()
         if status == "queued":
             self.session_state_changed.emit("waiting")
         elif status == "running":
@@ -1213,6 +1647,13 @@ class LiveSessionManager(QObject):
             self.session_state_changed.emit("interrupted")
         elif self.enabled:
             self.session_state_changed.emit("listening")
+        if status in {"succeeded", "failed", "cancelled"}:
+            self._schedule_typed_turn_idle_finish(reason=f"action_{status}")
+            if str(self._pending_text_nudge or "").strip():
+                self._schedule_pending_text_nudge_flush(
+                    delay_s=Config.LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS,
+                    reason=f"action_{status}",
+                )
         self._queue_action_update_prompt(payload)
         self.action_state_changed.emit(payload)
 
