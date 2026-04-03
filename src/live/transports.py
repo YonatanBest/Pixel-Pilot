@@ -88,7 +88,10 @@ def _normalize_provider_response(response: Any) -> dict[str, Any]:
             session_resumption_update, "resumption_handle", None
         )
         if handle:
-            payload["session_resumption_update"] = {"handle": str(handle)}
+            payload["session_resumption_update"] = {
+                "handle": str(handle),
+                "resumable": bool(getattr(session_resumption_update, "resumable", False)),
+            }
 
     tool_call = getattr(response, "tool_call", None)
     function_calls = []
@@ -153,17 +156,34 @@ def _normalize_provider_response(response: Any) -> dict[str, Any]:
 
         if bool(getattr(server_content, "interrupted", False)):
             server_payload["interrupted"] = True
+        if bool(getattr(server_content, "generation_complete", False)):
+            server_payload["generation_complete"] = True
         if bool(getattr(server_content, "turn_complete", False)):
             server_payload["turn_complete"] = True
 
-        go_away = getattr(server_content, "go_away", None)
-        if go_away:
-            message = str(getattr(go_away, "message", "") or "")
-            if message:
-                server_payload["go_away"] = {"message": message}
-
         if server_payload:
             payload["server_content"] = server_payload
+
+    go_away = getattr(response, "go_away", None)
+    if go_away:
+        message = str(getattr(go_away, "message", "") or "")
+        time_left = getattr(go_away, "time_left", None)
+        go_away_payload: dict[str, Any] = {}
+        if message:
+            go_away_payload["message"] = message
+        if time_left is not None:
+            go_away_payload["time_left"] = str(time_left)
+        if go_away_payload:
+            payload["go_away"] = go_away_payload
+
+    usage_metadata = getattr(response, "usage_metadata", None)
+    if usage_metadata is not None:
+        usage_payload: dict[str, Any] = {}
+        total_token_count = getattr(usage_metadata, "total_token_count", None)
+        if total_token_count is not None:
+            usage_payload["total_token_count"] = int(total_token_count)
+        if usage_payload:
+            payload["usage_metadata"] = usage_payload
 
     return payload
 
@@ -217,6 +237,9 @@ class BaseLiveTransport:
         raise NotImplementedError
 
     async def send_video(self, data: bytes, mime_type: str) -> None:
+        raise NotImplementedError
+
+    async def send_audio_stream_end(self) -> None:
         raise NotImplementedError
 
     async def send_tool_responses(self, responses: list[dict[str, Any]]) -> None:
@@ -274,6 +297,11 @@ class DirectGeminiLiveTransport(BaseLiveTransport):
             raise RuntimeError("Live session is not connected.")
         blob = types.Blob(data=data, mime_type=mime_type)
         await self._session.send_realtime_input(video=blob)
+
+    async def send_audio_stream_end(self) -> None:
+        if self._session is None:
+            raise RuntimeError("Live session is not connected.")
+        await self._session.send_realtime_input(audio_stream_end=True)
 
     async def send_tool_responses(self, responses: list[dict[str, Any]]) -> None:
         if self._session is None or not responses:
@@ -344,7 +372,6 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
         return _build_backend_ws_url(self._base_url, "/ws/live")
 
     async def connect(self, *, model: str, config: dict[str, Any]) -> None:
-        del model
         auth = self._get_auth()
         if not auth.access_token:
             raise RuntimeError("Not signed in. Please log in to continue.")
@@ -360,7 +387,15 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
         self._handle_backend_message(auth_response, during_connect=True)
 
         await self._ws.send(
-            json.dumps({"type": "live_start", "request": {"config": dict(config or {})}})
+            json.dumps(
+                {
+                    "type": "live_start",
+                    "request": {
+                        "model": str(model or "").strip(),
+                        "config": dict(config or {}),
+                    },
+                }
+            )
         )
         while True:
             response = json.loads(await self._ws.recv())
@@ -391,6 +426,9 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
                 }
             }
         )
+
+    async def send_audio_stream_end(self) -> None:
+        await self._send_live_input({"audio_stream_end": True})
 
     async def _send_live_input(self, payload: dict[str, Any]) -> None:
         if self._ws is None or not self._connected:

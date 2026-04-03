@@ -24,6 +24,16 @@ def _env_str(name: str, default: str = "") -> str:
     return value or str(default).strip()
 
 
+def _env_choice(name: str, default: str, allowed: set[str]) -> str:
+    value = _env_str(name, default)
+    normalized = value.lower()
+    if not normalized:
+        return ""
+    if normalized in allowed:
+        return normalized
+    return str(default).strip().lower()
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -81,14 +91,25 @@ class Config:
     LIVE_MODE_DEFAULT_VOICE_ENABLED = _env_bool("LIVE_MODE_DEFAULT_VOICE_ENABLED", True)
     GEMINI_LIVE_MODEL = _env_str(
         "GEMINI_LIVE_MODEL",
-        "gemini-2.5-flash-native-audio-preview-12-2025",
+        "gemini-3.1-flash-live-preview",
     )
     _LIVE_MODEL_LOWER = GEMINI_LIVE_MODEL.lower()
     LIVE_ENABLE_IMAGE_INPUT = _env_bool(
         "LIVE_ENABLE_IMAGE_INPUT",
         "native-audio" not in _LIVE_MODEL_LOWER,
     )
-    LIVE_ENABLE_VIDEO_STREAM = _env_bool("LIVE_ENABLE_VIDEO_STREAM", LIVE_ENABLE_IMAGE_INPUT)
+    LIVE_ENABLE_VIDEO_STREAM = _env_bool("LIVE_ENABLE_VIDEO_STREAM", False)
+    LIVE_ENABLE_CONTEXT_WINDOW_COMPRESSION = _env_bool(
+        "LIVE_ENABLE_CONTEXT_WINDOW_COMPRESSION",
+        True,
+    )
+    LIVE_VOICE_NAME = _env_str("LIVE_VOICE_NAME", "zephyr")
+    LIVE_THINKING_LEVEL = _env_choice(
+        "LIVE_THINKING_LEVEL",
+        "",
+        {"minimal", "low", "medium", "high"},
+    )
+    LIVE_INCLUDE_THOUGHTS = _env_bool("LIVE_INCLUDE_THOUGHTS", False)
     LIVE_VIDEO_FPS = _env_int("LIVE_VIDEO_FPS", 1, minimum=1)
     LIVE_AUDIO_INPUT_RATE = _env_int("LIVE_AUDIO_INPUT_RATE", 16000, minimum=8000)
     LIVE_AUDIO_OUTPUT_RATE = _env_int("LIVE_AUDIO_OUTPUT_RATE", 24000, minimum=8000)

@@ -20,9 +20,9 @@ load_dotenv()
 logger = logging.getLogger("backend.live")
 
 LIVE_API_KEY = os.getenv("GEMINI_API_KEY")
-LIVE_MODEL = (
-    os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025").strip()
-    or "gemini-2.5-flash-native-audio-preview-12-2025"
+DEFAULT_LIVE_MODEL = (
+    os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview").strip()
+    or "gemini-3.1-flash-live-preview"
 )
 LIVE_PROVIDER_ERROR_MESSAGE = "Gemini Live session failed"
 
@@ -62,6 +62,11 @@ def _normalize_function_call_args(raw_args: Any) -> dict[str, Any]:
     return {}
 
 
+def _normalize_live_model(raw_model: Any) -> str:
+    model = str(raw_model or "").strip()
+    return model or DEFAULT_LIVE_MODEL
+
+
 def _normalize_provider_response(response: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {}
 
@@ -71,7 +76,10 @@ def _normalize_provider_response(response: Any) -> dict[str, Any]:
             session_resumption_update, "resumption_handle", None
         )
         if handle:
-            payload["session_resumption_update"] = {"handle": str(handle)}
+            payload["session_resumption_update"] = {
+                "handle": str(handle),
+                "resumable": bool(getattr(session_resumption_update, "resumable", False)),
+            }
 
     tool_call = getattr(response, "tool_call", None)
     function_calls = []
@@ -137,17 +145,34 @@ def _normalize_provider_response(response: Any) -> dict[str, Any]:
 
         if bool(getattr(server_content, "interrupted", False)):
             server_payload["interrupted"] = True
+        if bool(getattr(server_content, "generation_complete", False)):
+            server_payload["generation_complete"] = True
         if bool(getattr(server_content, "turn_complete", False)):
             server_payload["turn_complete"] = True
 
-        go_away = getattr(server_content, "go_away", None)
-        if go_away:
-            message = str(getattr(go_away, "message", "") or "")
-            if message:
-                server_payload["go_away"] = {"message": message}
-
         if server_payload:
             payload["server_content"] = server_payload
+
+    go_away = getattr(response, "go_away", None)
+    if go_away:
+        message = str(getattr(go_away, "message", "") or "")
+        time_left = getattr(go_away, "time_left", None)
+        go_away_payload: dict[str, Any] = {}
+        if message:
+            go_away_payload["message"] = message
+        if time_left is not None:
+            go_away_payload["time_left"] = str(time_left)
+        if go_away_payload:
+            payload["go_away"] = go_away_payload
+
+    usage_metadata = getattr(response, "usage_metadata", None)
+    if usage_metadata is not None:
+        usage_payload: dict[str, Any] = {}
+        total_token_count = getattr(usage_metadata, "total_token_count", None)
+        if total_token_count is not None:
+            usage_payload["total_token_count"] = int(total_token_count)
+        if usage_payload:
+            payload["usage_metadata"] = usage_payload
 
     return payload
 
@@ -175,13 +200,19 @@ class BackendLiveSession:
         self._reservation: Optional[rate_limiter.LiveSessionReservation] = None
         self._resume_handle: Optional[str] = None
         self._connect_config: dict[str, Any] = {}
+        self._model = DEFAULT_LIVE_MODEL
         self._closed = False
 
     @property
     def started(self) -> bool:
         return self._session is not None
 
-    async def start(self, connect_config: Optional[dict[str, Any]]) -> None:
+    async def start(
+        self,
+        connect_config: Optional[dict[str, Any]],
+        *,
+        model: Optional[str] = None,
+    ) -> None:
         if self._session is not None:
             raise LiveSessionError(400, "Live session already started.")
         if self.redis_client is None:
@@ -198,6 +229,7 @@ class BackendLiveSession:
 
         self._reservation = reservation
         self._connect_config = copy.deepcopy(connect_config or {})
+        self._model = _normalize_live_model(model)
         try:
             await self._ensure_session_with_retry()
         except Exception as exc:  # noqa: BLE001
@@ -207,7 +239,7 @@ class BackendLiveSession:
 
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._receive_task = asyncio.create_task(self._receive_loop())
-        await self._send_json({"type": "live_started", "model": LIVE_MODEL})
+        await self._send_json({"type": "live_started", "model": self._model})
 
     async def send_text(self, text: str) -> None:
         payload = str(text or "")
@@ -230,6 +262,12 @@ class BackendLiveSession:
 
         async def _sender() -> None:
             await self._session.send_realtime_input(video=blob)
+
+        await self._send_with_retry(_sender)
+
+    async def send_audio_stream_end(self) -> None:
+        async def _sender() -> None:
+            await self._session.send_realtime_input(audio_stream_end=True)
 
         await self._send_with_retry(_sender)
 
@@ -347,7 +385,7 @@ class BackendLiveSession:
         if self._client is None:
             self._client = genai.Client(api_key=LIVE_API_KEY)
         config = self._build_connect_config()
-        self._session_cm = self._client.aio.live.connect(model=LIVE_MODEL, config=config)
+        self._session_cm = self._client.aio.live.connect(model=self._model, config=config)
         self._session = await self._session_cm.__aenter__()
         return self._session
 
@@ -395,8 +433,18 @@ class BackendLiveSession:
                     if event:
                         await self._send_json({"type": "live_event", "event": event})
 
-                if not received_messages:
-                    break
+                if self._closed:
+                    return
+                logger.warning(
+                    "Backend live receive stream ended%s; reconnecting with resumption.",
+                    "" if received_messages else " before any messages",
+                )
+                try:
+                    await self._reconnect_with_resume()
+                    continue
+                except Exception as reconnect_exc:  # noqa: BLE001
+                    await self._send_error(self._translate_provider_exception(reconnect_exc))
+                    return
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

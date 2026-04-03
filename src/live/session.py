@@ -64,6 +64,8 @@ class LiveSessionManager(QObject):
         self._workspace = getattr(agent, "active_workspace", "user")
         self._mode = getattr(agent, "mode", None)
         self._transport: Optional[BaseLiveTransport] = None
+        self._connect_task: Optional[asyncio.Task] = None
+        self._connect_in_progress = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
         self._session_started_at = 0.0
@@ -141,9 +143,21 @@ class LiveSessionManager(QObject):
 
     def _create_transport(self) -> BaseLiveTransport:
         cls = self._transport_cls()
-        if self._transport is None or not isinstance(self._transport, cls):
-            self._transport = cls()
-        return self._transport
+        if self._transport is not None and isinstance(self._transport, cls):
+            return self._transport
+        return cls()
+
+    @property
+    def is_connection_pending(self) -> bool:
+        return bool(
+            self.enabled
+            and (
+                self._connect_in_progress
+                or self._reconnect_in_progress
+                or self._connect_task is not None
+                or self._transport is None
+            )
+        )
 
     @property
     def is_available(self) -> bool:
@@ -651,6 +665,7 @@ class LiveSessionManager(QObject):
                 "status": "rejected",
                 "message": error_message or "Unable to submit command.",
             }
+        queued_for_connect = self.is_connection_pending
         submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
         if not submitted:
             self._finish_text_turn(error="Failed to send the command to Gemini Live.")
@@ -659,6 +674,15 @@ class LiveSessionManager(QObject):
                 "ok": False,
                 "status": "submit_failed",
                 "message": "Failed to send the command to Gemini Live.",
+            }
+        if queued_for_connect:
+            self.session_state_changed.emit("connecting")
+            return {
+                "ok": True,
+                "status": "queued_connecting",
+                "message": (
+                    "Gemini Live is still connecting. I queued your message and will send it as soon as the session is ready."
+                ),
             }
         return {
             "ok": True,
@@ -870,28 +894,41 @@ class LiveSessionManager(QObject):
         if not payload:
             return
 
-        transport = await self._ensure_session_with_retry()
-        try:
-            await asyncio.wait_for(
-                transport.send_text(payload),
-                timeout=Config.LIVE_TEXT_SEND_TIMEOUT_SECONDS,
-            )
-        except RateLimitError:
-            raise
-        except asyncio.TimeoutError as exc:
-            if allow_retry and self.enabled and not self._shutdown_event.is_set():
-                logger.warning("Timed out sending realtime text; reconnecting live session.")
-                await self._reconnect_with_resume()
-                await self._send_realtime_text(payload, allow_retry=False)
+        max_retries = 6 if allow_retry else 0
+        attempt = 0
+        while True:
+            transport = await self._ensure_session_with_retry()
+            try:
+                await asyncio.wait_for(
+                    transport.send_text(payload),
+                    timeout=Config.LIVE_TEXT_SEND_TIMEOUT_SECONDS,
+                )
                 return
-            raise RuntimeError("Timed out sending text to Gemini Live session.") from exc
-        except Exception:
-            if allow_retry and self.enabled and not self._shutdown_event.is_set():
-                logger.warning("Realtime text send failed; reconnecting live session.", exc_info=True)
-                await self._reconnect_with_resume()
-                await self._send_realtime_text(payload, allow_retry=False)
-                return
-            raise
+            except RateLimitError:
+                raise
+            except asyncio.TimeoutError as exc:
+                if (
+                    attempt < max_retries
+                    and self.enabled
+                    and not self._shutdown_event.is_set()
+                ):
+                    logger.warning("Timed out sending realtime text; reconnecting live session.")
+                    await self._reconnect_with_resume()
+                    attempt += 1
+                    continue
+                raise RuntimeError("Timed out sending text to Gemini Live session.") from exc
+            except Exception as exc:  # noqa: BLE001
+                if (
+                    attempt < max_retries
+                    and self.enabled
+                    and not self._shutdown_event.is_set()
+                    and self._is_recoverable_connection_error(exc)
+                ):
+                    logger.warning("Realtime text send failed; reconnecting live session.", exc_info=True)
+                    await self._reconnect_with_resume()
+                    attempt += 1
+                    continue
+                raise
 
     async def _start_voice_async(self) -> None:
         try:
@@ -929,6 +966,19 @@ class LiveSessionManager(QObject):
             self._mic_task.cancel()
             await asyncio.gather(self._mic_task, return_exceptions=True)
         self._mic_task = None
+        if self._transport is not None:
+            try:
+                await self._transport.send_audio_stream_end()
+            except Exception as exc:  # noqa: BLE001
+                if self._is_recoverable_connection_error(exc):
+                    logger.warning(
+                        "Live audio stream end failed; reconnecting session: %s",
+                        exc,
+                    )
+                    if self.enabled and not self._shutdown_event.is_set():
+                        await self._reconnect_with_resume()
+                else:
+                    logger.debug("Failed to flush live audio stream end", exc_info=True)
         self.audio_level_changed.emit(0.0)
         if self.enabled:
             self.session_state_changed.emit("listening")
@@ -937,32 +987,58 @@ class LiveSessionManager(QObject):
         if self._transport is not None:
             return self._transport
 
-        self.session_state_changed.emit("connecting")
-        transport = self._create_transport()
-        config = self._build_connect_config()
-        await transport.connect(model=Config.GEMINI_LIVE_MODEL, config=config)
-        self._session_started_at = time.monotonic()
-        queue_maxsize = (
-            Config.LIVE_AUDIO_LOSSLESS_QUEUE_MAX_CHUNKS
-            if Config.LIVE_AUDIO_LOSSLESS_MODE
-            else Config.LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS
-        )
-        self._speaker_queue = asyncio.Queue(maxsize=queue_maxsize)
-        self._receive_task = asyncio.create_task(self._receive_loop())
-        self._video_task = (
-            asyncio.create_task(self._video_loop()) if self._video_stream_enabled else None
-        )
-        self._speaker_task = asyncio.create_task(self._speaker_loop())
-        self._rotation_task = asyncio.create_task(self._rotation_loop())
-        if self._is_guidance_mode():
-            self._last_guidance_snapshot_signature = ""
-            self._last_guidance_probe_sent_at = 0.0
-            self._guidance_observer_task = asyncio.create_task(self._guidance_observer_loop())
-        if self._voice_enabled and (self._mic_task is None or self._mic_task.done()):
-            self._mic_task = asyncio.create_task(self._microphone_loop())
-        self.session_state_changed.emit("listening")
+        if self._connect_task is not None:
+            await asyncio.shield(self._connect_task)
+            if self._transport is None:
+                raise RuntimeError("Gemini Live session failed to start.")
+            return self._transport
 
-        return transport
+        self._connect_task = asyncio.create_task(self._connect_session())
+        try:
+            await asyncio.shield(self._connect_task)
+        finally:
+            self._connect_task = None
+        if self._transport is None:
+            raise RuntimeError("Gemini Live session failed to start.")
+        return self._transport
+
+    async def _connect_session(self):
+        self.session_state_changed.emit("connecting")
+        self._connect_in_progress = True
+        transport = self._create_transport()
+        try:
+            config = self._build_connect_config()
+            await transport.connect(model=Config.GEMINI_LIVE_MODEL, config=config)
+            self._transport = transport
+            self._session_started_at = time.monotonic()
+            queue_maxsize = (
+                Config.LIVE_AUDIO_LOSSLESS_QUEUE_MAX_CHUNKS
+                if Config.LIVE_AUDIO_LOSSLESS_MODE
+                else Config.LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS
+            )
+            self._speaker_queue = asyncio.Queue(maxsize=queue_maxsize)
+            self._receive_task = asyncio.create_task(self._receive_loop())
+            self._video_task = (
+                asyncio.create_task(self._video_loop()) if self._video_stream_enabled else None
+            )
+            self._speaker_task = asyncio.create_task(self._speaker_loop())
+            self._rotation_task = asyncio.create_task(self._rotation_loop())
+            if self._is_guidance_mode():
+                self._last_guidance_snapshot_signature = ""
+                self._last_guidance_probe_sent_at = 0.0
+                self._guidance_observer_task = asyncio.create_task(self._guidance_observer_loop())
+            if self._voice_enabled and (self._mic_task is None or self._mic_task.done()):
+                self._mic_task = asyncio.create_task(self._microphone_loop())
+            self.session_state_changed.emit("listening")
+            return transport
+        except Exception:
+            try:
+                await transport.close(close_client=True)
+            except Exception:
+                logger.debug("Failed to close half-open live transport", exc_info=True)
+            raise
+        finally:
+            self._connect_in_progress = False
 
     async def _disconnect_session(
         self,
@@ -978,6 +1054,7 @@ class LiveSessionManager(QObject):
             self._receive_task,
             self._rotation_task,
             self._guidance_observer_task,
+            self._connect_task,
         ]
         pending: list[asyncio.Task] = []
         for task in tasks:
@@ -994,6 +1071,8 @@ class LiveSessionManager(QObject):
         self._receive_task = None
         self._rotation_task = None
         self._guidance_observer_task = None
+        self._connect_task = None
+        self._connect_in_progress = False
         self._speaker_queue = None
         self.audio_level_changed.emit(0.0)
         self.assistant_audio_level_changed.emit(0.0)
@@ -1028,6 +1107,13 @@ class LiveSessionManager(QObject):
         config: dict[str, Any] = {
             "response_modalities": ["AUDIO"],
             "system_instruction": system_instruction,
+            "speech_config": {
+                "voice_config": {
+                    "prebuilt_voice_config": {
+                        "voice_name": Config.LIVE_VOICE_NAME,
+                    }
+                }
+            },
             "tools": [
                 {
                     "function_declarations": self.tools.get_declarations(
@@ -1038,6 +1124,15 @@ class LiveSessionManager(QObject):
             "input_audio_transcription": {},
             "output_audio_transcription": {},
         }
+        if Config.LIVE_ENABLE_CONTEXT_WINDOW_COMPRESSION:
+            config["context_window_compression"] = {"sliding_window": {}}
+        if Config.LIVE_THINKING_LEVEL or Config.LIVE_INCLUDE_THOUGHTS:
+            thinking_config: dict[str, Any] = {}
+            if Config.LIVE_THINKING_LEVEL:
+                thinking_config["thinking_level"] = Config.LIVE_THINKING_LEVEL
+            if Config.LIVE_INCLUDE_THOUGHTS:
+                thinking_config["include_thoughts"] = True
+            config["thinking_config"] = thinking_config
         if types is not None and hasattr(types, "MediaResolution"):
             media_resolution = getattr(types.MediaResolution, "MEDIA_RESOLUTION_LOW", None)
             config["media_resolution"] = (
@@ -1071,6 +1166,15 @@ class LiveSessionManager(QObject):
                     if tool_call:
                         self.session_state_changed.emit("acting")
                         await self._handle_tool_call(tool_call)
+
+                    go_away = response.get("go_away")
+                    if isinstance(go_away, dict):
+                        logger.info(
+                            "Gemini Live signaled connection expiry soon%s.",
+                            f" (time_left={go_away.get('time_left')})"
+                            if go_away.get("time_left")
+                            else "",
+                        )
 
                     server_content = response.get("server_content")
                     if not isinstance(server_content, dict):
@@ -1145,8 +1249,14 @@ class LiveSessionManager(QObject):
                         )
                         await self._enqueue_speaker_audio(payload, sample_rate)
 
-                if not received_messages:
-                    break
+                if self.enabled and not self._shutdown_event.is_set():
+                    logger.warning(
+                        "Live receive stream ended%s; reconnecting with session resumption.",
+                        "" if received_messages else " before any messages",
+                    )
+                    await self._reconnect_with_resume()
+                    return
+                break
         except asyncio.CancelledError:
             raise
         except RateLimitError as exc:
@@ -1262,13 +1372,20 @@ class LiveSessionManager(QObject):
             self.audio_level_changed.emit(0.0)
             self.assistant_audio_level_changed.emit(0.0)
             if stream is not None:
-                await asyncio.to_thread(stream.close)
-            pya.terminate()
+                try:
+                    stream.close()
+                except Exception:
+                    logger.debug("Failed to close microphone stream", exc_info=True)
+            try:
+                pya.terminate()
+            except Exception:
+                logger.debug("Failed to terminate microphone audio handle", exc_info=True)
 
     async def _send_audio_chunk(self, data: bytes) -> None:
-        if self._transport is None or not data:
+        if not data:
             return
-        await self._transport.send_audio(
+        transport = await self._ensure_session_with_retry()
+        await transport.send_audio(
             data,
             f"audio/pcm;rate={Config.LIVE_AUDIO_INPUT_RATE}",
         )
@@ -1355,8 +1472,14 @@ class LiveSessionManager(QObject):
         finally:
             self.assistant_audio_level_changed.emit(0.0)
             if stream is not None:
-                await asyncio.to_thread(stream.close)
-            pya.terminate()
+                try:
+                    stream.close()
+                except Exception:
+                    logger.debug("Failed to close speaker stream", exc_info=True)
+            try:
+                pya.terminate()
+            except Exception:
+                logger.debug("Failed to terminate speaker audio handle", exc_info=True)
 
     async def _rotation_loop(self) -> None:
         try:
@@ -1787,6 +1910,9 @@ class LiveSessionManager(QObject):
             or "ping timeout" in message
             or "no close frame received" in message
             or "keepalive ping timeout" in message
+            or "session is not connected" in message
+            or "live session is not connected" in message
+            or "backend session is not connected" in message
         )
 
     async def _enqueue_speaker_audio(self, data: bytes, sample_rate: int) -> None:

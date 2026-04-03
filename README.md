@@ -119,9 +119,11 @@ GEMINI_MODEL=gemini-3-flash-preview
 ENABLE_GEMINI_LIVE_MODE=true
 LIVE_MODE_DEFAULT_ENABLED=true
 LIVE_MODE_DEFAULT_VOICE_ENABLED=true
-GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
-LIVE_ENABLE_IMAGE_INPUT=false
+GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
+LIVE_VOICE_NAME=Leda
+LIVE_ENABLE_IMAGE_INPUT=true
 LIVE_ENABLE_VIDEO_STREAM=false
+LIVE_ENABLE_CONTEXT_WINDOW_COMPRESSION=true
 LIVE_VIDEO_FPS=1
 LIVE_AUDIO_INPUT_RATE=16000
 LIVE_AUDIO_OUTPUT_RATE=24000
@@ -150,7 +152,10 @@ Notes:
 - Live mode works in direct mode with a local `GEMINI_API_KEY`, or in backend mode after sign-in when `BACKEND_URL` is configured.
 - `LIVE_MODE_DEFAULT_ENABLED=true` means AI power starts enabled whenever Live is available.
 - `LIVE_MODE_DEFAULT_VOICE_ENABLED=true` means the mic starts with AI power at startup.
-- `LIVE_ENABLE_IMAGE_INPUT=false` avoids image/video realtime sends for native-audio models (prevents policy-violation disconnects).
+- `LIVE_VOICE_NAME=Leda` selects the prebuilt Live voice. Google documents voice names/styles, not gender labels; `Leda` is listed as a `Youthful` voice and is used here as the closest fit for a girl voice.
+- `LIVE_ENABLE_IMAGE_INPUT=true` keeps still-image context available for Gemini 3.1 Flash Live without forcing a continuous video stream.
+- `LIVE_ENABLE_VIDEO_STREAM=false` avoids always-on 1 FPS screen streaming by default, which is especially important on Gemini 3.1 Flash Live because video frames are included in turn coverage.
+- `LIVE_ENABLE_CONTEXT_WINDOW_COMPRESSION=true` keeps long Live sessions resumable beyond the default audio/video session limits.
 - `LIVE_AUDIO_LOSSLESS_MODE=true` keeps assistant audio lossless while using bounded backpressure instead of an unbounded queue.
 - `LIVE_AUDIO_LOSSLESS_QUEUE_MAX_CHUNKS` caps how far lossless playback can lag before the receive loop slows down to match the speaker.
 - If `GEMINI_API_KEY` is missing, app uses backend auth/proxy mode.
@@ -194,7 +199,8 @@ JWT_SECRET=change_me
 OCR_USE_GPU=auto
 OCR_REQUESTS_PER_MINUTE=60
 OCR_REQUESTS_PER_DAY=1000
-GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
+LIVE_VOICE_NAME=Leda
 LIVE_MAX_CONCURRENT_SESSIONS=1
 LIVE_MAX_ACTIVE_SESSIONS_PER_USER=1
 LIVE_SESSION_STARTS_PER_MINUTE=2

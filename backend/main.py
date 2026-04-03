@@ -650,7 +650,17 @@ async def ws_live(websocket: WebSocket):
             try:
                 if msg_type == "live_start":
                     request_payload = message.get("request") or {}
+                    model_payload = request_payload.get("model")
                     config_payload = request_payload.get("config") or {}
+                    if model_payload is not None and not isinstance(model_payload, str):
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": 422,
+                                "detail": "Invalid live_start request: model must be a string",
+                            }
+                        )
+                        continue
                     if not isinstance(config_payload, dict):
                         await websocket.send_json(
                             {
@@ -660,7 +670,7 @@ async def ws_live(websocket: WebSocket):
                             }
                         )
                         continue
-                    await session.start(config_payload)
+                    await session.start(config_payload, model=model_payload)
                     continue
 
                 if msg_type == "live_input":
@@ -677,10 +687,12 @@ async def ws_live(websocket: WebSocket):
                     payload_kinds = [
                         kind for kind in ("text", "audio", "video") if kind in message
                     ]
+                    if bool(message.get("audio_stream_end")):
+                        payload_kinds.append("audio_stream_end")
                     if len(payload_kinds) != 1:
                         raise live_service.LiveSessionError(
                             422,
-                            "Invalid live_input: expected exactly one of text, audio, or video",
+                            "Invalid live_input: expected exactly one of text, audio, video, or audio_stream_end",
                         )
 
                     if payload_kinds[0] == "text":
@@ -701,6 +713,10 @@ async def ws_live(websocket: WebSocket):
                             kind="video",
                         )
                         await session.send_video(data, mime_type)
+                        continue
+
+                    if payload_kinds[0] == "audio_stream_end":
+                        await session.send_audio_stream_end()
                         continue
 
                 if msg_type == "live_tool_response":

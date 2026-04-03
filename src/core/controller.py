@@ -424,7 +424,7 @@ class MainController(QObject):
             return
         status = str(result.get("status") or "").strip().lower()
         message = str(result.get("message") or "").strip()
-        if status in {"nudge_queued", "nudge_sent"} and message:
+        if status in {"nudge_queued", "nudge_sent", "queued_connecting"} and message:
             self.gui_adapter.add_activity_message(message)
 
     def stop_current_turn(self):
@@ -608,6 +608,11 @@ class MainController(QObject):
         if enabled:
             if not self.live_session.start_voice():
                 self._handle_live_voice_active(False)
+                return
+            if bool(getattr(self.live_session, "is_connection_pending", False)):
+                self.gui_adapter.add_system_message(
+                    "Gemini Live is still connecting. Voice will start automatically when the session is ready."
+                )
         else:
             self.live_session.stop_voice()
             self._handle_live_voice_active(False)
