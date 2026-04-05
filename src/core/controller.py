@@ -18,13 +18,19 @@ class MainController(QObject):
         self.agent = None
         self.live_session = None
         self.live_mode_enabled = False
+        self._live_available = False
+        self._live_unavailable_reason = ""
+        self._live_voice_active = False
         self._live_action_passthrough_active = False
+        self.wake_word_controller = None
         self.desktop_manager = None
         self.gateway_server = None
         self.gateway_thread = None
         self._bootstrap_started = False
         self._startup_started_at = float(startup_started_at or time.perf_counter())
         self._startup_logged_phases: set[str] = set()
+        self._last_wake_fallback_attempt_at = 0.0
+        self._last_wake_fallback_signature = ""
         self._app_index_watch_timer = QTimer(self)
         self._app_index_watch_timer.setInterval(250)
         self._app_index_watch_timer.timeout.connect(self._check_app_index_ready)
@@ -130,13 +136,134 @@ class MainController(QObject):
     def _apply_default_live_mode(self) -> None:
         if not self.live_session:
             self.live_mode_enabled = False
+            self.gui_adapter.set_live_enabled(False)
             return
 
         available = bool(getattr(self.live_session, "is_available", False))
-        should_enable = bool(Config.LIVE_MODE_DEFAULT_ENABLED and available)
-        self.handle_live_mode_changed(should_enable)
-        if should_enable and Config.LIVE_MODE_DEFAULT_VOICE_ENABLED:
-            self.handle_live_voice_toggled(True)
+        should_enable = bool(available)
+        self.live_mode_enabled = bool(should_enable and self.live_session.set_enabled(True))
+        self.gui_adapter.set_live_enabled(self.live_mode_enabled)
+        if not Config.ENABLE_WAKE_WORD:
+            self._ensure_live_connected_for_wake_fallback(
+                trigger="wakeword_disabled",
+                reason="Wake word is disabled.",
+            )
+
+    def _ensure_live_connected_for_wake_fallback(self, *, trigger: str, reason: str = "") -> None:
+        if not self.live_session:
+            return
+        if not self.live_mode_enabled:
+            return
+        if not self._live_available:
+            return
+        if not bool(getattr(self.live_session, "enabled", False)):
+            return
+        if bool(getattr(self.live_session, "manual_disconnect_requested", False)):
+            return
+        if bool(getattr(self.live_session, "is_connected", False)):
+            return
+        if bool(getattr(self.live_session, "is_connection_pending", False)):
+            return
+
+        clean_trigger = str(trigger or "wakeword").strip().lower() or "wakeword"
+        clean_reason = str(reason or "").strip()
+        signature = f"{clean_trigger}|{clean_reason.lower()}"
+        now = time.monotonic()
+        if (
+            signature == self._last_wake_fallback_signature
+            and (now - self._last_wake_fallback_attempt_at) < 2.0
+        ):
+            return
+
+        self._last_wake_fallback_signature = signature
+        self._last_wake_fallback_attempt_at = now
+        logger.info(
+            "LIVE_WAKE_FALLBACK_CONNECT trigger=%s reason=%s",
+            clean_trigger,
+            clean_reason or "",
+        )
+        if self.live_session.reconnect():
+            message = (
+                "Wake word is unavailable, so Gemini Live is reconnecting automatically."
+                if clean_trigger != "wakeword_disabled"
+                else "Wake word is disabled, so Gemini Live is reconnecting automatically."
+            )
+            if clean_reason:
+                message = f"{message} {clean_reason}"
+            self.gui_adapter.add_activity_message(message)
+
+    def _init_wake_word_controller(self) -> None:
+        if self.wake_word_controller is not None:
+            return
+        if not Config.ENABLE_WAKE_WORD:
+            self.gui_adapter.set_wake_word_enabled(False)
+            self.gui_adapter.set_wake_word_phrase(Config.WAKE_WORD_PHRASE)
+            self.gui_adapter.update_wake_word_state("disabled", "")
+            self._ensure_live_connected_for_wake_fallback(
+                trigger="wakeword_disabled",
+                reason="Wake word is disabled by configuration.",
+            )
+            return
+        try:
+            from wakeword import create_wake_word_detector
+            from wakeword.controller import WakeWordController
+
+            detector = create_wake_word_detector()
+            self.wake_word_controller = WakeWordController(
+                detector=detector,
+                phrase=Config.WAKE_WORD_PHRASE,
+                is_live_available=lambda: self._live_available,
+                live_unavailable_reason=lambda: self._live_unavailable_reason,
+                is_live_enabled=lambda: self.live_mode_enabled,
+                is_live_voice_active=lambda: self._live_voice_active,
+                start_one_shot_voice=self._start_one_shot_voice,
+                ensure_live_connected=lambda trigger, reason: self._ensure_live_connected_for_wake_fallback(
+                    trigger=trigger,
+                    reason=reason,
+                ),
+                publish_enabled=self.gui_adapter.set_wake_word_enabled,
+                publish_phrase=self.gui_adapter.set_wake_word_phrase,
+                publish_state=self.gui_adapter.update_wake_word_state,
+                add_activity_message=self.gui_adapter.add_activity_message,
+            )
+        except Exception as exc:
+            logger.exception("Failed to initialize wake-word controller")
+            self.gui_adapter.set_wake_word_enabled(False)
+            self.gui_adapter.set_wake_word_phrase(Config.WAKE_WORD_PHRASE)
+            self.gui_adapter.update_wake_word_state(
+                "unavailable",
+                f"Wake-word listener unavailable: {exc}",
+            )
+            self._ensure_live_connected_for_wake_fallback(
+                trigger="wakeword_init_error",
+                reason=f"Wake-word listener unavailable: {exc}",
+            )
+
+    def _sync_wake_word_controller(self) -> None:
+        if self.wake_word_controller is None:
+            return
+        try:
+            self.wake_word_controller.reconcile()
+        except Exception:
+            logger.debug("Failed to reconcile wake-word controller", exc_info=True)
+
+    def _start_one_shot_voice(self) -> bool:
+        if not self.live_session:
+            return False
+
+        if not self.live_mode_enabled:
+            self.handle_live_mode_changed(True)
+            if not self.live_mode_enabled:
+                return False
+
+        started = self.live_session.start_voice(mode="continuous")
+        if not started:
+            return False
+        if bool(getattr(self.live_session, "is_connection_pending", False)):
+            self.gui_adapter.add_system_message(
+                "Wake word heard. Gemini Live is still connecting and will start listening as soon as the session is ready."
+            )
+        return True
 
     def _create_robotics_eye(self):
         if not Config.USE_ROBOTICS_EYE:
@@ -205,6 +332,8 @@ class MainController(QObject):
             return
 
         self._init_live_session()
+        self._init_wake_word_controller()
+        self._sync_wake_word_controller()
 
         if not self.live_session:
             self.mark_startup_phase("live_ready", status="error", detail="session_unavailable")
@@ -295,11 +424,13 @@ class MainController(QObject):
             self._handle_live_session_state("disconnected")
             self._apply_default_live_mode()
             self._init_gateway()
+            self._sync_wake_word_controller()
         except Exception as exc:
             logger.exception("Failed to initialize Gemini Live session")
             self.live_session = None
             self.live_mode_enabled = False
             self._handle_live_availability(False, str(exc))
+            self._sync_wake_word_controller()
 
     def _init_gateway(self) -> None:
         if not Config.ENABLE_GATEWAY:
@@ -373,15 +504,20 @@ class MainController(QObject):
         clean = str(text or "").strip()
         if not clean:
             return {"ok": False, "message": "Empty input."}
+        logger.info("LIVE_USER_REQUEST source=ui text=%s", " ".join(clean.split()))
         if not self.agent:
             self.gui_adapter.add_error_message(self._startup_message("AI"))
             return {"ok": False, "message": self._startup_message("AI")}
         if not self.live_session:
             self.gui_adapter.add_error_message(self._startup_message("Gemini Live"))
             return {"ok": False, "message": self._startup_message("Gemini Live")}
-        if not self.live_mode_enabled or not self.live_session.enabled:
-            self.gui_adapter.add_error_message("AI is off. Turn AI on to send instructions.")
-            return {"ok": False, "message": "AI is off. Turn AI on to send instructions."}
+        if not self.live_session.enabled:
+            self.live_mode_enabled = bool(self.live_session.set_enabled(True))
+            self.gui_adapter.set_live_enabled(self.live_mode_enabled)
+            if not self.live_mode_enabled:
+                message = "Gemini Live is unavailable right now."
+                self.gui_adapter.add_error_message(message)
+                return {"ok": False, "message": message}
         result = self.live_session.submit_text(clean)
         if not isinstance(result, dict):
             return {"ok": False, "message": "Live runtime did not return a result."}
@@ -390,6 +526,7 @@ class MainController(QObject):
             if message:
                 self.gui_adapter.add_error_message(message)
             return result
+        self.gui_adapter.add_user_message(clean)
         status = str(result.get("status") or "").strip().lower()
         message = str(result.get("message") or "").strip()
         if status in {"nudge_queued", "nudge_sent", "queued_connecting"} and message:
@@ -416,6 +553,12 @@ class MainController(QObject):
     def shutdown(self):
         try:
             self._app_index_watch_timer.stop()
+
+            if self.wake_word_controller:
+                try:
+                    self.wake_word_controller.shutdown()
+                except Exception:
+                    pass
 
             if self.live_session:
                 try:
@@ -583,11 +726,27 @@ class MainController(QObject):
             self.live_mode_enabled = False
             self.gui_adapter.set_live_enabled(False)
             self.gui_adapter.add_error_message(self._startup_message("Gemini Live", unavailable=True))
+            self._sync_wake_word_controller()
             return
 
-        success = self.live_session.set_enabled(bool(enabled))
-        self.live_mode_enabled = bool(enabled and success)
+        if not self.live_session.enabled:
+            self.live_mode_enabled = bool(self.live_session.set_enabled(True))
+        else:
+            self.live_mode_enabled = True
+
         if not self.live_mode_enabled:
+            self.gui_adapter.set_live_enabled(False)
+            self.gui_adapter.add_error_message(self._startup_message("Gemini Live", unavailable=True))
+            self._sync_wake_word_controller()
+            return
+
+        if enabled:
+            self.live_session.reconnect()
+        else:
+            self.live_session.disconnect(
+                reason="Gemini Live disconnected. Use voice, wake word, or text to reconnect."
+            )
+            self._live_voice_active = False
             self._live_action_passthrough_active = False
 
         if self.live_mode_enabled and self.agent:
@@ -598,14 +757,20 @@ class MainController(QObject):
 
         self.gui_adapter.set_live_enabled(self.live_mode_enabled)
         self._apply_click_through_policy()
+        self._sync_wake_word_controller()
 
     @Slot(bool)
     def handle_live_voice_toggled(self, enabled: bool):
-        if not self.live_session or not self.live_mode_enabled:
+        if not self.live_session:
+            return
+        if not self.live_session.enabled:
+            self.live_mode_enabled = bool(self.live_session.set_enabled(True))
+            self.gui_adapter.set_live_enabled(self.live_mode_enabled)
+        if not self.live_mode_enabled:
             return
 
         if enabled:
-            if not self.live_session.start_voice():
+            if not self.live_session.start_voice(mode="continuous"):
                 self._handle_live_voice_active(False)
                 return
             if bool(getattr(self.live_session, "is_connection_pending", False)):
@@ -614,7 +779,14 @@ class MainController(QObject):
                 )
         else:
             self.live_session.stop_voice()
-            self._handle_live_voice_active(False)
+
+    @Slot(bool)
+    def handle_wake_word_toggled(self, enabled: bool):
+        if enabled or self.wake_word_controller is not None:
+            self._init_wake_word_controller()
+        if self.wake_word_controller is None:
+            return
+        self.wake_word_controller.set_enabled(bool(enabled))
 
     @Slot(str, str, bool)
     def _handle_live_transcript(self, speaker: str, text: str, final: bool):
@@ -654,12 +826,26 @@ class MainController(QObject):
 
     @Slot(bool, str)
     def _handle_live_availability(self, available: bool, reason: str):
+        self._live_available = bool(available)
+        self._live_unavailable_reason = str(reason or "").strip()
         if not available:
             self.live_mode_enabled = False
+            self._live_voice_active = False
             self._live_action_passthrough_active = False
+        elif self.live_session:
+            self.live_mode_enabled = bool(self.live_session.enabled or self.live_session.set_enabled(True))
+        self.gui_adapter.set_live_enabled(self.live_mode_enabled)
         self.gui_adapter.update_live_availability(available, reason)
         self._apply_click_through_policy()
+        self._sync_wake_word_controller()
+        if not Config.ENABLE_WAKE_WORD:
+            self._ensure_live_connected_for_wake_fallback(
+                trigger="wakeword_disabled",
+                reason="Wake word is disabled by configuration.",
+            )
 
     @Slot(bool)
     def _handle_live_voice_active(self, active: bool):
+        self._live_voice_active = bool(active)
         self.gui_adapter.update_live_voice_active(active)
+        self._sync_wake_word_controller()

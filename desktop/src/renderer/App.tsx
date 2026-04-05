@@ -11,22 +11,18 @@ import React, {
 } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  Activity,
   Bot,
   ChevronDown,
   ChevronUp,
-  Command,
   Eye,
   GraduationCap,
   Keyboard,
   LoaderCircle,
-  LogOut,
   Mic,
   Minus,
   Monitor,
   PanelTop,
-  ScanSearch,
-  Send,
+  Plus,
   Settings2,
   Shield,
   Waves,
@@ -389,17 +385,48 @@ function humanizeState(state: string): string {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
+function wakeWordStatusDescription(snapshot: RuntimeSnapshot): string {
+  const phrase = String(snapshot.wakeWordPhrase || '').trim() || 'Hey Pixie';
+  const state = String(snapshot.wakeWordState || '').trim().toLowerCase();
+  const liveState = String(snapshot.liveSessionState || '').trim().toLowerCase();
+  if (!snapshot.wakeWordEnabled || state === 'disabled') {
+    return 'Wake word is off';
+  }
+  if (state === 'unavailable') {
+    return snapshot.wakeWordUnavailableReason || 'Wake word unavailable';
+  }
+  if (state === 'starting') {
+    return `Arming "${phrase}"...`;
+  }
+  if (state === 'armed') {
+    if (liveState === 'disconnected') {
+      return `Wake word is listening. Say "${phrase}" to reconnect AI`;
+    }
+    return `Wake word is listening for "${phrase}"`;
+  }
+  if (snapshot.liveVoiceActive) {
+    return 'Wake word paused while voice is active';
+  }
+  return 'Wake word paused';
+}
+
 function inputPlaceholder(snapshot: RuntimeSnapshot): string {
   if (!snapshot.liveAvailable) {
     return snapshot.liveUnavailableReason || 'PixelPilot Live unavailable';
   }
-  if (snapshot.liveEnabled && snapshot.liveVoiceActive) {
+  if (snapshot.liveVoiceActive) {
     return 'Type or speak while the mic is active...';
   }
-  if (snapshot.liveEnabled) {
-    return 'Type or speak to PixelPilot Live...';
+  if (snapshot.wakeWordEnabled && String(snapshot.wakeWordState || '').trim().toLowerCase() === 'armed') {
+    if (String(snapshot.liveSessionState || '').trim().toLowerCase() === 'disconnected') {
+      return `Type a command or say "${snapshot.wakeWordPhrase}" to reconnect PixelPilot...`;
+    }
+    return `Type a command or say "${snapshot.wakeWordPhrase}"...`;
   }
-  return 'Turn AI on to chat with PixelPilot...';
+  if (String(snapshot.liveSessionState || '').trim().toLowerCase() === 'disconnected') {
+    return 'Type a command to reconnect PixelPilot...';
+  }
+  return 'Type a command...';
 }
 
 function latestAssistantEntry(entries: MessageEntry[], finalOnly = true): MessageEntry | null {
@@ -506,41 +533,47 @@ function liveButtonPresentation(
   if (!snapshot.liveAvailable) {
     return {
       state: 'disabled',
-      label: 'Enable live mode',
+      label: 'Reconnect live session',
       disabled: true,
       description: snapshot.liveUnavailableReason || 'PixelPilot Live unavailable'
     };
   }
 
-  if (!snapshot.liveEnabled) {
+  const state = String(snapshot.liveSessionState || '').trim().toLowerCase();
+  if (state === 'disconnected') {
+    const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
+    let description = 'AI is disconnected. Type or start voice to reconnect.';
+    if (snapshot.wakeWordEnabled && wakeWordState === 'armed') {
+      description = `AI is disconnected. Say "${snapshot.wakeWordPhrase}" to reconnect.`;
+    } else if (snapshot.wakeWordEnabled && wakeWordState === 'starting') {
+      description = `AI is disconnected. Arming "${snapshot.wakeWordPhrase}"...`;
+    } else if (snapshot.wakeWordEnabled && wakeWordState === 'unavailable') {
+      description = snapshot.wakeWordUnavailableReason || 'AI is disconnected. Wake word unavailable.';
+    }
     return {
-      state: pending ? 'connecting' : 'off',
-      label: 'Enable live mode',
+      state: pending ? 'connecting' : 'ready',
+      label: 'Reconnect live session',
       disabled: false,
-      description: pending ? 'Turning AI on...' : 'Turn AI on'
+      description: pending ? 'Reconnecting Gemini Live...' : description
     };
   }
 
-  const state = String(snapshot.liveSessionState || '').trim().toLowerCase();
   if (pending || state === 'connecting') {
-    return { state: 'connecting', label: 'Disable live mode', disabled: false, description: 'Connecting to AI...' };
+    return { state: 'connecting', label: 'Disconnect live session', disabled: false, description: 'Connecting to AI...' };
   }
   if (state === 'thinking') {
-    return { state: 'thinking', label: 'Disable live mode', disabled: false, description: 'AI is thinking' };
+    return { state: 'thinking', label: 'Disconnect live session', disabled: false, description: 'AI is thinking' };
   }
   if (state === 'waiting') {
-    return { state: 'waiting', label: 'Disable live mode', disabled: false, description: 'Waiting for the current action' };
+    return { state: 'waiting', label: 'Disconnect live session', disabled: false, description: 'Waiting for the current action' };
   }
   if (state === 'acting') {
-    return { state: 'acting', label: 'Disable live mode', disabled: false, description: 'AI is working on the task' };
+    return { state: 'acting', label: 'Disconnect live session', disabled: false, description: 'AI is working on the task' };
   }
   if (state === 'interrupted') {
-    return { state: 'interrupted', label: 'Disable live mode', disabled: false, description: 'AI was interrupted' };
+    return { state: 'interrupted', label: 'Disconnect live session', disabled: false, description: 'AI was interrupted' };
   }
-  if (state === 'disconnected') {
-    return { state: 'ready', label: 'Disable live mode', disabled: false, description: 'AI is on and ready' };
-  }
-  return { state: 'connected', label: 'Disable live mode', disabled: false, description: 'AI is on' };
+  return { state: 'connected', label: 'Disconnect live session', disabled: false, description: 'AI is connected' };
 }
 
 function micButtonPresentation(
@@ -556,12 +589,13 @@ function micButtonPresentation(
     };
   }
 
-  if (!snapshot.liveEnabled) {
+  const disconnected = String(snapshot.liveSessionState || '').trim().toLowerCase() === 'disconnected';
+  if (disconnected && !snapshot.liveVoiceActive) {
     return {
       state: pending ? 'listening_user' : 'idle',
-      label: 'Turn AI on and start voice',
+      label: 'Reconnect and start voice',
       disabled: false,
-      description: pending ? 'Turning AI on and starting voice...' : 'Turn AI on and start voice'
+      description: pending ? 'Reconnecting and starting voice...' : 'Reconnect and start voice'
     };
   }
 
@@ -644,6 +678,29 @@ function buildNotchProgress(
     return { text: 'Listening for your next instruction...', busy: false, tone: 'active' };
   }
 
+  if (snapshot.wakeWordEnabled) {
+    const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
+    if (wakeWordState === 'armed') {
+      if (String(snapshot.liveSessionState || '').trim().toLowerCase() === 'disconnected') {
+        return {
+          text: `Gemini Live is disconnected. Wake word is listening for "${snapshot.wakeWordPhrase}".`,
+          busy: false,
+          tone: 'active'
+        };
+      }
+      return { text: `Wake word is listening for "${snapshot.wakeWordPhrase}".`, busy: false, tone: 'active' };
+    }
+    if (wakeWordState === 'starting') {
+      return { text: `Arming "${snapshot.wakeWordPhrase}"...`, busy: true, tone: 'active' };
+    }
+    if (wakeWordState === 'paused') {
+      return { text: wakeWordStatusDescription(snapshot), busy: false, tone: 'idle' };
+    }
+    if (wakeWordState === 'unavailable' && snapshot.wakeWordUnavailableReason) {
+      return { text: snapshot.wakeWordUnavailableReason, busy: false, tone: 'error' };
+    }
+  }
+
   const stateText: Record<string, string> = {
     connecting: 'Connecting to PixelPilot Live...',
     thinking: 'Thinking about the current task...',
@@ -662,11 +719,11 @@ function buildNotchProgress(
     };
   }
 
-  if (snapshot.liveEnabled) {
-    return { text: 'PixelPilot is running in the background.', busy: false, tone: 'idle' };
+  if (liveState === 'disconnected') {
+    return { text: 'Gemini Live is disconnected. Tap to reconnect.', busy: false, tone: 'idle' };
   }
 
-  return { text: 'PixelPilot minimized.', busy: false, tone: 'idle' };
+  return { text: 'PixelPilot is running in the background.', busy: false, tone: 'idle' };
 }
 
 function PixelPilotLogo({ className = '' }: { className?: string }): React.JSX.Element {
@@ -1004,33 +1061,6 @@ function StatusPill({
     >
       {icon}
       <span>{label}</span>
-    </div>
-  );
-}
-
-function AudioMeter({
-  label,
-  level,
-  icon
-}: {
-  label: string;
-  level: number;
-  icon: React.ReactNode;
-}): React.JSX.Element {
-  const width = `${Math.max(6, Math.round(clamp(level) * 100))}%`;
-  return (
-    <div className="min-w-[110px]">
-      <div className="mb-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-        {icon}
-        <span>{label}</span>
-      </div>
-      <div className="h-2.5 rounded-full bg-white/24">
-        <motion.div
-          className="h-full rounded-full bg-slate-800"
-          animate={{ width }}
-          transition={{ type: 'spring', stiffness: 180, damping: 22 }}
-        />
-      </div>
     </div>
   );
 }
@@ -1448,112 +1478,6 @@ function LegacyDetailsPanel({
   );
 }
 
-function DetailsPanel({
-  snapshot,
-  messages,
-  updates,
-  runtimeError,
-  onStop
-}: {
-  snapshot: RuntimeSnapshot;
-  messages: MessageEntry[];
-  updates: ActionUpdate[];
-  runtimeError: string;
-  onStop: () => Promise<void>;
-}): React.JSX.Element {
-  const deferredMessages = useDeferredValue(messages);
-  const visibleMessages = useMemo(() => deferredMessages.slice(-8), [deferredMessages]);
-  const visibleUpdates = useMemo(() => updates.slice(-3).reverse(), [updates]);
-  const summaryLine = [
-    snapshot.operationMode,
-    snapshot.visionMode,
-    snapshot.workspace === 'agent' ? 'Agent desktop' : 'User desktop',
-    snapshot.liveAvailable ? humanizeState(snapshot.liveSessionState) : 'Offline'
-  ].join(' · ');
-
-  return (
-    <SoftPanel className="p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Process details</div>
-          <div className="mt-1 text-sm text-slate-700">{summaryLine}</div>
-        </div>
-        <button
-          type="button"
-          onClick={() => void onStop()}
-          disabled={!snapshot.liveEnabled}
-          className="no-drag rounded-2xl border border-white/40 bg-white/50 px-4 py-2.5 text-sm font-semibold text-slate-900 transition hover:bg-white/65 disabled:opacity-45"
-        >
-          Stop current turn
-        </button>
-      </div>
-
-      {!snapshot.liveAvailable && snapshot.liveUnavailableReason && (
-        <div className="mt-3 rounded-2xl border border-amber-200/80 bg-amber-50/80 px-3 py-2.5 text-sm text-amber-900">
-          {snapshot.liveUnavailableReason}
-        </div>
-      )}
-
-      {runtimeError && (
-        <div className="mt-3 rounded-2xl border border-rose-200/80 bg-rose-50/80 px-3 py-2.5 text-sm text-rose-900">
-          {runtimeError}
-        </div>
-      )}
-
-      <div className="mt-3 rounded-[22px] border border-white/35 bg-white/20 px-3 py-3">
-        {visibleUpdates.length > 0 && (
-          <div className="mb-3 space-y-1.5">
-            {visibleUpdates.map((update, index) => (
-              <div
-                key={update.action_id || update.name || `${update.status}-${index}`}
-                className="flex items-start gap-2 text-sm text-slate-700"
-              >
-                <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${actionTone(update.status)}`} />
-                <div className="min-w-0">
-                  <div className="truncate font-medium text-slate-900">
-                    {update.message || update.name || 'Live action'}
-                  </div>
-                  {(update.status || update.error) && (
-                    <div className="text-xs text-slate-500">{update.error || humanizeState(update.status || '')}</div>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Conversation</div>
-        <div className="space-y-2">
-        {visibleMessages.length > 0 ? (
-          visibleMessages.map((entry) => (
-            <div key={entry.id} className={messageBubbleClass(entry)}>
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                {speakerLabel(entry)}
-              </div>
-              <div className="text-sm">{entry.text}</div>
-              {!entry.final && <div className="mt-1 text-[11px] text-slate-500">Streaming...</div>}
-            </div>
-          ))
-        ) : (
-          <div className="rounded-2xl border border-dashed border-white/34 bg-white/18 px-3 py-3 text-sm text-slate-600">
-            Open apps, send emails/WhatsApp, fix PC issues, or ask anything...
-          </div>
-        )}
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-4">
-        <AudioMeter label="You" level={snapshot.userAudioLevel} icon={<Mic className="h-3.5 w-3.5" />} />
-        <AudioMeter
-          label="Assistant"
-          level={snapshot.assistantAudioLevel}
-          icon={<Waves className="h-3.5 w-3.5" />}
-        />
-      </div>
-    </SoftPanel>
-  );
-}
-
 function OverlayShell({
   snapshot,
   messages,
@@ -1574,17 +1498,15 @@ function OverlayShell({
   const [localError, setLocalError] = useState('');
   const [pendingLiveToggle, setPendingLiveToggle] = useState(false);
   const [pendingVoiceToggle, setPendingVoiceToggle] = useState(false);
-  const [optimisticLiveEnabled, setOptimisticLiveEnabled] = useState<boolean | null>(null);
   const [optimisticLiveVoiceActive, setOptimisticLiveVoiceActive] = useState<boolean | null>(null);
   const submittingRef = useRef(false);
   const shellRef = useRef<HTMLDivElement>(null);
   const effectiveSnapshot = useMemo(
     () => ({
       ...snapshot,
-      liveEnabled: optimisticLiveEnabled ?? snapshot.liveEnabled,
       liveVoiceActive: optimisticLiveVoiceActive ?? snapshot.liveVoiceActive
     }),
-    [optimisticLiveEnabled, optimisticLiveVoiceActive, snapshot]
+    [optimisticLiveVoiceActive, snapshot]
   );
   const isBarOnly = !effectiveSnapshot.expanded;
   const commandBarStatus = useMemo(
@@ -1604,20 +1526,13 @@ function OverlayShell({
   const inlineStatusOverridesInput =
     commandBarStatus.kind === 'busy' || commandBarStatus.kind === 'error';
   const showInlineStop =
-    effectiveSnapshot.liveEnabled && hasOngoingLiveTurn(effectiveSnapshot, actionUpdates, busyText);
+    effectiveSnapshot.liveAvailable && hasOngoingLiveTurn(effectiveSnapshot, actionUpdates, busyText);
   const inlineStatusToneClass =
     commandBarStatus.tone === 'error'
       ? 'text-rose-600'
       : commandBarStatus.tone === 'placeholder'
         ? 'text-slate-500'
         : 'text-slate-600';
-
-  useEffect(() => {
-    if (optimisticLiveEnabled !== null && snapshot.liveEnabled === optimisticLiveEnabled) {
-      setOptimisticLiveEnabled(null);
-      setPendingLiveToggle(false);
-    }
-  }, [optimisticLiveEnabled, snapshot.liveEnabled]);
 
   useEffect(() => {
     if (optimisticLiveVoiceActive !== null && snapshot.liveVoiceActive === optimisticLiveVoiceActive) {
@@ -1633,7 +1548,6 @@ function OverlayShell({
   useMeasuredWindowLayout(shellRef, fallbackLayout, [
     isBarOnly,
     effectiveSnapshot.expanded,
-    effectiveSnapshot.liveEnabled,
     effectiveSnapshot.liveVoiceActive,
     effectiveSnapshot.liveAvailable,
     effectiveSnapshot.operationMode,
@@ -1709,32 +1623,28 @@ function OverlayShell({
       return;
     }
 
-    const nextEnabled = !effectiveSnapshot.liveEnabled;
+    const liveState = String(effectiveSnapshot.liveSessionState || '').trim().toLowerCase();
+    const requestReconnect = liveState === 'disconnected';
     setLocalError('');
-    setBusyText(nextEnabled ? 'Turning AI on...' : 'Turning AI off...');
+    setBusyText(requestReconnect ? 'Reconnecting AI session...' : 'Disconnecting AI session...');
     setPendingLiveToggle(true);
-    setOptimisticLiveEnabled(nextEnabled);
-    if (!nextEnabled) {
+    if (!requestReconnect) {
       setOptimisticLiveVoiceActive(false);
     }
 
     try {
-      const payload = await window.pixelPilot.invokeRuntime('live.setEnabled', { enabled: nextEnabled });
-      if (typeof payload.liveEnabled === 'boolean') {
-        setOptimisticLiveEnabled(Boolean(payload.liveEnabled));
-      }
-      if (!nextEnabled) {
+      await window.pixelPilot.invokeRuntime('live.setEnabled', { enabled: requestReconnect });
+      if (!requestReconnect) {
         setOptimisticLiveVoiceActive(false);
         setPendingVoiceToggle(false);
       }
       setPendingLiveToggle(false);
       setBusyText('');
     } catch (error) {
-      setOptimisticLiveEnabled(null);
       setOptimisticLiveVoiceActive(null);
       setPendingLiveToggle(false);
       setBusyText('');
-      setLocalError(error instanceof Error ? error.message : 'Unable to change AI power right now.');
+      setLocalError(error instanceof Error ? error.message : 'Unable to change the Live connection right now.');
     }
   };
 
@@ -1747,28 +1657,27 @@ function OverlayShell({
       return;
     }
 
-    const startingFromOff = !effectiveSnapshot.liveEnabled;
-    const nextVoiceState = startingFromOff ? true : !effectiveSnapshot.liveVoiceActive;
+    const liveState = String(effectiveSnapshot.liveSessionState || '').trim().toLowerCase();
+    const startingFromDisconnected = liveState === 'disconnected' && !effectiveSnapshot.liveVoiceActive;
+    const nextVoiceState = startingFromDisconnected ? true : !effectiveSnapshot.liveVoiceActive;
     setLocalError('');
     setBusyText(
       nextVoiceState
-        ? startingFromOff
-          ? 'Turning AI on and starting voice...'
+        ? startingFromDisconnected
+          ? 'Reconnecting and starting voice...'
           : 'Starting voice input...'
         : 'Stopping voice input...'
     );
     setPendingVoiceToggle(true);
 
     try {
-      if (startingFromOff) {
+      if (startingFromDisconnected) {
         setPendingLiveToggle(true);
-        setOptimisticLiveEnabled(true);
         const liveResult = await window.pixelPilot.invokeRuntime('live.setEnabled', { enabled: true });
-        const liveEnabled = typeof liveResult.liveEnabled === 'boolean' ? Boolean(liveResult.liveEnabled) : true;
-        setOptimisticLiveEnabled(liveEnabled);
         setPendingLiveToggle(false);
-        if (!liveEnabled) {
-          throw new Error('PixelPilot could not turn AI on.');
+        const sessionState = String(liveResult.liveSessionState || '').trim().toLowerCase();
+        if (sessionState === 'disconnected') {
+          throw new Error('PixelPilot could not reconnect right now.');
         }
       }
 
@@ -1780,7 +1689,6 @@ function OverlayShell({
       setPendingVoiceToggle(false);
       setBusyText('');
     } catch (error) {
-      setOptimisticLiveEnabled(null);
       setOptimisticLiveVoiceActive(null);
       setPendingLiveToggle(false);
       setPendingVoiceToggle(false);
@@ -1833,7 +1741,7 @@ function OverlayShell({
         <input
           value={commandText}
           onChange={(event) => setCommandText(event.target.value)}
-          readOnly={!effectiveSnapshot.liveEnabled}
+          readOnly={!effectiveSnapshot.liveAvailable}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault();
@@ -1864,7 +1772,7 @@ function OverlayShell({
         type="button"
         aria-label="Send command"
         onClick={() => void submitCommand()}
-        disabled={!effectiveSnapshot.liveEnabled || !commandText.trim()}
+        disabled={!effectiveSnapshot.liveAvailable || !commandText.trim()}
         className="no-drag flex h-8 min-w-[38px] items-center justify-center rounded-xl bg-slate-900 px-2.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white transition hover:bg-slate-800 disabled:opacity-40"
       >
         Go
@@ -1980,9 +1888,9 @@ function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.E
     shellRef,
     {
       width: 220,
-      height: localError ? 284 : 252
+      height: localError ? 356 : 324
     },
-    [localError, snapshot.operationMode, snapshot.visionMode]
+    [localError, snapshot.operationMode, snapshot.visionMode, snapshot.wakeWordEnabled, snapshot.wakeWordState]
   );
 
   const runMenuAction = async (method: string, payload?: Record<string, unknown>): Promise<void> => {
@@ -2027,6 +1935,18 @@ function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.E
           />
         ))}
         <div className="mx-1 my-1 h-px bg-[#e2e8f0]" />
+        <div className="px-3.5 py-1.5 text-[12px] font-semibold text-slate-500">
+          Wake Word
+        </div>
+        <MenuItemButton
+          label={snapshot.wakeWordEnabled ? 'Wake word on' : 'Wake word off'}
+          active={snapshot.wakeWordEnabled}
+          onClick={() => void runMenuAction('wakeWord.setEnabled', { enabled: !snapshot.wakeWordEnabled })}
+        />
+        <div className="px-3.5 pb-2 text-[11px] text-slate-500">
+          {wakeWordStatusDescription(snapshot)}
+        </div>
+        <div className="mx-1 my-1 h-px bg-[#e2e8f0]" />
         <button
           type="button"
           onClick={() => void runMenuAction('auth.logout')}
@@ -2055,7 +1975,7 @@ function NotchShell({
 }): React.JSX.Element {
   const [localError, setLocalError] = useState('');
   const progress = buildNotchProgress(snapshot, actionUpdates, localError || runtimeError);
-  useWindowLayout({ width: 420, height: 76 });
+  useWindowLayout({ width: 420, height: 62 });
 
   const restoreOverlay = async (): Promise<void> => {
     setLocalError('');
@@ -2066,47 +1986,79 @@ function NotchShell({
     }
   };
 
+  const runInTrayOnly = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await window.pixelPilot.setTrayOnly(true);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to switch to tray-only mode right now.');
+    }
+  };
+
   return (
     <motion.div
       className="mx-auto w-[420px]"
       initial={{ opacity: 0, y: -10 }}
       animate={{ opacity: 1, y: 0 }}
     >
-      <button
-        type="button"
-        aria-label="Restore overlay"
-        onClick={() => void restoreOverlay()}
-        className={`${activeShell} no-drag block w-full rounded-b-[26px] px-4 py-3 text-left transition hover:bg-white/32`}
+      <div
+        className={[
+          'drag-region no-drag rounded-b-[22px] border border-white/24 backdrop-blur-2xl',
+          'bg-[rgba(236,245,255,0.12)] px-3 py-2.5',
+          'shadow-[0_10px_34px_rgba(15,23,42,0.24)]'
+        ].join(' ')}
       >
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-white/40 bg-white/22">
-            <PixelPilotLogo className="h-5 w-5" />
-          </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-label="Run in tray only"
+            title="Run in tray only"
+            onClick={() => void runInTrayOnly()}
+            className="no-drag flex h-6 w-6 items-center justify-center rounded-full border border-white/30 bg-white/12 text-slate-200 transition hover:bg-white/22"
+          >
+            <Minus className="h-3.5 w-3.5" />
+          </button>
+
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-semibold text-slate-900">{progress.text}</div>
+            <div className="truncate text-[13px] font-medium text-slate-900">{progress.text}</div>
           </div>
+
+          <button
+            type="button"
+            aria-label="Restore overlay"
+            title="Restore overlay"
+            onClick={() => void restoreOverlay()}
+            className="no-drag flex h-6 w-6 items-center justify-center rounded-full border border-cyan-200/70 bg-cyan-100/28 text-cyan-900 transition hover:bg-cyan-100/45"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </button>
         </div>
-        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/38">
+
+        <div className="mt-2.5 h-[3px] overflow-hidden rounded-full bg-white/20">
           {progress.busy ? (
             <motion.div
-              className="h-full w-[34%] rounded-full bg-slate-900/78"
+              className="h-full w-[34%] rounded-full bg-cyan-300/90"
               animate={{ x: ['-120%', '260%'] }}
-              transition={{ duration: 1.7, ease: 'linear', repeat: Number.POSITIVE_INFINITY }}
+              transition={{ duration: 1.5, ease: 'linear', repeat: Number.POSITIVE_INFINITY }}
             />
           ) : (
             <div
               className={[
                 'h-full rounded-full',
                 progress.tone === 'error'
-                  ? 'w-[28%] bg-rose-500/78'
+                  ? 'w-[28%] bg-rose-400/90'
                   : progress.tone === 'active'
-                    ? 'w-[38%] bg-sky-500/72'
-                    : 'w-[18%] bg-slate-400/70'
+                    ? 'w-[42%] bg-cyan-300/88'
+                    : 'w-[16%] bg-slate-300/80'
               ].join(' ')}
             />
           )}
         </div>
-      </button>
+
+        {localError && (
+          <div className="mt-2 truncate text-[11px] text-rose-200">{localError}</div>
+        )}
+      </div>
     </motion.div>
   );
 }

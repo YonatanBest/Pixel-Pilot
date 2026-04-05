@@ -524,6 +524,26 @@ def _apply_window_show_state(handle: int, *, restore: bool, maximize: bool) -> N
         pass
 
 
+def _foreground_window_handle() -> int:
+    try:
+        user32 = ctypes.windll.user32
+        return int(user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
+def _root_window_handle(handle: int) -> int:
+    if handle <= 0:
+        return 0
+    try:
+        user32 = ctypes.windll.user32
+        # GA_ROOT = 2
+        root = int(user32.GetAncestor(int(handle), 2) or 0)
+        return root or int(handle)
+    except Exception:
+        return int(handle)
+
+
 def _resolve_element_control(
     workspace: str,
     target_id: str,
@@ -990,13 +1010,40 @@ def focus_window(
         handle = int(target.get("handle") or 0)
         _apply_window_show_state(handle, restore=bool(restore), maximize=bool(maximize))
         success, method = _apply_focus(control)
+        focus_method = method
+
+        foreground_handle = _foreground_window_handle()
+        foreground_ok = handle <= 0 or foreground_handle <= 0 or foreground_handle == handle
+
+        if success and not foreground_ok:
+            for _ in range(2):
+                _apply_window_show_state(handle, restore=bool(restore), maximize=bool(maximize))
+                retry_success, retry_method = _apply_focus(control)
+                if retry_method:
+                    focus_method = retry_method
+                success = bool(retry_success)
+                foreground_handle = _foreground_window_handle()
+                foreground_ok = (
+                    handle <= 0 or foreground_handle <= 0 or foreground_handle == handle
+                )
+                if success and foreground_ok:
+                    break
+                time.sleep(0.04)
+
+        reason = "ok" if success and foreground_ok else "focus_failed"
+        if success and not foreground_ok:
+            reason = "foreground_mismatch"
+            success = False
+
         return {
             "success": bool(success),
-            "reason": "ok" if success else "focus_failed",
+            "reason": reason,
             "workspace": workspace,
             "window": target,
             "window_id": target.get("window_id"),
-            "method": method,
+            "method": focus_method,
+            "target_handle": handle,
+            "foreground_handle": foreground_handle,
         }
 
     try:
@@ -1007,6 +1054,102 @@ def focus_window(
             "reason": "runtime_error",
             "workspace": workspace,
             "window_id": target_window_id or None,
+            "error": str(exc),
+        }
+
+
+def focus_window_at_point(
+    workspace: str,
+    desktop_manager: Any,
+    x: int,
+    y: int,
+) -> dict[str, Any]:
+    workspace = (workspace or "user").strip().lower()
+    try:
+        target_x = int(x)
+        target_y = int(y)
+    except Exception:
+        return {
+            "success": False,
+            "reason": "invalid_args",
+            "workspace": workspace,
+            "x": x,
+            "y": y,
+        }
+
+    if workspace == "agent":
+        if not desktop_manager or not getattr(desktop_manager, "is_created", False):
+            return {
+                "success": False,
+                "reason": "desktop_unavailable",
+                "workspace": workspace,
+                "x": target_x,
+                "y": target_y,
+            }
+        try:
+            handle = int(desktop_manager.get_window_at_point(target_x, target_y) or 0)
+            if handle <= 0:
+                return {
+                    "success": False,
+                    "reason": "not_found",
+                    "workspace": workspace,
+                    "x": target_x,
+                    "y": target_y,
+                }
+            desktop_manager.set_foreground_window(handle)
+            return {
+                "success": True,
+                "reason": "ok",
+                "workspace": workspace,
+                "x": target_x,
+                "y": target_y,
+                "handle": handle,
+                "method": "desktop_manager.set_foreground_window",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "reason": "runtime_error",
+                "workspace": workspace,
+                "x": target_x,
+                "y": target_y,
+                "error": str(exc),
+            }
+
+    try:
+        user32 = ctypes.windll.user32
+        point = ctypes.wintypes.POINT(target_x, target_y)
+        raw_handle = int(user32.WindowFromPoint(point) or 0)
+        if raw_handle <= 0:
+            return {
+                "success": False,
+                "reason": "not_found",
+                "workspace": workspace,
+                "x": target_x,
+                "y": target_y,
+            }
+
+        target_handle = _root_window_handle(raw_handle)
+        user32.SetForegroundWindow(target_handle)
+        foreground_handle = _foreground_window_handle()
+        success = foreground_handle <= 0 or foreground_handle == target_handle
+        return {
+            "success": bool(success),
+            "reason": "ok" if success else "foreground_mismatch",
+            "workspace": workspace,
+            "x": target_x,
+            "y": target_y,
+            "handle": target_handle,
+            "foreground_handle": foreground_handle,
+            "method": "SetForegroundWindow",
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "reason": "runtime_error",
+            "workspace": workspace,
+            "x": target_x,
+            "y": target_y,
             "error": str(exc),
         }
 

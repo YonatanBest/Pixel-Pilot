@@ -25,6 +25,7 @@ const pixelPilot: PixelPilotApi = {
   setExpanded: (expanded: boolean) => invokeIpc<Record<string, unknown>>('pixelpilot:set-expanded', expanded),
   setBackgroundHidden: (hidden: boolean) =>
     invokeIpc<Record<string, unknown>>('pixelpilot:set-background-hidden', hidden),
+  setTrayOnly: (enabled: boolean) => invokeIpc<Record<string, unknown>>('pixelpilot:set-tray-only', enabled),
   toggleSettingsWindow: () => invokeIpc<{ visible: boolean }>('pixelpilot:toggle-settings-window'),
   closeSettingsWindow: () => invokeIpc<{ visible: boolean }>('pixelpilot:close-settings-window'),
   updateWindowLayout: (payload) => invokeIpc<void>('pixelpilot:update-window-layout', payload),

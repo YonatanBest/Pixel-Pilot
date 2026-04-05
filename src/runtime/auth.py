@@ -43,7 +43,6 @@ def save_api_key(value: str) -> dict[str, Any]:
     os.environ["GEMINI_API_KEY"] = api_key
     Config.GEMINI_API_KEY = api_key
     Config.USE_DIRECT_API = True
-    Config.LIVE_MODE_AVAILABLE = bool(Config.ENABLE_GEMINI_LIVE_MODE)
     return get_auth_state()
 
 

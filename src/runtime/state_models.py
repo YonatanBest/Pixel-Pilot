@@ -51,6 +51,8 @@ class UiStateStore(QObject):
     liveEnabledChanged = Signal()
     liveVoiceActiveChanged = Signal()
     liveSessionStateChanged = Signal()
+    wakeWordEnabledChanged = Signal()
+    wakeWordStateChanged = Signal()
     userAudioLevelChanged = Signal()
     assistantAudioLevelChanged = Signal()
     expandedChanged = Signal()
@@ -67,11 +69,15 @@ class UiStateStore(QObject):
         self._operation_mode = _normalize_mode(Config.DEFAULT_MODE)
         self._vision_mode = "ROBO" if Config.USE_ROBOTICS_EYE else "OCR"
         self._workspace = _normalize_workspace(Config.DEFAULT_WORKSPACE)
-        self._live_available = bool(Config.LIVE_MODE_AVAILABLE)
+        self._live_available = True
         self._live_unavailable_reason = ""
-        self._live_enabled = bool(self._live_available and Config.LIVE_MODE_DEFAULT_ENABLED)
-        self._live_voice_active = bool(self._live_enabled and Config.LIVE_MODE_DEFAULT_VOICE_ENABLED)
+        self._live_enabled = bool(self._live_available)
+        self._live_voice_active = False
         self._live_session_state = "disconnected"
+        self._wake_word_enabled = bool(Config.ENABLE_WAKE_WORD)
+        self._wake_word_state = "starting" if self._wake_word_enabled else "disabled"
+        self._wake_word_phrase = str(Config.WAKE_WORD_PHRASE or "Hey Pixie").strip() or "Hey Pixie"
+        self._wake_word_unavailable_reason = ""
         self._user_audio_level = 0.0
         self._assistant_audio_level = 0.0
         self._expanded = False
@@ -177,6 +183,59 @@ class UiStateStore(QObject):
             return
         self._live_session_state = normalized
         self.liveSessionStateChanged.emit()
+
+    @Property(bool, notify=wakeWordEnabledChanged)
+    def wakeWordEnabled(self) -> bool:
+        return self._wake_word_enabled
+
+    def set_wake_word_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled and Config.ENABLE_WAKE_WORD)
+        state_changed = False
+        if enabled != self._wake_word_enabled:
+            self._wake_word_enabled = enabled
+            self.wakeWordEnabledChanged.emit()
+        if not enabled and self._wake_word_state != "disabled":
+            self._wake_word_state = "disabled"
+            state_changed = True
+        if not enabled and self._wake_word_unavailable_reason:
+            self._wake_word_unavailable_reason = ""
+            state_changed = True
+        if state_changed:
+            self.wakeWordStateChanged.emit()
+
+    @Property(str, notify=wakeWordStateChanged)
+    def wakeWordState(self) -> str:
+        return self._wake_word_state
+
+    @Property(str, notify=wakeWordStateChanged)
+    def wakeWordPhrase(self) -> str:
+        return self._wake_word_phrase
+
+    @Property(str, notify=wakeWordStateChanged)
+    def wakeWordUnavailableReason(self) -> str:
+        return self._wake_word_unavailable_reason
+
+    def set_wake_word_phrase(self, phrase: str) -> None:
+        normalized = str(phrase or "Hey Pixie").strip() or "Hey Pixie"
+        if normalized == self._wake_word_phrase:
+            return
+        self._wake_word_phrase = normalized
+        self.wakeWordStateChanged.emit()
+
+    def set_wake_word_state(self, state: str, reason: str = "") -> None:
+        normalized = str(state or "disabled").strip().lower() or "disabled"
+        if normalized not in {"disabled", "starting", "armed", "paused", "unavailable"}:
+            normalized = "disabled"
+        clean_reason = str(reason or "").strip()
+        changed = False
+        if normalized != self._wake_word_state:
+            self._wake_word_state = normalized
+            changed = True
+        if clean_reason != self._wake_word_unavailable_reason:
+            self._wake_word_unavailable_reason = clean_reason
+            changed = True
+        if changed:
+            self.wakeWordStateChanged.emit()
 
     @Property(float, notify=userAudioLevelChanged)
     def userAudioLevel(self) -> float:

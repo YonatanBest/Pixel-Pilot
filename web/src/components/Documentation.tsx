@@ -2,12 +2,8 @@ import './Documentation.css';
 
 const envVars = [
     { key: 'GEMINI_API_KEY', note: 'Required' },
-    { key: 'GEMINI_MODEL', note: 'Default: gemini-3-flash-preview' },
-    { key: 'DEFAULT_MODE', note: 'guide | safe | auto' },
-    { key: 'VISION_MODE', note: 'robo | ocr' },
-    { key: 'LIVE_MODE_DEFAULT_VOICE_ENABLED', note: 'Optional: true | false' },
-    { key: 'ENABLE_GATEWAY', note: 'Optional: true | false' },
-    { key: 'PIXELPILOT_GATEWAY_TOKEN', note: 'Optional' }
+    { key: 'BACKEND_URL', note: 'Required for backend mode' },
+    { key: 'Advanced tuning', note: 'Edit src/config.py for all other runtime values' }
 ];
 
 export const Documentation = () => {

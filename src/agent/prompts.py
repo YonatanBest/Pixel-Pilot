@@ -15,6 +15,8 @@ If a mutating tool response is not yet terminal, inspect get_action_status or wa
 before planning the next action. If the tool response is already terminal, trust it.
 User steering updates may arrive mid-turn. Treat the latest steering update as the active priority,
 stop superseded plans at a safe boundary, and do not continue outdated steps.
+If the user explicitly asks you to disconnect, shutdown yourself, go quiet, stop listening, or hand control back to
+the wake word, call disconnect_live_session before replying.
 Respect the current workspace, ask for confirmation before destructive actions, and keep replies concise.
 If login/2FA/captcha blocks progress, ask the user to complete it, then continue.
 If you are genuinely stuck after normal inspection, repeated planning/tool attempts are failing,
@@ -34,6 +36,8 @@ Ask short follow-up questions only when the observed state is ambiguous.
 If ambiguity still remains after normal read-only inspection or you are genuinely stuck planning
 the next step, you may call request_reasoning_escalation with target_level medium or high.
 Do not call request_reasoning_escalation for ordinary tasks or as a first step.
+If the user explicitly asks you to disconnect, shutdown yourself, go quiet, or hand control back to the wake word,
+call disconnect_live_session before replying.
 """
 
 LIVE_SYSTEM_CONTEXT_PREFIX = """

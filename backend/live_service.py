@@ -363,10 +363,23 @@ class BackendLiveSession:
 
     async def _ensure_session_with_retry(self, retries: int = 1):
         attempt = 0
+        retried_without_resumption = False
         while True:
             try:
                 return await self._ensure_session()
             except Exception as exc:  # noqa: BLE001
+                if self._is_nonrecoverable_request_error(exc):
+                    had_resume_handle = bool(str(self._resume_handle or "").strip())
+                    if had_resume_handle and not retried_without_resumption:
+                        retried_without_resumption = True
+                        self._clear_resume_handle(reason=f"connect_rejected: {exc}")
+                        logger.warning(
+                            "Backend live connect rejected resumption handle; retrying once without resumption."
+                        )
+                        await self._disconnect_provider()
+                        await asyncio.sleep(0.05)
+                        continue
+                    raise
                 if attempt >= retries or not self._is_recoverable_connection_error(exc):
                     raise
                 delay_s = 0.75 * (attempt + 1)
@@ -398,6 +411,16 @@ class BackendLiveSession:
         self._session_cm = None
         self._session = None
 
+    def _clear_resume_handle(self, *, reason: str = "") -> None:
+        handle = str(self._resume_handle or "").strip()
+        if not handle:
+            return
+        logger.warning(
+            "Clearing backend Gemini Live session resumption handle%s.",
+            f" ({reason})" if str(reason or "").strip() else "",
+        )
+        self._resume_handle = None
+
     def _build_connect_config(self) -> dict[str, Any]:
         config = copy.deepcopy(self._connect_config)
         config.pop("model", None)
@@ -419,8 +442,8 @@ class BackendLiveSession:
                 logger.debug("Failed to refresh live lease heartbeat", exc_info=True)
 
     async def _receive_loop(self) -> None:
-        try:
-            while not self._closed and self._session is not None:
+        while not self._closed and self._session is not None:
+            try:
                 received_messages = False
                 async for response in self._session.receive():
                     received_messages = True
@@ -435,36 +458,55 @@ class BackendLiveSession:
 
                 if self._closed:
                     return
+                if received_messages:
+                    logger.debug(
+                        "Backend live receive stream ended after events; re-subscribing to provider stream."
+                    )
+                    await asyncio.sleep(0.05)
+                    continue
+
                 logger.warning(
-                    "Backend live receive stream ended%s; reconnecting with resumption.",
-                    "" if received_messages else " before any messages",
+                    "Backend live receive stream ended before any messages; reconnecting with resumption."
                 )
                 try:
                     await self._reconnect_with_resume()
                     continue
                 except Exception as reconnect_exc:  # noqa: BLE001
                     await self._send_error(self._translate_provider_exception(reconnect_exc))
-                    return
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            if not self._closed and self._is_recoverable_connection_error(exc):
-                logger.warning("Backend live receive lost connection; reconnecting: %s", exc)
-                try:
-                    await self._reconnect_with_resume()
-                    self._receive_task = asyncio.create_task(self._receive_loop())
-                    return
-                except Exception as reconnect_exc:  # noqa: BLE001
-                    await self._send_error(self._translate_provider_exception(reconnect_exc))
-            elif not self._closed:
-                await self._send_error(self._translate_provider_exception(exc))
+                    break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if not self._closed and self._is_recoverable_connection_error(exc):
+                    logger.warning("Backend live receive lost connection; reconnecting: %s", exc)
+                    try:
+                        await self._reconnect_with_resume()
+                        continue
+                    except Exception as reconnect_exc:  # noqa: BLE001
+                        await self._send_error(self._translate_provider_exception(reconnect_exc))
+                        break
+                elif not self._closed and self._is_nonrecoverable_request_error(exc):
+                    self._clear_resume_handle(reason=f"receive_error: {exc}")
+                    await self._send_error(
+                        LiveSessionError(
+                            400,
+                            "Gemini Live rejected the request (invalid argument). "
+                            "Session disconnected to prevent reconnect loops.",
+                        )
+                    )
+                    break
+                elif not self._closed:
+                    await self._send_error(self._translate_provider_exception(exc))
+                    break
+                else:
+                    break
         if not self._closed:
             await self.stop(notify_client=True)
 
     async def _reconnect_with_resume(self) -> None:
         await self._disconnect_provider()
         if not self._closed:
-            await self._ensure_session()
+            await self._ensure_session_with_retry()
 
     async def _send_json(self, payload: dict[str, Any]) -> None:
         async with self._send_lock:
@@ -519,4 +561,28 @@ class BackendLiveSession:
             or "ping timeout" in message
             or "no close frame received" in message
             or "keepalive ping timeout" in message
+        )
+
+    @staticmethod
+    def _is_nonrecoverable_request_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        status = getattr(exc, "status", None)
+        status_code = getattr(exc, "status_code", None)
+        code = getattr(exc, "code", None)
+
+        numeric_codes = {
+            str(value).strip().lower()
+            for value in (status, status_code, code)
+            if value is not None
+        }
+        if "1007" in numeric_codes:
+            return True
+
+        return (
+            "1007 none" in message
+            or "received 1007" in message
+            or "sent 1007" in message
+            or "invalid frame payload data" in message
+            or "request contains an invalid argument" in message
+            or "request contains invalid argument" in message
         )

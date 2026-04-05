@@ -79,6 +79,21 @@ def _normalize_function_call_args(raw_args: Any) -> dict[str, Any]:
     return {}
 
 
+def _is_clean_live_close_error(exc: Exception) -> bool:
+    status = getattr(exc, "status", None)
+    message = str(exc or "").strip().lower()
+    name = exc.__class__.__name__.lower()
+    if status == 1000:
+        return True
+    if "connectionclosedok" in name:
+        return True
+    if "sent 1000 (ok)" in message or "received 1000 (ok)" in message:
+        return True
+    if message in {"1000 none", "1000 none."}:
+        return True
+    return False
+
+
 def _normalize_provider_response(response: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {}
 
@@ -320,8 +335,14 @@ class DirectGeminiLiveTransport(BaseLiveTransport):
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         if self._session is None:
             return
-        async for response in self._session.receive():
-            yield _normalize_provider_response(response)
+        try:
+            async for response in self._session.receive():
+                yield _normalize_provider_response(response)
+        except Exception as exc:  # noqa: BLE001
+            if _is_clean_live_close_error(exc):
+                logger.info("Direct Gemini Live stream closed cleanly (status=1000).")
+                return
+            raise
 
     async def close(self, *, close_client: bool = False) -> None:
         del close_client

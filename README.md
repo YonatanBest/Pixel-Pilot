@@ -27,8 +27,10 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
 - `user` workspace: click-through is ON only while a mutating Live action is `queued`, `running`, or `cancel_requested`; otherwise OFF.
 
 ### Live startup default
-- When Live is available, AI power starts ON by default.
-- Turning AI OFF disconnects Gemini Live, stops voice, and disables typed/voice input until AI is turned back on.
+- When Live is available, Live control stays enabled and the session starts disconnected.
+- Gemini Live voice no longer grabs the microphone at startup by default.
+- Local wake-word listening can arm at startup and hand the mic off to Gemini Live on demand.
+- The Live button disconnects or reconnects the session; there is no separate AI off mode.
 
 ### Focus restore on passthrough transitions
 - When click-through is disabled, PixelPilot stores the last external foreground window handle.
@@ -79,7 +81,7 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
 - AI: Google GenAI SDK (`google-genai`)
 - Vision: EasyOCR, OpenCV, Pillow
 - Automation: pyautogui, ctypes/Win32, keyboard, UIAutomation (`uiautomation`)
-- Live mode audio: PyAudio
+- Live mode audio: PyAudio + openWakeWord wake-word detection
 - Optional backend: FastAPI + MongoDB + Redis + JWT
 - Optional web portal: React + TypeScript + Vite (`web/`)
 
@@ -116,51 +118,14 @@ Create `.env` in repo root (you can start from `env.example`).
 
 ```env
 GEMINI_API_KEY=your_api_key_here
-GEMINI_MODEL=gemini-3-flash-preview
-
-ENABLE_GEMINI_LIVE_MODE=true
-LIVE_MODE_DEFAULT_ENABLED=true
-LIVE_MODE_DEFAULT_VOICE_ENABLED=true
-GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
-LIVE_VOICE_NAME=Leda
-LIVE_ENABLE_IMAGE_INPUT=true
-LIVE_ENABLE_VIDEO_STREAM=false
-LIVE_ENABLE_CONTEXT_WINDOW_COMPRESSION=true
-LIVE_VIDEO_FPS=1
-LIVE_AUDIO_INPUT_RATE=16000
-LIVE_AUDIO_OUTPUT_RATE=24000
-LIVE_AUDIO_SPEAKER_QUEUE_MAX_CHUNKS=192
-LIVE_AUDIO_LOSSLESS_QUEUE_MAX_CHUNKS=192
-LIVE_AUDIO_SPEAKER_QUEUE_TRIM_TO_CHUNKS=144
-LIVE_AUDIO_SPEAKER_BATCH_MAX_CHUNKS=8
-LIVE_AUDIO_SPEAKER_BATCH_MAX_BYTES=65536
-LIVE_AUDIO_LOSSLESS_MODE=true
-LIVE_AUDIO_MIC_SUPPRESS_TAIL_MS=220
-LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE=105
-
-DEFAULT_MODE=auto
-VISION_MODE=ocr
 BACKEND_URL=your_backend_url
-
-# optional
-ENABLE_GATEWAY=false
-GATEWAY_HOST=localhost
-GATEWAY_PORT=8765
-GATEWAY_COMMAND_TIMEOUT_SECONDS=120
-PIXELPILOT_GATEWAY_TOKEN=
 ```
 
 Notes:
 - Live mode works in direct mode with a local `GEMINI_API_KEY`, or in backend mode after sign-in when `BACKEND_URL` is configured.
-- `LIVE_MODE_DEFAULT_ENABLED=true` means AI power starts enabled whenever Live is available.
-- `LIVE_MODE_DEFAULT_VOICE_ENABLED=true` means the mic starts with AI power at startup.
-- `LIVE_VOICE_NAME=Leda` selects the prebuilt Live voice. Google documents voice names/styles, not gender labels; `Leda` is listed as a `Youthful` voice and is used here as the closest fit for a girl voice.
-- `LIVE_ENABLE_IMAGE_INPUT=true` keeps still-image context available for Gemini 3.1 Flash Live without forcing a continuous video stream.
-- `LIVE_ENABLE_VIDEO_STREAM=false` avoids always-on 1 FPS screen streaming by default, which is especially important on Gemini 3.1 Flash Live because video frames are included in turn coverage.
-- `LIVE_ENABLE_CONTEXT_WINDOW_COMPRESSION=true` keeps long Live sessions resumable beyond the default audio/video session limits.
-- `LIVE_AUDIO_LOSSLESS_MODE=true` keeps assistant audio lossless while using bounded backpressure instead of an unbounded queue.
-- `LIVE_AUDIO_LOSSLESS_QUEUE_MAX_CHUNKS` caps how far lossless playback can lag before the receive loop slows down to match the speaker.
-- If `GEMINI_API_KEY` is missing, app uses backend auth/proxy mode.
+- `env.example` is intentionally minimal. Advanced runtime tuning values live in `src/config.py`.
+- Wake word now starts enabled whenever `ENABLE_WAKE_WORD` is true in config.
+- Gemini Live starts enabled when supported; voice still starts only when you toggle it on or trigger wake word.
 
 ## Run
 
@@ -173,7 +138,7 @@ npm start
 
 Startup behavior:
 - Direct mode (`GEMINI_API_KEY` present): Electron opens straight into the shell without a login gate.
-- When Live is available, AI power and live voice are enabled by default at startup.
+- When Live is available, the session starts disconnected, Gemini voice stays off, and wake-word listening can arm locally if configured. If wake-word is disabled or unavailable, PixelPilot reconnects Gemini Live automatically.
 - Backend mode (no local key): Electron shows the auth gate, Gemini Live uses the backend Gemini key after sign-in, and OCR mode runs the full eye pipeline on the backend.
 - The desktop shell stays least-privileged at startup; secure desktop/UAC automation uses the installed helper tasks when needed.
 
@@ -259,7 +224,7 @@ Default backend limits:
 
 Gateway implementation exists at `src/services/gateway.py`.
 Set `ENABLE_GATEWAY=true` to start it with the desktop app.
-Gateway commands are executed through the same Gemini Live session used by the desktop UI, so AI power must be on and voice must be idle before a remote command can run.
+Gateway commands are executed through the same Gemini Live session used by the desktop UI, so the session must be connected and voice must be idle before a remote command can run.
 Set `PIXELPILOT_GATEWAY_TOKEN` explicitly if you want authenticated gateway access.
 
 Expected payload format:

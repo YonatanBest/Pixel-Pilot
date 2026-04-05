@@ -71,6 +71,10 @@ export class RuntimeBridgeClient extends EventEmitter {
 
   public snapshot: RuntimeSnapshot | null = null;
 
+  isControlConnected(): boolean {
+    return Boolean(this.controlSocket && this.controlSocket.readyState === WebSocket.OPEN);
+  }
+
   constructor(controlUrl: string, sidecarUrl: string) {
     super();
     this.controlUrl = controlUrl;
@@ -200,6 +204,32 @@ export class RuntimeBridgeClient extends EventEmitter {
     }, RECONNECT_DELAY_MS);
   }
 
+  private forceControlReconnect(): void {
+    if (this.stopped) {
+      return;
+    }
+
+    const socket = this.controlSocket;
+    if (socket && socket.readyState === WebSocket.CONNECTING) {
+      try {
+        socket.terminate();
+      } catch {
+        // Ignore terminate errors and continue resetting the bridge socket.
+      }
+      if (this.controlSocket === socket) {
+        this.controlSocket = null;
+      }
+    }
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    this.connectControl();
+    this.connectSidecar();
+  }
+
   private handleControlEnvelope(envelope: RuntimeEventEnvelope): void {
     if (envelope.kind === 'response') {
       const pending = this.pending.get(envelope.id);
@@ -257,7 +287,11 @@ export class RuntimeBridgeClient extends EventEmitter {
           reject(error);
         },
         timer: setTimeout(() => {
-          waiter.reject(new Error('Runtime bridge is still connecting. Please try again in a moment.'));
+          const latestSocket = this.controlSocket;
+          if (!latestSocket || latestSocket.readyState !== WebSocket.OPEN) {
+            this.forceControlReconnect();
+          }
+          waiter.reject(new Error('Runtime bridge is reconnecting. Please try again in a moment.'));
         }, timeoutMs)
       };
 

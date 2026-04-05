@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 import sys
@@ -402,16 +403,88 @@ class ActionExecutor:
             return dict(matches[0] or {})
         return None
 
-    def _verify_launched_app_window(
+    @staticmethod
+    def _candidate_prefers_title_only(candidate: Optional[Dict[str, Any]]) -> bool:
+        if not candidate:
+            return False
+        launch_method = str(candidate.get("launch_method") or "").strip().lower()
+        candidate_type = str(candidate.get("type") or "").strip().lower()
+        return launch_method == "modern_app" or candidate_type == "modern_app"
+
+    @staticmethod
+    def _process_aliases(value: Any) -> list[str]:
+        raw = str(value or "").strip().strip('"').strip("'").lower()
+        if not raw:
+            return []
+
+        aliases: list[str] = []
+
+        def _add(token: str) -> None:
+            clean = str(token or "").strip().lower()
+            if clean and clean not in aliases:
+                aliases.append(clean)
+
+        _add(raw)
+
+        basename = raw
+        if "\\" in raw or "/" in raw:
+            basename = os.path.basename(raw)
+            _add(basename)
+
+        if "." in basename:
+            _add(basename.rsplit(".", 1)[0])
+
+        stem = basename[:-4] if basename.endswith(".exe") else basename
+        _add(stem)
+
+        compact = stem.replace("_", " ").replace("-", " ")
+        for part in compact.split():
+            if len(part) >= 3:
+                _add(part)
+
+        if " " in stem:
+            _add(stem.replace(" ", ""))
+
+        return aliases
+
+    def _app_process_filters(
+        self,
+        app_name: str,
+        candidate: Optional[Dict[str, Any]],
+    ) -> list[str]:
+        filters: list[str] = []
+        for value in (
+            app_name,
+            (candidate or {}).get("key"),
+            (candidate or {}).get("name"),
+            (candidate or {}).get("process_name"),
+            (candidate or {}).get("path"),
+        ):
+            for token in self._process_aliases(value):
+                if token not in filters:
+                    filters.append(token)
+        return filters
+
+    def _focus_window_for_app(
         self,
         app_name: str,
         *,
+        process_filters: list[str],
         prefer_title_only: bool,
     ) -> Dict[str, Any]:
-        dm = self.desktop_manager
-        deadline = time.monotonic() + self._app_verification_timeout_seconds()
-        poll_seconds = 0.35
-        process_filter = "" if prefer_title_only else app_name
+        ordered_filters: list[str] = []
+        if prefer_title_only:
+            ordered_filters.append("")
+        ordered_filters.extend(process_filters)
+        if not ordered_filters:
+            ordered_filters.append("")
+
+        deduped_filters: list[str] = []
+        for item in ordered_filters:
+            clean = str(item or "").strip()
+            if clean not in deduped_filters:
+                deduped_filters.append(clean)
+
         last_result: Dict[str, Any] = {
             "success": False,
             "reason": "not_found",
@@ -419,7 +492,8 @@ class ActionExecutor:
             "window_id": None,
         }
 
-        while True:
+        dm = self.desktop_manager
+        for process_filter in deduped_filters:
             result = ui_automation.focus_window(
                 self.agent.active_workspace,
                 dm,
@@ -429,10 +503,63 @@ class ActionExecutor:
                 maximize=False,
             )
             if result.get("success"):
-                if prefer_title_only:
-                    payload = dict(result)
-                    payload["verification_mode"] = "title_first"
-                    return payload
+                payload = dict(result)
+                payload["verification_process_filter"] = process_filter
+                payload["verification_mode"] = (
+                    "title_only"
+                    if not process_filter
+                    else "title_and_process"
+                )
+                return payload
+            last_result = result
+
+        return last_result
+
+    @staticmethod
+    def _manual_step_reason_for_window(app_name: str, window: Dict[str, Any]) -> str:
+        title = str((window or {}).get("title") or "").strip().lower()
+        process_name = str((window or {}).get("process_name") or "").strip().lower()
+        app_key = str(app_name or "").strip().lower()
+
+        is_chrome = "chrome" in app_key or "chrome" in process_name
+        if not is_chrome:
+            return ""
+
+        chrome_profile_markers = (
+            "who's using chrome",
+            "whos using chrome",
+            "choose your chrome profile",
+            "profile picker",
+            "choose profile",
+        )
+        if any(marker in title for marker in chrome_profile_markers):
+            return "chrome_profile_picker"
+
+        return ""
+
+    def _verify_launched_app_window(
+        self,
+        app_name: str,
+        *,
+        prefer_title_only: bool,
+        process_filters: list[str],
+    ) -> Dict[str, Any]:
+        deadline = time.monotonic() + self._app_verification_timeout_seconds()
+        poll_seconds = 0.35
+        last_result: Dict[str, Any] = {
+            "success": False,
+            "reason": "not_found",
+            "workspace": self.agent.active_workspace,
+            "window_id": None,
+        }
+
+        while True:
+            result = self._focus_window_for_app(
+                app_name,
+                process_filters=process_filters,
+                prefer_title_only=prefer_title_only,
+            )
+            if result.get("success"):
                 return result
 
             last_result = result
@@ -449,14 +576,15 @@ class ActionExecutor:
             return self._result(False, "app_name is empty")
 
         self.log(f"Opening app: {app_name}")
+        candidate = self._lookup_app_candidate(app_name)
+        process_filters = self._app_process_filters(app_name, candidate)
+        prefer_title_only = self._candidate_prefers_title_only(candidate)
+
         dm = self.desktop_manager
-        existing_focus = ui_automation.focus_window(
-            self.agent.active_workspace,
-            dm,
-            title_contains=app_name,
-            process_name=app_name,
-            restore=True,
-            maximize=False,
+        existing_focus = self._focus_window_for_app(
+            app_name,
+            process_filters=process_filters,
+            prefer_title_only=prefer_title_only,
         )
         if existing_focus.get("success"):
             return self._result(
@@ -474,21 +602,32 @@ class ActionExecutor:
             wait=True,
             on_wait=_on_wait_for_app_index,
         ):
-            candidate = self._lookup_app_candidate(app_name)
-            prefer_title_only = bool(
-                candidate
-                and (
-                    str(candidate.get("launch_method") or "").strip().lower() == "modern_app"
-                    or str(candidate.get("type") or "").strip().lower() == "modern_app"
-                )
-            )
+            if candidate is None:
+                candidate = self._lookup_app_candidate(app_name)
+                process_filters = self._app_process_filters(app_name, candidate)
+                prefer_title_only = self._candidate_prefers_title_only(candidate)
+
             launched_focus = self._verify_launched_app_window(
                 app_name,
                 prefer_title_only=prefer_title_only,
+                process_filters=process_filters,
             )
             if launched_focus.get("success"):
+                window = launched_focus.get("window") or {}
+                manual_step_reason = self._manual_step_reason_for_window(app_name, window)
+                if manual_step_reason:
+                    return self._result(
+                        False,
+                        "App opened but is waiting on profile selection. Choose a profile, then retry.",
+                        payload={
+                            "window": window,
+                            "focus_verification": launched_focus,
+                            "manual_step_required": manual_step_reason,
+                        },
+                    )
+
                 verification_mode = str(launched_focus.get("verification_mode") or "").strip()
-                if verification_mode == "title_first":
+                if verification_mode == "title_only":
                     self.log(f"Verified modern app window by title: {app_name}")
                 return self._result(
                     True,
@@ -544,8 +683,22 @@ class ActionExecutor:
         launched_focus = self._verify_launched_app_window(
             app_name,
             prefer_title_only=False,
+            process_filters=process_filters,
         )
         if launched_focus.get("success"):
+            window = launched_focus.get("window") or {}
+            manual_step_reason = self._manual_step_reason_for_window(app_name, window)
+            if manual_step_reason:
+                return self._result(
+                    False,
+                    "App opened but is waiting on profile selection. Choose a profile, then retry.",
+                    payload={
+                        "window": window,
+                        "focus_verification": launched_focus,
+                        "manual_step_required": manual_step_reason,
+                    },
+                )
+
             return self._result(
                 True,
                 f"Opened app and verified window: {app_name}",

@@ -1,6 +1,6 @@
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeBridgeClient, parseControlEnvelopeData, parseSidecarFrame, rawDataToBuffer } from './bridge-client.js';
 
 const activeServers = new Set<WebSocketServer>();
@@ -107,5 +107,38 @@ describe('bridge-client transport decoding', () => {
     await expect(client.sendCommand('live.stop')).rejects.toThrow(
       'Runtime bridge disconnected while waiting for a response.'
     );
+  });
+
+  it('forces reconnect when control socket remains stuck in connecting state', async () => {
+    const client = new RuntimeBridgeClient(
+      'ws://127.0.0.1:65535/control?token=test',
+      'ws://127.0.0.1:65535/sidecar?token=test'
+    );
+
+    const anyClient = client as unknown as {
+      controlSocket: { readyState: number; terminate: () => void } | null;
+      connectControl: () => void;
+      connectSidecar: () => void;
+      waitForControlSocket: (timeoutMs?: number) => Promise<unknown>;
+    };
+
+    const terminate = vi.fn();
+    const connectControl = vi.fn();
+    const connectSidecar = vi.fn();
+
+    anyClient.controlSocket = {
+      readyState: 0,
+      terminate
+    };
+    anyClient.connectControl = connectControl;
+    anyClient.connectSidecar = connectSidecar;
+
+    await expect(anyClient.waitForControlSocket(5)).rejects.toThrow(
+      'Runtime bridge is reconnecting. Please try again in a moment.'
+    );
+
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(connectControl).toHaveBeenCalledTimes(1);
+    expect(connectSidecar).toHaveBeenCalledTimes(1);
   });
 });

@@ -33,6 +33,7 @@ export class WindowManager {
   private pendingConfirmations = new Map<string, (payload: Record<string, unknown>) => void>();
   private runtimeClickThrough = false;
   private manualClickThroughOverride: boolean | null = null;
+  private trayOnly = false;
   private readonly userMovedKinds = new Set<WindowKind>();
   private readonly programmaticMoveKinds = new Set<WindowKind>();
 
@@ -76,6 +77,9 @@ export class WindowManager {
 
   applySnapshot(snapshot: RuntimeSnapshot): void {
     this.currentSnapshot = snapshot;
+    if (!snapshot.backgroundHidden || snapshot.auth.needsAuth) {
+      this.trayOnly = false;
+    }
     this.runtimeClickThrough = snapshot.auth.needsAuth ? false : snapshot.clickThroughEnabled;
     this.broadcastState(snapshot);
     this.syncWindowVisibility();
@@ -208,6 +212,9 @@ export class WindowManager {
     ipcMain.handle('pixelpilot:set-background-hidden', (_event, hidden: boolean) =>
       this.wrapIpcResult(() => this.setBackgroundHidden(Boolean(hidden)))
     );
+    ipcMain.handle('pixelpilot:set-tray-only', (_event, enabled: boolean) =>
+      this.wrapIpcResult(() => this.setTrayOnly(Boolean(enabled)))
+    );
     ipcMain.handle('pixelpilot:toggle-settings-window', () =>
       this.wrapIpcResult(() => this.toggleSettingsWindow())
     );
@@ -239,7 +246,12 @@ export class WindowManager {
       return;
     }
     const hidden = this.currentSnapshot.backgroundHidden && !this.currentSnapshot.auth.needsAuth;
-    if (hidden) {
+    const trayOnly = hidden && this.trayOnly;
+    if (trayOnly) {
+      this.overlayWindow?.hide();
+      this.notchWindow?.hide();
+      this.settingsWindow?.hide();
+    } else if (hidden) {
       this.overlayWindow?.hide();
       this.settingsWindow?.hide();
       this.anchorWindow('notch');
@@ -294,7 +306,8 @@ export class WindowManager {
   private prepareForScreenshot(): Record<string, unknown> {
     const payload = {
       restore_main_window: Boolean(this.currentSnapshot && !this.currentSnapshot.backgroundHidden),
-      restore_minimized_notch: Boolean(this.currentSnapshot?.backgroundHidden)
+      restore_minimized_notch: Boolean(this.currentSnapshot?.backgroundHidden && !this.trayOnly),
+      restore_tray_only: Boolean(this.currentSnapshot?.backgroundHidden && this.trayOnly)
     };
     this.overlayWindow?.hide();
     this.notchWindow?.hide();
@@ -303,7 +316,10 @@ export class WindowManager {
   }
 
   private restoreAfterScreenshot(payload: Record<string, unknown>): void {
-    if (Boolean(payload.restore_main_window)) {
+    if (Boolean(payload.restore_tray_only)) {
+      this.overlayWindow?.hide();
+      this.notchWindow?.hide();
+    } else if (Boolean(payload.restore_main_window)) {
       this.overlayWindow?.showInactive();
       this.notchWindow?.hide();
     } else if (Boolean(payload.restore_minimized_notch)) {
@@ -344,6 +360,8 @@ export class WindowManager {
 
   private async setBackgroundHidden(hidden: boolean): Promise<Record<string, unknown>> {
     const previousSnapshot = this.currentSnapshot ? { ...this.currentSnapshot } : null;
+    const previousTrayOnly = this.trayOnly;
+    this.trayOnly = false;
     if (this.currentSnapshot) {
       this.currentSnapshot = { ...this.currentSnapshot, backgroundHidden: hidden };
       if (hidden) {
@@ -355,6 +373,35 @@ export class WindowManager {
     try {
       return await this.invokeRuntime('shell.setBackgroundHidden', { hidden });
     } catch (error) {
+      this.trayOnly = previousTrayOnly;
+      if (previousSnapshot) {
+        this.currentSnapshot = previousSnapshot;
+        this.syncWindowVisibility();
+        this.broadcastState(previousSnapshot);
+      }
+      throw error;
+    }
+  }
+
+  private async setTrayOnly(enabled: boolean): Promise<Record<string, unknown>> {
+    const previousSnapshot = this.currentSnapshot ? { ...this.currentSnapshot } : null;
+    const previousTrayOnly = this.trayOnly;
+    const hidden = enabled;
+
+    this.trayOnly = enabled;
+    if (this.currentSnapshot) {
+      this.currentSnapshot = { ...this.currentSnapshot, backgroundHidden: hidden };
+      if (hidden) {
+        this.settingsWindow?.hide();
+      }
+      this.syncWindowVisibility();
+      this.broadcastState(this.currentSnapshot);
+    }
+
+    try {
+      return await this.invokeRuntime('shell.setBackgroundHidden', { hidden });
+    } catch (error) {
+      this.trayOnly = previousTrayOnly;
       if (previousSnapshot) {
         this.currentSnapshot = previousSnapshot;
         this.syncWindowVisibility();

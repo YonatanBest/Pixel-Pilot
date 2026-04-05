@@ -24,6 +24,7 @@ class LiveToolRegistry:
         "capture_screen",
         "get_action_status",
         "wait_for_action",
+        "disconnect_live_session",
         "request_reasoning_escalation",
     }
     MUTATING_TOOL_NAMES = {
@@ -42,11 +43,13 @@ class LiveToolRegistry:
         agent,
         broker: LiveActionBroker,
         on_capture_ready: Optional[Callable[[str, dict[str, Any]], None]] = None,
+        on_disconnect_requested: Optional[Callable[[str], dict[str, Any]]] = None,
         on_reasoning_escalation: Optional[Callable[[str, str], dict[str, Any]]] = None,
     ) -> None:
         self.agent = agent
         self.broker = broker
         self.on_capture_ready = on_capture_ready
+        self.on_disconnect_requested = on_disconnect_requested
         self.on_reasoning_escalation = on_reasoning_escalation
         self._guidance_mode = False
         self.last_snapshot_summary: Optional[dict[str, Any]] = None
@@ -282,6 +285,20 @@ class LiveToolRegistry:
                 },
             },
             {
+                "name": "disconnect_live_session",
+                "description": (
+                    "Disconnect Gemini Live from the current session when the user explicitly asks you "
+                    "to disconnect, go quiet, or hand control back to the wake word. "
+                    "If the local wake word is enabled, it will keep listening after disconnect."
+                ),
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "reason": {"type": "STRING"},
+                    },
+                },
+            },
+            {
                 "name": "request_reasoning_escalation",
                 "description": (
                     "Internal runtime control. Use this only when you are genuinely stuck after normal "
@@ -389,6 +406,8 @@ class LiveToolRegistry:
                 str(payload.get("action_id") or ""),
                 int(payload.get("timeout_ms") or 1000),
             )
+        if tool_name == "disconnect_live_session":
+            return self._handle_disconnect_live_session(payload)
         if tool_name == "request_reasoning_escalation":
             return self._handle_request_reasoning_escalation(payload)
 
@@ -410,6 +429,16 @@ class LiveToolRegistry:
                 error="reasoning_escalation_unavailable",
             )
         return self.on_reasoning_escalation(target_level, reason)
+
+    def _handle_disconnect_live_session(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.on_disconnect_requested is None:
+            return self._tool_response(
+                "disconnect_live_session",
+                success=False,
+                message="Gemini Live disconnect control is unavailable.",
+                error="disconnect_unavailable",
+            )
+        return self.on_disconnect_requested(str(args.get("reason") or "").strip())
 
     def _queue_action(
         self,
@@ -444,6 +473,25 @@ class LiveToolRegistry:
             return self.agent.desktop_manager
         return None
 
+    def _prepare_hard_click_passthrough(self) -> bool:
+        if self.agent.active_workspace != "user":
+            return False
+
+        chat_window = getattr(self.agent, "chat_window", None)
+        if chat_window is None:
+            return False
+
+        for method_name in ("set_click_through", "set_click_through_enabled"):
+            setter = getattr(chat_window, method_name, None)
+            if not callable(setter):
+                continue
+            try:
+                setter(True)
+                return True
+            except Exception:
+                continue
+        return False
+
     def _handle_mouse_click(self, args: dict[str, Any], cancel_event) -> dict[str, Any]:
         if cancel_event.is_set():
             return {"success": False, "cancelled": True, "message": "Action cancelled before click."}
@@ -463,6 +511,14 @@ class LiveToolRegistry:
             return {"success": False, "message": "button must be left, right, or middle", "error": "invalid_args"}
 
         dm = self._desktop_manager
+        passthrough_enabled = self._prepare_hard_click_passthrough()
+        focus_restore = ui_automation.focus_window_at_point(
+            self.agent.active_workspace,
+            dm,
+            int(x),
+            int(y),
+        )
+
         if dm is not None:
             if button != "left" or clicks != 1:
                 return {
@@ -475,7 +531,14 @@ class LiveToolRegistry:
             return {
                 "success": bool(clicked),
                 "message": f"Clicked at ({int(x)}, {int(y)})" if clicked else "Failed to click",
-                "payload": {"x": int(x), "y": int(y), "button": button, "clicks": clicks},
+                "payload": {
+                    "x": int(x),
+                    "y": int(y),
+                    "button": button,
+                    "clicks": clicks,
+                    "focus_restore": focus_restore,
+                    "passthrough_enabled": passthrough_enabled,
+                },
             }
 
         pyautogui.click(x=int(x), y=int(y), button=button, clicks=clicks, interval=0.07)
@@ -483,7 +546,14 @@ class LiveToolRegistry:
         return {
             "success": True,
             "message": f"Clicked at ({int(x)}, {int(y)})",
-            "payload": {"x": int(x), "y": int(y), "button": button, "clicks": clicks},
+            "payload": {
+                "x": int(x),
+                "y": int(y),
+                "button": button,
+                "clicks": clicks,
+                "focus_restore": focus_restore,
+                "passthrough_enabled": passthrough_enabled,
+            },
         }
 
     def _handle_type_text(self, args: dict[str, Any], cancel_event) -> dict[str, Any]:

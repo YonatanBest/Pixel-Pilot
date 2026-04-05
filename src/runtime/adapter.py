@@ -17,6 +17,8 @@ class RuntimeAdapter(QObject):
     assistant_audio_level_received = Signal(float)
     live_availability_received = Signal(bool, str)
     live_voice_active_received = Signal(bool)
+    wake_word_state_received = Signal(str, str)
+    wake_word_enabled_received = Signal(bool)
 
     def __init__(
         self,
@@ -101,6 +103,11 @@ class RuntimeAdapter(QObject):
             self.ui_state_store.set_live_voice_active(active)
         self.live_voice_active_received.emit(bool(active))
 
+    def update_wake_word_state(self, state: str, reason: str = ""):
+        if self.ui_state_store is not None:
+            self.ui_state_store.set_wake_word_state(state, reason)
+        self.wake_word_state_received.emit(str(state or "disabled"), str(reason or ""))
+
     def set_operation_mode(self, mode):
         self.current_mode = mode
         if self.ui_state_store is not None:
@@ -117,6 +124,15 @@ class RuntimeAdapter(QObject):
     def set_live_enabled(self, enabled: bool):
         if self.ui_state_store is not None:
             self.ui_state_store.set_live_enabled(enabled)
+
+    def set_wake_word_enabled(self, enabled: bool):
+        if self.ui_state_store is not None:
+            self.ui_state_store.set_wake_word_enabled(enabled)
+        self.wake_word_enabled_received.emit(bool(enabled))
+
+    def set_wake_word_phrase(self, phrase: str):
+        if self.ui_state_store is not None:
+            self.ui_state_store.set_wake_word_phrase(phrase)
 
     def set_agent_view_enabled(self, enabled: bool):
         if self.ui_state_store is not None:

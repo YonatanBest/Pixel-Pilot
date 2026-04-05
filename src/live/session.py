@@ -80,6 +80,9 @@ class LiveSessionManager(QObject):
         self._mic_task: Optional[asyncio.Task] = None
         self._rotation_task: Optional[asyncio.Task] = None
         self._guidance_observer_task: Optional[asyncio.Task] = None
+        self._one_shot_timeout_task: Optional[asyncio.Task] = None
+        self._one_shot_finalize_task: Optional[asyncio.Task] = None
+        self._go_away_reconnect_task: Optional[asyncio.Task] = None
         self._shutdown_event = threading.Event()
         self._assistant_buffer = ""
         self._user_buffer = ""
@@ -107,7 +110,12 @@ class LiveSessionManager(QObject):
         self._pending_text_nudge = ""
         self._pending_text_nudge_timer: Optional[threading.Timer] = None
         self._pending_text_nudge_generation = 0
+        self._pending_text_commands: deque[str] = deque(maxlen=8)
+        self._pending_text_command_flush_in_progress = False
         self._soft_interrupt_requested = False
+        self._manual_disconnect_requested = False
+        self._voice_mode = "continuous"
+        self._one_shot_engaged = False
         self._baseline_live_thinking_level = self._normalize_thinking_level(
             Config.LIVE_THINKING_LEVEL
         )
@@ -119,6 +127,7 @@ class LiveSessionManager(QObject):
             agent=agent,
             broker=self.broker,
             on_capture_ready=self._on_capture_ready,
+            on_disconnect_requested=self._request_live_disconnect,
             on_reasoning_escalation=self._request_reasoning_escalation,
         )
         self.tools.set_guidance_mode(self._is_guidance_mode())
@@ -192,6 +201,11 @@ class LiveSessionManager(QObject):
     ) -> dict[str, Any]:
         clean_target = self._normalize_thinking_level(target_level)
         clean_reason = str(reason or "").strip()
+        logger.info(
+            "LIVE_REASONING_ESCALATION_REQUEST target_level=%s reason=%s",
+            clean_target,
+            self._truncate_log_text(clean_reason),
+        )
         if clean_target not in {"medium", "high"}:
             return {
                 "tool_name": "request_reasoning_escalation",
@@ -236,6 +250,47 @@ class LiveSessionManager(QObject):
             "error": None,
         }
 
+    def _request_live_disconnect(self, reason: str) -> dict[str, Any]:
+        clean_reason = str(reason or "").strip()
+        phrase = str(Config.WAKE_WORD_PHRASE or "Hey Pixie").strip() or "Hey Pixie"
+        status_message = (
+            f'Gemini Live disconnected. Say "{phrase}" to reconnect if the wake word is enabled.'
+            if Config.ENABLE_WAKE_WORD
+            else "Gemini Live disconnected."
+        )
+        if clean_reason:
+            status_message = f"{status_message} Reason: {clean_reason}"
+
+        already_disconnected = not bool(self._transport or self._connect_task or self._voice_enabled)
+        if already_disconnected:
+            return {
+                "tool_name": "disconnect_live_session",
+                "ok": True,
+                "success": True,
+                "status": "succeeded",
+                "message": status_message,
+                "result": {
+                    "disconnect_requested": False,
+                    "status_message": status_message,
+                    "wake_word_phrase": phrase,
+                },
+                "error": None,
+            }
+
+        return {
+            "tool_name": "disconnect_live_session",
+            "ok": True,
+            "success": True,
+            "status": "succeeded",
+            "message": "Disconnecting Gemini Live and returning control to the wake word.",
+            "result": {
+                "disconnect_requested": True,
+                "status_message": status_message,
+                "wake_word_phrase": phrase,
+            },
+            "error": None,
+        }
+
     def _transport_cls(self):
         return DirectGeminiLiveTransport if Config.USE_DIRECT_API else BackendGeminiLiveTransport
 
@@ -258,22 +313,221 @@ class LiveSessionManager(QObject):
         )
 
     @property
+    def is_connected(self) -> bool:
+        return bool(self._transport is not None and not self._reconnect_in_progress)
+
+    @property
+    def manual_disconnect_requested(self) -> bool:
+        return bool(self._manual_disconnect_requested)
+
+    @property
     def is_available(self) -> bool:
-        if not Config.ENABLE_GEMINI_LIVE_MODE:
-            return False
         transport_cls = self._transport_cls()
         return bool(transport_cls.is_supported())
 
     @property
     def unavailable_reason(self) -> str:
-        if not Config.ENABLE_GEMINI_LIVE_MODE:
-            return "Live mode is disabled by config."
         transport_cls = self._transport_cls()
         return transport_cls.unavailable_reason()
 
     @property
     def voice_enabled(self) -> bool:
         return self._voice_enabled
+
+    @property
+    def voice_mode(self) -> str:
+        return self._voice_mode
+
+    def _should_auto_reconnect(self) -> bool:
+        return bool(
+            self.enabled
+            and not self._shutdown_event.is_set()
+            and not self._manual_disconnect_requested
+        )
+
+    def _clear_manual_disconnect_request(self) -> None:
+        self._manual_disconnect_requested = False
+
+    def _clear_resume_handle(self, *, reason: str = "") -> None:
+        handle = str(self._resume_handle or "").strip()
+        if not handle:
+            return
+        logger.warning(
+            "Clearing Gemini Live session resumption handle%s.",
+            f" ({reason})" if str(reason or "").strip() else "",
+        )
+        self._resume_handle = None
+
+    @staticmethod
+    def _truncate_log_text(text: Any, *, limit: int = 2400) -> str:
+        clean = " ".join(str(text or "").split())
+        if len(clean) <= limit:
+            return clean
+        return f"{clean[:limit]}...(truncated)"
+
+    @classmethod
+    def _serialize_log_value(cls, value: Any, *, limit: int = 2400) -> str:
+        try:
+            raw = json.dumps(value, ensure_ascii=True, default=str)
+        except Exception:
+            raw = repr(value)
+        return cls._truncate_log_text(raw, limit=limit)
+
+    def _log_user_request(self, text: str, *, source: str) -> None:
+        clean = str(text or "").strip()
+        if not clean:
+            return
+        logger.info(
+            "LIVE_USER_REQUEST source=%s text=%s",
+            str(source or "typed").strip().lower() or "typed",
+            self._truncate_log_text(clean),
+        )
+
+    def _cancel_go_away_reconnect_task(self, *, keep_current: bool = False) -> None:
+        task = self._go_away_reconnect_task
+        if task is None:
+            return
+        if keep_current:
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if task is current:
+                return
+        if not task.done():
+            task.cancel()
+        self._go_away_reconnect_task = None
+
+    @staticmethod
+    def _parse_go_away_time_left_seconds(raw_value: Any) -> Optional[float]:
+        if raw_value is None:
+            return None
+        if isinstance(raw_value, (int, float)):
+            return max(0.0, float(raw_value))
+
+        text = str(raw_value or "").strip().lower()
+        if not text:
+            return None
+
+        if ":" in text:
+            try:
+                parts = [float(item) for item in text.split(":")]
+                if len(parts) == 3:
+                    return max(0.0, (parts[0] * 3600.0) + (parts[1] * 60.0) + parts[2])
+                if len(parts) == 2:
+                    return max(0.0, (parts[0] * 60.0) + parts[1])
+            except Exception:
+                pass
+
+        duration_match = re.fullmatch(
+            r"(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m)?(?:(?P<seconds>\d+(?:\.\d+)?)s)?",
+            text,
+        )
+        if duration_match and any(duration_match.groupdict().values()):
+            hours = float(duration_match.group("hours") or 0.0)
+            minutes = float(duration_match.group("minutes") or 0.0)
+            seconds = float(duration_match.group("seconds") or 0.0)
+            return max(0.0, (hours * 3600.0) + (minutes * 60.0) + seconds)
+
+        try:
+            return max(0.0, float(text))
+        except Exception:
+            return None
+
+    def _schedule_go_away_reconnect(self, go_away_payload: dict[str, Any]) -> None:
+        if not self._should_auto_reconnect() or self._reconnect_in_progress:
+            return
+
+        existing = self._go_away_reconnect_task
+        if existing is not None and not existing.done():
+            return
+
+        time_left_s = self._parse_go_away_time_left_seconds(go_away_payload.get("time_left"))
+        reconnect_deadline = None if time_left_s is None else (time.monotonic() + time_left_s)
+        reconnect_delay_s = 0.0
+        if time_left_s is not None:
+            reconnect_delay_s = max(0.0, min(10.0, time_left_s - 1.5))
+
+        async def _go_away_reconnect_loop() -> None:
+            try:
+                if reconnect_delay_s > 0.0:
+                    await asyncio.sleep(reconnect_delay_s)
+
+                while self.broker.has_pending():
+                    if not self._should_auto_reconnect() or self._reconnect_in_progress:
+                        return
+                    if reconnect_deadline is not None and time.monotonic() >= reconnect_deadline:
+                        return
+                    await asyncio.sleep(0.25)
+
+                if not self._should_auto_reconnect() or self._reconnect_in_progress:
+                    return
+                self.status_received.emit(
+                    "Refreshing Gemini Live connection to keep the conversation active."
+                )
+                await self._reconnect_with_resume()
+            except asyncio.CancelledError:
+                return
+            finally:
+                current = asyncio.current_task()
+                if self._go_away_reconnect_task is current:
+                    self._go_away_reconnect_task = None
+
+        self._go_away_reconnect_task = asyncio.create_task(_go_away_reconnect_loop())
+
+    @staticmethod
+    def _normalize_voice_mode(mode: Any) -> str:
+        return "one_shot" if str(mode or "").strip().lower() == "one_shot" else "continuous"
+
+    def _configure_voice_mode(self, mode: Any) -> None:
+        self._voice_mode = self._normalize_voice_mode(mode)
+        self._one_shot_engaged = False
+        self._cancel_one_shot_tasks()
+
+    def _cancel_one_shot_tasks(self, *, keep_current: bool = False) -> None:
+        current_task = None
+        if keep_current:
+            try:
+                current_task = asyncio.current_task()
+            except RuntimeError:
+                current_task = None
+
+        for attr in ("_one_shot_timeout_task", "_one_shot_finalize_task"):
+            task = getattr(self, attr, None)
+            if task is None:
+                continue
+            if keep_current and task is current_task:
+                continue
+            if not task.done():
+                task.cancel()
+            setattr(self, attr, None)
+
+    def _schedule_one_shot_timeout(self) -> None:
+        self._cancel_one_shot_tasks()
+        if self._voice_mode != "one_shot" or not self._voice_enabled:
+            return
+        self._one_shot_timeout_task = asyncio.create_task(self._one_shot_timeout_loop())
+
+    def _mark_one_shot_engaged(self) -> None:
+        if self._voice_mode != "one_shot" or self._one_shot_engaged:
+            return
+        self._one_shot_engaged = True
+        timeout_task = self._one_shot_timeout_task
+        if timeout_task is not None and not timeout_task.done():
+            timeout_task.cancel()
+        self._one_shot_timeout_task = None
+
+    def _schedule_one_shot_finalize(self) -> None:
+        if (
+            self._voice_mode != "one_shot"
+            or not self._voice_enabled
+            or not self._one_shot_engaged
+        ):
+            return
+        task = self._one_shot_finalize_task
+        if task is not None and not task.done():
+            return
+        self._one_shot_finalize_task = asyncio.create_task(self._one_shot_finalize_loop())
 
     def set_enabled(self, enabled: bool) -> bool:
         target = bool(enabled)
@@ -282,15 +536,65 @@ class LiveSessionManager(QObject):
             return False
         self.tools.set_guidance_mode(self._is_guidance_mode())
         self.enabled = target
+        if target:
+            self._clear_manual_disconnect_request()
         if not target:
+            self._cancel_go_away_reconnect_task()
+            self._cancel_one_shot_tasks()
             self.stop_voice()
             self._cancel_typed_turn_idle_finish_timer()
+            self._clear_pending_text_commands()
             self._clear_pending_text_nudge()
-            self._finish_text_turn(error="AI power was turned off.")
+            self._finish_text_turn(error="Gemini Live was disconnected.")
             self._reset_reasoning_escalation_state()
             self._submit_async(self._disconnect_session(close_client=True), ensure_loop=False)
             self.session_state_changed.emit("disconnected")
         return True
+
+    def disconnect(self, *, reason: str = "") -> bool:
+        if not self.enabled:
+            return False
+
+        self._manual_disconnect_requested = True
+        logger.info(
+            "LIVE_SESSION_DISCONNECT_REQUESTED reason=%s",
+            self._truncate_log_text(reason),
+        )
+        self._cancel_go_away_reconnect_task()
+        self.stop_voice()
+        self._cancel_typed_turn_idle_finish_timer()
+        self._clear_pending_text_commands()
+        self._clear_pending_text_nudge()
+        self._finish_text_turn(error="Gemini Live was disconnected.")
+        self._reset_reasoning_escalation_state()
+
+        submitted = self._submit_async(self._disconnect_session(close_client=True), ensure_loop=False)
+        if not submitted:
+            self.session_state_changed.emit("disconnected")
+        if str(reason or "").strip():
+            self.status_received.emit(str(reason))
+        return True
+
+    def reconnect(self) -> bool:
+        if not self.enabled:
+            self.error_received.emit("Gemini Live is unavailable.")
+            return False
+        if not self.is_available:
+            self.error_received.emit(self.unavailable_reason)
+            return False
+
+        self._clear_manual_disconnect_request()
+        logger.info("LIVE_SESSION_RECONNECT_REQUESTED")
+        if self._transport is not None or self._connect_task is not None or self._reconnect_in_progress:
+            return True
+
+        submitted = self._submit_async(self._ensure_session_with_retry())
+        if submitted:
+            self.session_state_changed.emit("connecting")
+            return True
+
+        self.error_received.emit("Failed to reconnect Gemini Live.")
+        return False
 
     def _record_user_steering(self, text: str) -> str:
         clean = str(text or "").strip()
@@ -318,7 +622,7 @@ class LiveSessionManager(QObject):
         if not clean:
             return None, "Message is empty."
         if not self.enabled:
-            return None, "AI power is off."
+            return None, "Gemini Live is unavailable."
         self._clear_stale_text_turn_if_idle(reason="new_submit")
         with self._turn_state_lock:
             if self._active_text_turn_id is not None:
@@ -361,6 +665,8 @@ class LiveSessionManager(QObject):
                 delay_s=Config.LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS,
                 reason="turn_finished",
             )
+        if self._pending_text_commands:
+            self._schedule_pending_text_command_flush(reason="turn_finished")
 
     @staticmethod
     def _resolve_text_turn_waiter(
@@ -520,6 +826,8 @@ class LiveSessionManager(QObject):
                 delay_s=Config.LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS,
                 reason="stale_turn_released",
             )
+        if self._pending_text_commands:
+            self._schedule_pending_text_command_flush(reason="stale_turn_released")
 
     def _clear_stale_text_turn_if_idle(self, *, reason: str) -> bool:
         turn_id: Optional[int] = None
@@ -556,6 +864,8 @@ class LiveSessionManager(QObject):
                 delay_s=Config.LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS,
                 reason="stale_turn_cleared",
             )
+        if self._pending_text_commands:
+            self._schedule_pending_text_command_flush(reason="stale_turn_cleared")
         return True
 
     def _cancel_pending_text_nudge_timer(self) -> None:
@@ -710,6 +1020,139 @@ class LiveSessionManager(QObject):
         self.error_received.emit("Failed to send the latest steering update to Gemini Live.")
         return False
 
+    def _clear_pending_text_commands(self) -> None:
+        with self._turn_state_lock:
+            self._pending_text_commands.clear()
+            self._pending_text_command_flush_in_progress = False
+
+    def _queue_pending_text_command(self, text: str) -> tuple[int, bool]:
+        clean = str(text or "").strip()
+        if not clean:
+            return 0, False
+
+        with self._turn_state_lock:
+            existing = list(self._pending_text_commands)
+            replaced = clean in existing
+            retained = [item for item in existing if item != clean]
+            self._pending_text_commands.clear()
+            self._pending_text_commands.append(clean)
+            for item in retained:
+                if len(self._pending_text_commands) >= self._pending_text_commands.maxlen:
+                    break
+                self._pending_text_commands.append(item)
+            depth = len(self._pending_text_commands)
+        return depth, replaced
+
+    def _restore_pending_text_command(self, text: str) -> None:
+        self._queue_pending_text_command(text)
+
+    def _schedule_pending_text_command_flush(self, *, reason: str) -> bool:
+        with self._turn_state_lock:
+            if (
+                self._pending_text_command_flush_in_progress
+                or not self._pending_text_commands
+                or self._shutdown_event.is_set()
+            ):
+                return False
+            self._pending_text_command_flush_in_progress = True
+
+        submitted = self._submit_async(
+            self._submit_pending_text_command_if_ready(reason=reason)
+        )
+        if submitted:
+            return True
+
+        with self._turn_state_lock:
+            self._pending_text_command_flush_in_progress = False
+        return False
+
+    async def _submit_pending_text_command_if_ready(self, *, reason: str) -> bool:
+        queued_text = ""
+        try:
+            with self._turn_state_lock:
+                if (
+                    not self._pending_text_commands
+                    or self._shutdown_event.is_set()
+                    or self._active_text_turn_id is not None
+                    or self.broker.has_pending()
+                ):
+                    return False
+                queued_text = str(self._pending_text_commands.popleft()).strip()
+
+            waiter, error_message = self._begin_text_turn(queued_text, wait_for_result=False)
+            if waiter is None:
+                self._restore_pending_text_command(queued_text)
+                if error_message:
+                    logger.debug(
+                        "Queued live text command remains pending (%s): %s",
+                        reason,
+                        error_message,
+                    )
+                return False
+
+            try:
+                await self._send_text(str(waiter["submitted_text"]))
+            except Exception:
+                self._finish_text_turn(error="Failed to send the queued command to Gemini Live.")
+                self._restore_pending_text_command(queued_text)
+                self.error_received.emit("Failed to send the queued command to Gemini Live.")
+                return False
+
+            logger.debug(
+                "Started a queued live text command (%s): %s",
+                reason,
+                queued_text,
+            )
+            return True
+        finally:
+            reschedule = False
+            with self._turn_state_lock:
+                self._pending_text_command_flush_in_progress = False
+                reschedule = bool(
+                    self._pending_text_commands
+                    and self._active_text_turn_id is None
+                    and not self._shutdown_event.is_set()
+                    and not self.broker.has_pending()
+                )
+            if reschedule:
+                self._schedule_pending_text_command_flush(reason="queue_followup")
+
+    def _handle_queued_text_submission(self, text: str) -> dict[str, Any]:
+        clean = self._record_user_steering(text)
+        if not clean:
+            return {
+                "ok": False,
+                "status": "rejected",
+                "message": "Message is empty.",
+            }
+
+        self._log_user_request(clean, source="queued_connecting")
+
+        self._clear_manual_disconnect_request()
+        depth, replaced = self._queue_pending_text_command(clean)
+        self.session_state_changed.emit("connecting")
+        self._schedule_pending_text_command_flush(reason="queued_submission")
+
+        if depth > 1:
+            message = (
+                "Updated the queued instructions. The newest request will run first when Gemini Live is ready."
+                if replaced
+                else "Queued your message. The newest queued request will run first when Gemini Live is ready."
+            )
+        else:
+            message = (
+                "Updated the queued instruction. Gemini Live will send it as soon as the session is ready."
+                if replaced
+                else "Gemini Live is still connecting. I queued your message and will send it as soon as the session is ready."
+            )
+
+        return {
+            "ok": True,
+            "status": "queued_connecting",
+            "message": message,
+            "queue_depth": depth,
+        }
+
     def _handle_text_nudge_submission(self, text: str) -> dict[str, Any]:
         clean = self._record_user_steering(text)
         if not clean:
@@ -718,6 +1161,8 @@ class LiveSessionManager(QObject):
                 "status": "rejected",
                 "message": "Message is empty.",
             }
+
+        self._log_user_request(clean, source="steering_nudge")
 
         replaced = False
         with self._turn_state_lock:
@@ -752,10 +1197,15 @@ class LiveSessionManager(QObject):
         }
 
     def submit_text(self, text: str) -> dict[str, Any]:
+        clean = str(text or "").strip()
+        if self.is_connection_pending:
+            return self._handle_queued_text_submission(clean)
+
         waiter, error_message = self._begin_text_turn(text, wait_for_result=False)
         if waiter is None:
-            clean = str(text or "").strip()
             if error_message == "Wait for the current reply before sending another command.":
+                if self.is_connection_pending:
+                    return self._handle_queued_text_submission(clean)
                 return self._handle_text_nudge_submission(clean)
             if error_message:
                 self.error_received.emit(error_message)
@@ -764,6 +1214,8 @@ class LiveSessionManager(QObject):
                 "status": "rejected",
                 "message": error_message or "Unable to submit command.",
             }
+        self._log_user_request(clean, source="typed_submit")
+        self._clear_manual_disconnect_request()
         queued_for_connect = self.is_connection_pending
         submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
         if not submitted:
@@ -799,6 +1251,8 @@ class LiveSessionManager(QObject):
                 "text": "",
             }
 
+        self._log_user_request(str(waiter.get("submitted_text") or text), source="typed_wait")
+        self._clear_manual_disconnect_request()
         submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
         if not submitted:
             self._finish_text_turn(error="Failed to send the command to Gemini Live.")
@@ -836,9 +1290,9 @@ class LiveSessionManager(QObject):
             "text": assistant_text,
         }
 
-    def start_voice(self) -> bool:
+    def start_voice(self, mode: str = "continuous") -> bool:
         if not self.enabled:
-            self.error_received.emit("Enable Live mode before starting voice.")
+            self.error_received.emit("Gemini Live is unavailable.")
             return False
         clear_stop = getattr(self.agent, "clear_stop_request", None)
         if callable(clear_stop):
@@ -846,10 +1300,13 @@ class LiveSessionManager(QObject):
                 clear_stop()
             except Exception:
                 pass
+        self._clear_manual_disconnect_request()
+        self._configure_voice_mode(mode)
         if self._voice_enabled:
             return True
         submitted = self._submit_async(self._start_voice_async())
         if not submitted:
+            self._cancel_one_shot_tasks()
             message = str(getattr(self, "unavailable_reason", "") or "").strip()
             if not message:
                 message = (
@@ -863,11 +1320,20 @@ class LiveSessionManager(QObject):
         return True
 
     def stop_voice(self) -> bool:
+        was_active = bool(self._voice_enabled or (self._mic_task and not self._mic_task.done()))
         self._voice_enabled = False
         self._cancel_typed_turn_idle_finish_timer()
         self._cancel_pending_text_nudge_timer()
-        self.voice_active_changed.emit(False)
-        return self._submit_async(self._stop_voice_async(), ensure_loop=False)
+        self._cancel_one_shot_tasks()
+        submitted = self._submit_async(
+            self._stop_voice_async(emit_voice_inactive=was_active),
+            ensure_loop=False,
+        )
+        if not submitted and was_active:
+            self.voice_active_changed.emit(False)
+            if self.enabled:
+                self.session_state_changed.emit("listening")
+        return submitted
 
     def request_stop(self) -> None:
         self.broker.cancel_current_action("Stop requested. Finish at a safe boundary.")
@@ -897,6 +1363,7 @@ class LiveSessionManager(QObject):
         self._recent_user_steering.clear()
         self._recent_action_updates.clear()
         self._pending_capture_paths.clear()
+        self._clear_pending_text_commands()
         self._clear_speaker_queue()
         self._cancel_typed_turn_idle_finish_timer()
         self._clear_pending_text_nudge()
@@ -911,7 +1378,7 @@ class LiveSessionManager(QObject):
         self._reconnect_in_progress = True
         try:
             await self._disconnect_session(reconnecting=True)
-            if self.enabled and not self._shutdown_event.is_set():
+            if self._should_auto_reconnect():
                 await self._ensure_session()
         finally:
             self._reconnect_in_progress = False
@@ -919,6 +1386,7 @@ class LiveSessionManager(QObject):
     def notify_mode_changed(self, mode: object) -> None:
         self._mode = mode
         self.tools.set_guidance_mode(self._is_guidance_mode())
+        self._clear_manual_disconnect_request()
         self._clear_session_context(reason="Mode changed. Started a fresh live session.")
         self._reset_reasoning_escalation_state()
         if self.enabled:
@@ -927,10 +1395,15 @@ class LiveSessionManager(QObject):
     def shutdown(self) -> None:
         self._shutdown_event.set()
         self._cancel_typed_turn_idle_finish_timer()
+        self._clear_pending_text_commands()
         self._clear_pending_text_nudge()
+        self._cancel_one_shot_tasks()
         self._finish_text_turn(error="Gemini Live session shut down.")
         self._reset_reasoning_escalation_state()
+        self._manual_disconnect_requested = False
         self._voice_enabled = False
+        self._voice_mode = "continuous"
+        self._one_shot_engaged = False
         self.voice_active_changed.emit(False)
         if self._loop and self._loop.is_running():
             future = asyncio.run_coroutine_threadsafe(
@@ -1042,8 +1515,7 @@ class LiveSessionManager(QObject):
             except asyncio.TimeoutError as exc:
                 if (
                     attempt < max_retries
-                    and self.enabled
-                    and not self._shutdown_event.is_set()
+                    and self._should_auto_reconnect()
                 ):
                     logger.warning("Timed out sending realtime text; reconnecting live session.")
                     await self._reconnect_with_resume()
@@ -1053,8 +1525,7 @@ class LiveSessionManager(QObject):
             except Exception as exc:  # noqa: BLE001
                 if (
                     attempt < max_retries
-                    and self.enabled
-                    and not self._shutdown_event.is_set()
+                    and self._should_auto_reconnect()
                     and self._is_recoverable_connection_error(exc)
                 ):
                     logger.warning("Realtime text send failed; reconnecting live session.", exc_info=True)
@@ -1068,20 +1539,44 @@ class LiveSessionManager(QObject):
             await self._ensure_session_with_retry()
             if self._mic_task and not self._mic_task.done():
                 return
+            if self._voice_mode == "one_shot":
+                self._schedule_one_shot_timeout()
             self._mic_task = asyncio.create_task(self._microphone_loop())
             self.session_state_changed.emit("listening")
         except Exception:
             if self._voice_enabled:
                 self._voice_enabled = False
+                self._cancel_one_shot_tasks()
                 self.voice_active_changed.emit(False)
             raise
 
     async def _ensure_session_with_retry(self, retries: int = 1):
         attempt = 0
+        retried_without_resumption = False
         while True:
             try:
                 return await self._ensure_session()
             except Exception as exc:  # noqa: BLE001
+                if self._is_nonrecoverable_request_error(exc):
+                    had_resume_handle = bool(str(self._resume_handle or "").strip())
+                    if had_resume_handle and not retried_without_resumption:
+                        retried_without_resumption = True
+                        self._clear_resume_handle(reason=f"connect_rejected: {exc}")
+                        logger.warning(
+                            "Live session connect rejected resumption handle; retrying once without resumption."
+                        )
+                        await self._disconnect_session(reconnecting=True)
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    self._manual_disconnect_requested = True
+                    self._cancel_go_away_reconnect_task()
+                    await self._disconnect_session(close_client=True)
+                    raise RuntimeError(
+                        "Gemini Live rejected the connection request (invalid argument). "
+                        "Session disconnected to prevent reconnect loops."
+                    ) from exc
+
                 if attempt >= retries or not self._is_recoverable_connection_error(exc):
                     raise
                 delay_s = Config.LIVE_CONNECT_RETRY_BASE_DELAY_SECONDS * (attempt + 1)
@@ -1094,10 +1589,15 @@ class LiveSessionManager(QObject):
                 await asyncio.sleep(delay_s)
                 attempt += 1
 
-    async def _stop_voice_async(self) -> None:
+    async def _stop_voice_async(self, *, emit_voice_inactive: bool = True) -> None:
         if self._mic_task and not self._mic_task.done():
-            self._mic_task.cancel()
-            await asyncio.gather(self._mic_task, return_exceptions=True)
+            # Ask the loop to exit cleanly first so PortAudio reads are not interrupted mid-call.
+            self._voice_enabled = False
+            try:
+                await asyncio.wait_for(asyncio.shield(self._mic_task), timeout=0.8)
+            except asyncio.TimeoutError:
+                self._mic_task.cancel()
+                await asyncio.gather(self._mic_task, return_exceptions=True)
         self._mic_task = None
         if self._transport is not None:
             try:
@@ -1108,13 +1608,62 @@ class LiveSessionManager(QObject):
                         "Live audio stream end failed; reconnecting session: %s",
                         exc,
                     )
-                    if self.enabled and not self._shutdown_event.is_set():
+                    if self._should_auto_reconnect():
                         await self._reconnect_with_resume()
                 else:
                     logger.debug("Failed to flush live audio stream end", exc_info=True)
         self.audio_level_changed.emit(0.0)
+        self._cancel_one_shot_tasks(keep_current=True)
+        self._voice_mode = "continuous"
+        self._one_shot_engaged = False
+        if emit_voice_inactive:
+            self.voice_active_changed.emit(False)
         if self.enabled:
             self.session_state_changed.emit("listening")
+
+    async def _one_shot_timeout_loop(self) -> None:
+        try:
+            await asyncio.sleep(Config.WAKE_WORD_NO_SPEECH_TIMEOUT_SECONDS)
+            if (
+                not self._voice_enabled
+                or self._voice_mode != "one_shot"
+                or self._one_shot_engaged
+            ):
+                return
+            self.status_received.emit("Wake word timed out. Say Hey Pixie and try again.")
+            self._voice_enabled = False
+            await self._stop_voice_async()
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._one_shot_timeout_task is current:
+                self._one_shot_timeout_task = None
+
+    async def _one_shot_finalize_loop(self) -> None:
+        try:
+            while self._voice_enabled and self._voice_mode == "one_shot":
+                if self.broker.has_pending() or not self._speaker_queue_is_idle():
+                    await asyncio.sleep(0.05)
+                    continue
+                remaining = self._audio_output_suppressed_until - time.monotonic()
+                if remaining > 0.0:
+                    await asyncio.sleep(min(remaining, 0.05))
+                    continue
+                extra_delay = max(0.0, float(Config.WAKE_WORD_RESUME_DELAY_SECONDS))
+                if extra_delay > 0.0:
+                    await asyncio.sleep(extra_delay)
+                if not self._voice_enabled or self._voice_mode != "one_shot":
+                    return
+                self._voice_enabled = False
+                await self._stop_voice_async()
+                return
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._one_shot_finalize_task is current:
+                self._one_shot_finalize_task = None
 
     async def _ensure_session(self):
         if self._transport is not None:
@@ -1163,6 +1712,8 @@ class LiveSessionManager(QObject):
             if self._voice_enabled and (self._mic_task is None or self._mic_task.done()):
                 self._mic_task = asyncio.create_task(self._microphone_loop())
             self.session_state_changed.emit("listening")
+            if self._pending_text_commands:
+                self._schedule_pending_text_command_flush(reason="session_connected")
             return transport
         except Exception:
             try:
@@ -1187,6 +1738,7 @@ class LiveSessionManager(QObject):
             self._receive_task,
             self._rotation_task,
             self._guidance_observer_task,
+            self._go_away_reconnect_task,
             self._connect_task,
         ]
         pending: list[asyncio.Task] = []
@@ -1204,6 +1756,7 @@ class LiveSessionManager(QObject):
         self._receive_task = None
         self._rotation_task = None
         self._guidance_observer_task = None
+        self._go_away_reconnect_task = None
         self._connect_task = None
         self._connect_in_progress = False
         self._speaker_queue = None
@@ -1274,9 +1827,24 @@ class LiveSessionManager(QObject):
             )
         else:
             config["media_resolution"] = "MEDIA_RESOLUTION_LOW"
-        config["session_resumption"] = (
-            {"handle": self._resume_handle} if self._resume_handle else {}
-        )
+
+        # Keep direct SDK config typed (legacy stable behavior), but keep plain dicts for backend JSON transport.
+        if Config.USE_DIRECT_API and types is not None and hasattr(types, "SessionResumptionConfig"):
+            try:
+                if self._resume_handle:
+                    config["session_resumption"] = types.SessionResumptionConfig(
+                        handle=self._resume_handle
+                    )
+                else:
+                    config["session_resumption"] = types.SessionResumptionConfig()
+            except TypeError:
+                config["session_resumption"] = (
+                    {"handle": self._resume_handle} if self._resume_handle else {}
+                )
+        else:
+            config["session_resumption"] = (
+                {"handle": self._resume_handle} if self._resume_handle else {}
+            )
         return config
 
     async def _receive_loop(self) -> None:
@@ -1309,6 +1877,7 @@ class LiveSessionManager(QObject):
                             if go_away.get("time_left")
                             else "",
                         )
+                        self._schedule_go_away_reconnect(go_away)
 
                     server_content = response.get("server_content")
                     if not isinstance(server_content, dict):
@@ -1318,6 +1887,7 @@ class LiveSessionManager(QObject):
                     if isinstance(input_transcription, dict):
                         text = str(input_transcription.get("text") or "")
                         if text:
+                            self._mark_one_shot_engaged()
                             self._user_buffer = self._merge_transcript_text(self._user_buffer, text)
                             self.transcript_received.emit("user", self._user_buffer, False)
 
@@ -1337,6 +1907,11 @@ class LiveSessionManager(QObject):
                             if not isinstance(part, dict):
                                 continue
                             part_text = str(part.get("text") or "")
+                            if part_text and bool(part.get("thought")):
+                                logger.info(
+                                    "LIVE_REASONING text=%s",
+                                    self._truncate_log_text(part_text),
+                                )
                             if (
                                 part_text
                                 and not has_output_transcription
@@ -1369,7 +1944,21 @@ class LiveSessionManager(QObject):
                         self._clear_speaker_queue()
                         pending_audio_chunks.clear()
 
-                    if bool(server_content.get("turn_complete")):
+                    turn_completed = bool(server_content.get("turn_complete"))
+                    generation_completed = bool(server_content.get("generation_complete"))
+                    should_finalize_turn = bool(turn_completed)
+                    if (
+                        not should_finalize_turn
+                        and generation_completed
+                        and not pending_audio_chunks
+                        and not self.broker.has_pending()
+                    ):
+                        should_finalize_turn = True
+
+                    if generation_completed and not turn_completed:
+                        self._schedule_typed_turn_idle_finish(reason="generation_complete")
+
+                    if should_finalize_turn:
                         assistant_text = str(self._assistant_buffer or "").strip()
                         self._drain_transcript_buffers(emit_final=True)
                         self._finish_text_turn(assistant_text=assistant_text)
@@ -1383,10 +1972,22 @@ class LiveSessionManager(QObject):
                         )
                         await self._enqueue_speaker_audio(payload, sample_rate)
 
-                if self.enabled and not self._shutdown_event.is_set():
+                    if turn_completed or generation_completed:
+                        self._schedule_one_shot_finalize()
+
+                if self._shutdown_event.is_set():
+                    break
+
+                if self._should_auto_reconnect():
+                    if received_messages:
+                        logger.debug(
+                            "Live receive stream ended after events; re-subscribing to the existing session stream."
+                        )
+                        await asyncio.sleep(0.05)
+                        continue
+
                     logger.warning(
-                        "Live receive stream ended%s; reconnecting with session resumption.",
-                        "" if received_messages else " before any messages",
+                        "Live receive stream ended before any messages; reconnecting with session resumption."
                     )
                     await self._reconnect_with_resume()
                     return
@@ -1402,38 +2003,71 @@ class LiveSessionManager(QObject):
             return
         except Exception as exc:  # noqa: BLE001
             if self._maybe_disable_image_input_for_error(exc):
-                if self.enabled and not self._shutdown_event.is_set():
+                if self._should_auto_reconnect():
                     await self._reconnect_with_resume()
                 return
             if self._is_recoverable_connection_error(exc):
                 logger.warning("Live receive loop connection lost; reconnecting: %s", exc)
-                if self.enabled and not self._shutdown_event.is_set():
+                if self._should_auto_reconnect():
                     await self._reconnect_with_resume()
+                return
+            if self._is_nonrecoverable_request_error(exc):
+                logger.error(
+                    "Live receive loop hit a non-recoverable request error; stopping auto-reconnect: %s",
+                    exc,
+                )
+                self._clear_resume_handle(reason=f"receive_error: {exc}")
+                self._manual_disconnect_requested = True
+                self._cancel_go_away_reconnect_task()
+                message = (
+                    "Gemini Live rejected the last request (invalid argument). "
+                    "Session disconnected to prevent reconnect loops."
+                )
+                self._finish_text_turn(error=message)
+                self.error_received.emit(message)
+                if self.enabled and not self._shutdown_event.is_set():
+                    await self._disconnect_session(close_client=True)
                 return
             logger.exception("Live receive loop failed")
             self._finish_text_turn(error=f"Live session error: {exc}")
             self.error_received.emit(f"Live session error: {exc}")
             if self.enabled and not self._shutdown_event.is_set():
-                await self._reconnect_with_resume()
+                await self._disconnect_session(close_client=True)
+            return
 
     async def _handle_tool_call(self, tool_call: Any) -> None:
         responses = []
         function_calls = []
         pending_reasoning_escalation = ""
+        pending_disconnect_message = ""
         if isinstance(tool_call, dict):
             function_calls = tool_call.get("function_calls") or []
         for function_call in function_calls:
             if not isinstance(function_call, dict):
                 continue
+            call_id = str(function_call.get("id") or "")
+            call_name = str(function_call.get("name") or "").strip()
             args = self._parse_args(function_call.get("args"))
             if not args:
                 args = self._parse_args(function_call.get("arguments"))
+            logger.info(
+                "LIVE_TOOL_CALL_REQUEST id=%s name=%s args=%s",
+                call_id,
+                call_name,
+                self._serialize_log_value(args),
+            )
             result = await asyncio.to_thread(
                 self.tools.execute,
-                str(function_call.get("name") or ""),
+                call_name,
                 args,
             )
-            if str(function_call.get("name") or "").strip() == "request_reasoning_escalation":
+            logger.info(
+                "LIVE_TOOL_CALL_RESULT id=%s name=%s result=%s",
+                call_id,
+                call_name,
+                self._serialize_log_value(result),
+            )
+            if call_name == "request_reasoning_escalation":
                 escalation_result = result.get("result") if isinstance(result, dict) else None
                 target_level = ""
                 if isinstance(escalation_result, dict) and bool(
@@ -1449,10 +2083,20 @@ class LiveSessionManager(QObject):
                     > self._thinking_level_rank(pending_reasoning_escalation)
                 ):
                     pending_reasoning_escalation = target_level
+            if call_name == "disconnect_live_session":
+                disconnect_result = result.get("result") if isinstance(result, dict) else None
+                if isinstance(disconnect_result, dict) and bool(
+                    disconnect_result.get("disconnect_requested")
+                ):
+                    pending_disconnect_message = str(
+                        disconnect_result.get("status_message")
+                        or result.get("message")
+                        or ""
+                    ).strip()
             responses.append(
                 {
                     "id": function_call.get("id"),
-                    "name": str(function_call.get("name") or ""),
+                    "name": call_name,
                     "response": {"result": result},
                 }
             )
@@ -1460,17 +2104,43 @@ class LiveSessionManager(QObject):
         if responses and self._transport is not None:
             await self._transport.send_tool_responses(responses)
 
+        while self._pending_capture_paths and self._transport is not None:
+            path, summary = self._pending_capture_paths.popleft()
+            await self._send_capture_context(path, summary)
+
+        if pending_disconnect_message:
+            logger.info(
+                "LIVE_TOOL_CALL_DISCONNECT status_message=%s",
+                self._truncate_log_text(pending_disconnect_message),
+            )
+            await self._disconnect_after_tool_call(status_message=pending_disconnect_message)
+            return
+
         if (
             pending_reasoning_escalation
             and self.enabled
             and not self._shutdown_event.is_set()
         ):
+            logger.info(
+                "LIVE_REASONING_ESCALATION reconnecting target_level=%s",
+                pending_reasoning_escalation,
+            )
             self.status_received.emit("Increasing reasoning depth and resuming...")
             await self._reconnect_with_resume()
 
-        while self._pending_capture_paths and self._transport is not None:
-            path, summary = self._pending_capture_paths.popleft()
-            await self._send_capture_context(path, summary)
+    async def _disconnect_after_tool_call(self, *, status_message: str = "") -> None:
+        self._cancel_go_away_reconnect_task()
+        self._cancel_one_shot_tasks()
+        self._clear_session_context(reason="Gemini Live disconnected by request.")
+        self._reset_reasoning_escalation_state()
+        self._manual_disconnect_requested = True
+        self._voice_enabled = False
+        self._voice_mode = "continuous"
+        self._one_shot_engaged = False
+        await self._disconnect_session(close_client=True)
+        self.voice_active_changed.emit(False)
+        if str(status_message or "").strip():
+            self.status_received.emit(str(status_message))
 
     async def _video_loop(self) -> None:
         transport = await self._ensure_session_with_retry()
@@ -1487,56 +2157,138 @@ class LiveSessionManager(QObject):
             raise
         except Exception as exc:  # noqa: BLE001
             if self._maybe_disable_image_input_for_error(exc):
-                if self.enabled and not self._shutdown_event.is_set():
+                if self._should_auto_reconnect():
                     await self._reconnect_with_resume()
                 return
             if self._is_recoverable_connection_error(exc):
                 logger.warning("Live video loop connection lost; reconnecting: %s", exc)
-                if self.enabled and not self._shutdown_event.is_set():
+                if self._should_auto_reconnect():
                     await self._reconnect_with_resume()
                 return
             logger.debug("Live video loop stopped: %s", exc, exc_info=True)
 
     async def _microphone_loop(self) -> None:
         await self._ensure_session_with_retry()
-        pya = pyaudio.PyAudio()
+        pya = None
         stream = None
+        read_failures = 0
+        last_user_error_at = 0.0
+        stream_io_lock = threading.Lock()
+
+        def _read_stream_chunk(frames_per_buffer: int) -> bytes:
+            with stream_io_lock:
+                current_stream = stream
+                if current_stream is None:
+                    return b""
+                return current_stream.read(frames_per_buffer, exception_on_overflow=False)
+
+        def _close_stream_handle() -> None:
+            nonlocal stream
+            with stream_io_lock:
+                current_stream = stream
+                stream = None
+                if current_stream is None:
+                    return
+                try:
+                    stop_stream = getattr(current_stream, "stop_stream", None)
+                    if callable(stop_stream):
+                        stop_stream()
+                except Exception:
+                    logger.debug("Failed to stop microphone stream", exc_info=True)
+                try:
+                    current_stream.close()
+                except Exception:
+                    logger.debug("Failed to close microphone stream", exc_info=True)
+
         try:
-            mic_info = pya.get_default_input_device_info()
-            stream = await asyncio.to_thread(
-                pya.open,
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=Config.LIVE_AUDIO_INPUT_RATE,
-                input=True,
-                input_device_index=mic_info["index"],
-                frames_per_buffer=1024,
-            )
+            pya = pyaudio.PyAudio()
             while self._voice_enabled:
-                data = await asyncio.to_thread(stream.read, 1024, exception_on_overflow=False)
-                self.audio_level_changed.emit(self._compute_audio_level(data))
+                if stream is None:
+                    try:
+                        mic_info = pya.get_default_input_device_info()
+                        opened_stream = await asyncio.to_thread(
+                            pya.open,
+                            format=pyaudio.paInt16,
+                            channels=1,
+                            rate=Config.LIVE_AUDIO_INPUT_RATE,
+                            input=True,
+                            input_device_index=mic_info["index"],
+                            frames_per_buffer=1024,
+                        )
+                        with stream_io_lock:
+                            stream = opened_stream
+                        read_failures = 0
+                    except Exception as exc:  # noqa: BLE001
+                        if self._is_recoverable_connection_error(exc):
+                            logger.warning("Microphone stream connection lost; reconnecting: %s", exc)
+                            if self._should_auto_reconnect():
+                                await self._reconnect_with_resume()
+                                continue
+                            return
+                        now = time.monotonic()
+                        if now - last_user_error_at >= 4.0:
+                            self.error_received.emit(f"Microphone unavailable, retrying: {exc}")
+                            last_user_error_at = now
+                        read_failures += 1
+                        await asyncio.sleep(min(1.5, 0.1 * read_failures))
+                        continue
+
+                try:
+                    data = await asyncio.to_thread(_read_stream_chunk, 1024)
+                except Exception as exc:  # noqa: BLE001
+                    _close_stream_handle()
+                    if self._is_recoverable_connection_error(exc):
+                        logger.warning("Microphone stream connection lost; reconnecting: %s", exc)
+                        if self._should_auto_reconnect():
+                            await self._reconnect_with_resume()
+                            continue
+                        return
+                    logger.warning("Microphone read failed; reopening capture stream.", exc_info=True)
+                    read_failures += 1
+                    await asyncio.sleep(min(1.0, 0.08 * read_failures))
+                    continue
+
+                if not data:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                level = self._compute_audio_level(data)
+                if level >= 0.04:
+                    self._mark_one_shot_engaged()
+                self.audio_level_changed.emit(level)
                 if time.monotonic() < self._audio_output_suppressed_until:
                     continue
-                await self._send_audio_chunk(data)
+                try:
+                    await self._send_audio_chunk(data)
+                except Exception as exc:  # noqa: BLE001
+                    if self._is_recoverable_connection_error(exc):
+                        logger.warning("Microphone stream connection lost; reconnecting: %s", exc)
+                        if self._should_auto_reconnect():
+                            await self._reconnect_with_resume()
+                            continue
+                        return
+                    logger.warning("Microphone audio send failed; retrying stream.", exc_info=True)
+                    _close_stream_handle()
+                    read_failures += 1
+                    await asyncio.sleep(min(1.0, 0.08 * read_failures))
+                    continue
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             if self._is_recoverable_connection_error(exc):
                 logger.warning("Microphone stream connection lost; reconnecting: %s", exc)
-                if self.enabled and not self._shutdown_event.is_set():
+                if self._should_auto_reconnect():
                     await self._reconnect_with_resume()
                 return
             self.error_received.emit(f"Microphone streaming failed: {exc}")
         finally:
             self.audio_level_changed.emit(0.0)
             self.assistant_audio_level_changed.emit(0.0)
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception:
-                    logger.debug("Failed to close microphone stream", exc_info=True)
+            _close_stream_handle()
             try:
-                pya.terminate()
+                if pya is not None:
+                    with stream_io_lock:
+                        pya.terminate()
             except Exception:
                 logger.debug("Failed to terminate microphone audio handle", exc_info=True)
 
@@ -1555,14 +2307,43 @@ class LiveSessionManager(QObject):
         output_rate = Config.LIVE_AUDIO_OUTPUT_RATE
         ratecv_state: Any = None
         pending_chunk: Optional[tuple[bytes, int]] = None
+        stream_io_lock = threading.Lock()
+
+        def _write_stream(payload: bytes) -> None:
+            with stream_io_lock:
+                current_stream = stream
+                if current_stream is None:
+                    return
+                current_stream.write(payload)
+
+        def _close_stream_handle() -> None:
+            nonlocal stream
+            with stream_io_lock:
+                current_stream = stream
+                stream = None
+                if current_stream is None:
+                    return
+                try:
+                    stop_stream = getattr(current_stream, "stop_stream", None)
+                    if callable(stop_stream):
+                        stop_stream()
+                except Exception:
+                    logger.debug("Failed to stop speaker stream", exc_info=True)
+                try:
+                    current_stream.close()
+                except Exception:
+                    logger.debug("Failed to close speaker stream", exc_info=True)
+
         try:
-            stream = await asyncio.to_thread(
+            opened_stream = await asyncio.to_thread(
                 pya.open,
                 format=pyaudio.paInt16,
                 channels=1,
                 rate=output_rate,
                 output=True,
             )
+            with stream_io_lock:
+                stream = opened_stream
             while True:
                 if self._speaker_queue is None:
                     await asyncio.sleep(0.05)
@@ -1623,20 +2404,17 @@ class LiveSessionManager(QObject):
                     self._audio_output_suppressed_until,
                     time.monotonic() + play_seconds + suppress_tail,
                 )
-                await asyncio.to_thread(stream.write, out)
+                await asyncio.to_thread(_write_stream, out)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.debug("Speaker playback stopped: %s", exc, exc_info=True)
         finally:
             self.assistant_audio_level_changed.emit(0.0)
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception:
-                    logger.debug("Failed to close speaker stream", exc_info=True)
+            _close_stream_handle()
             try:
-                pya.terminate()
+                with stream_io_lock:
+                    pya.terminate()
             except Exception:
                 logger.debug("Failed to terminate speaker audio handle", exc_info=True)
 
@@ -1655,16 +2433,19 @@ class LiveSessionManager(QObject):
                     continue
                 if self.broker.has_pending():
                     continue
+                if not self._should_auto_reconnect():
+                    continue
                 await self._reconnect_with_resume()
         except asyncio.CancelledError:
             raise
 
     async def _reconnect_with_resume(self) -> None:
-        if self._shutdown_event.is_set():
+        if not self._should_auto_reconnect():
             return
         if self._reconnect_in_progress:
             return
         self._reconnect_in_progress = True
+        self._cancel_go_away_reconnect_task(keep_current=True)
         fragments = self._drain_transcript_buffers(emit_final=True)
         self._resume_pending_user_buffer = fragments["user"]
         self._resume_pending_assistant_buffer = fragments["assistant"]
@@ -1676,7 +2457,7 @@ class LiveSessionManager(QObject):
         )
         try:
             await self._disconnect_session(reconnecting=True)
-            if self.enabled and not self._shutdown_event.is_set():
+            if self._should_auto_reconnect():
                 await self._ensure_session()
                 if reconnect_prompt:
                     await self._send_realtime_text(reconnect_prompt, allow_retry=False)
@@ -1839,8 +2620,16 @@ class LiveSessionManager(QObject):
         }
         if emit_final:
             if fragments["user"]:
+                logger.info(
+                    "LIVE_USER_TRANSCRIPT_FINAL text=%s",
+                    self._truncate_log_text(fragments["user"]),
+                )
                 self.transcript_received.emit("user", fragments["user"], True)
             if fragments["assistant"]:
+                logger.info(
+                    "LIVE_ASSISTANT_RESPONSE_FINAL text=%s",
+                    self._truncate_log_text(fragments["assistant"]),
+                )
                 self.transcript_received.emit("assistant", fragments["assistant"], True)
         self._user_buffer = ""
         self._assistant_buffer = ""
@@ -1965,6 +2754,10 @@ class LiveSessionManager(QObject):
 
     def _on_action_update(self, payload: dict[str, Any]) -> None:
         self._recent_action_updates.append(payload)
+        logger.info(
+            "LIVE_ACTION_UPDATE payload=%s",
+            self._serialize_log_value(self._compact_action_update(payload)),
+        )
         status = str(payload.get("status") or "").strip().lower()
         self._note_typed_turn_activity()
         if status == "queued":
@@ -2003,7 +2796,7 @@ class LiveSessionManager(QObject):
             )
         except Exception as exc:  # noqa: BLE001
             if self._maybe_disable_image_input_for_error(exc):
-                if self.enabled and not self._shutdown_event.is_set():
+                if self._should_auto_reconnect():
                     await self._reconnect_with_resume()
                 return
             logger.debug("Failed to push capture context: %s", exc, exc_info=True)
@@ -2097,8 +2890,10 @@ class LiveSessionManager(QObject):
     def _is_recoverable_connection_error(exc: Exception) -> bool:
         message = str(exc or "").lower()
         name = exc.__class__.__name__.lower()
+        status = getattr(exc, "status", None)
         return (
-            "connectionclosed" in name
+            status == 1000
+            or "connectionclosed" in name
             or "connectionreseterror" in name
             or "timeouterror" in name
             or "winerror 64" in message
@@ -2108,9 +2903,36 @@ class LiveSessionManager(QObject):
             or "ping timeout" in message
             or "no close frame received" in message
             or "keepalive ping timeout" in message
+            or "sent 1000 (ok)" in message
+            or "received 1000 (ok)" in message
+            or message in {"1000 none", "1000 none."}
             or "session is not connected" in message
             or "live session is not connected" in message
             or "backend session is not connected" in message
+        )
+
+    @staticmethod
+    def _is_nonrecoverable_request_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        status = getattr(exc, "status", None)
+        status_code = getattr(exc, "status_code", None)
+        code = getattr(exc, "code", None)
+
+        numeric_codes = {
+            str(value).strip().lower()
+            for value in (status, status_code, code)
+            if value is not None
+        }
+        if "1007" in numeric_codes:
+            return True
+
+        return (
+            "1007 none" in message
+            or "received 1007" in message
+            or "sent 1007" in message
+            or "invalid frame payload data" in message
+            or "request contains an invalid argument" in message
+            or "request contains invalid argument" in message
         )
 
     async def _enqueue_speaker_audio(self, data: bytes, sample_rate: int) -> None:

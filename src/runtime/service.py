@@ -67,6 +67,8 @@ class ElectronRuntimeService(QObject):
             self.state_store.liveEnabledChanged,
             self.state_store.liveVoiceActiveChanged,
             self.state_store.liveSessionStateChanged,
+            self.state_store.wakeWordEnabledChanged,
+            self.state_store.wakeWordStateChanged,
             self.state_store.expandedChanged,
             self.state_store.backgroundHiddenChanged,
             self.state_store.agentViewEnabledChanged,
@@ -118,10 +120,20 @@ class ElectronRuntimeService(QObject):
             return self.controller.handle_user_command(body.get("text"))
         if command == "live.setEnabled":
             self.controller.handle_live_mode_changed(bool(body.get("enabled")))
-            return {"liveEnabled": self.state_store.liveEnabled}
+            return {
+                "liveEnabled": self.state_store.liveEnabled,
+                "liveSessionState": self.state_store.liveSessionState,
+            }
         if command == "live.setVoice":
             self.controller.handle_live_voice_toggled(bool(body.get("enabled")))
             return {"liveVoiceActive": self.state_store.liveVoiceActive}
+        if command == "wakeWord.setEnabled":
+            self.controller.handle_wake_word_toggled(bool(body.get("enabled")))
+            return {
+                "wakeWordEnabled": self.state_store.wakeWordEnabled,
+                "wakeWordState": self.state_store.wakeWordState,
+                "wakeWordUnavailableReason": self.state_store.wakeWordUnavailableReason,
+            }
         if command == "live.stop":
             self.controller.stop_current_turn()
             return {"stopped": True}

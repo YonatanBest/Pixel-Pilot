@@ -23,6 +23,10 @@ function makeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot
     liveEnabled: true,
     liveVoiceActive: false,
     liveSessionState: 'connected',
+    wakeWordEnabled: true,
+    wakeWordState: 'armed',
+    wakeWordPhrase: 'Hey Pixie',
+    wakeWordUnavailableReason: '',
     userAudioLevel: 0.3,
     assistantAudioLevel: 0.1,
     expanded: true,
@@ -73,6 +77,7 @@ function makeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot
 function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
   invokeRuntime: ReturnType<typeof vi.fn>;
   setBackgroundHidden: ReturnType<typeof vi.fn>;
+  setTrayOnly: ReturnType<typeof vi.fn>;
   setExpanded: ReturnType<typeof vi.fn>;
   toggleSettingsWindow: ReturnType<typeof vi.fn>;
   closeSettingsWindow: ReturnType<typeof vi.fn>;
@@ -91,6 +96,7 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
 
   const invokeRuntime = vi.fn().mockResolvedValue({});
   const setBackgroundHidden = vi.fn().mockResolvedValue({});
+  const setTrayOnly = vi.fn().mockResolvedValue({});
   const setExpanded = vi.fn().mockResolvedValue({});
   const toggleSettingsWindow = vi.fn().mockResolvedValue({ visible: true });
   const closeSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
@@ -104,6 +110,7 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
     invokeRuntime,
     setExpanded,
     setBackgroundHidden,
+    setTrayOnly,
     toggleSettingsWindow,
     closeSettingsWindow,
     updateWindowLayout,
@@ -143,6 +150,7 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
   return {
     invokeRuntime,
     setBackgroundHidden,
+    setTrayOnly,
     setExpanded,
     toggleSettingsWindow,
     closeSettingsWindow,
@@ -252,7 +260,7 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    expect(await screen.findByPlaceholderText(/type (a command for|or speak to) pixelpilot live/i)).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText(/type a command/i)).toBeInTheDocument();
 
     const workspaceBadge = screen.getByRole('button', { name: /current workspace: user desktop/i });
     expect(workspaceBadge).toBeDisabled();
@@ -301,12 +309,12 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    const commandInput = await screen.findByPlaceholderText(/type (a command for|or speak to) pixelpilot live/i);
+    const commandInput = await screen.findByPlaceholderText(/type a command/i);
     await userEvent.type(commandInput, 'Summarize the open window');
     await userEvent.click(screen.getByRole('button', { name: /send command/i }));
     await userEvent.click(screen.getByRole('button', { name: /current workspace: agent desktop\. click to hide the agent view/i }));
     await userEvent.click(screen.getByRole('button', { name: /enable voice input/i }));
-    await userEvent.click(screen.getByRole('button', { name: /disable live mode/i }));
+    await userEvent.click(screen.getByRole('button', { name: /disconnect live session/i }));
     await userEvent.click(screen.getByRole('button', { name: /open settings menu/i }));
     await userEvent.click(screen.getByRole('button', { name: /hide to notch/i }));
     await userEvent.click(screen.getByRole('button', { name: /expand details/i }));
@@ -325,11 +333,11 @@ describe('Electron renderer App', () => {
     });
   });
 
-  it('can turn live on and start voice from the mic control when ai is off', async () => {
+  it('can reconnect and start voice from the mic control when disconnected', async () => {
     const controls = setupApi(
       'overlay',
       makeSnapshot({
-        liveEnabled: false,
+        liveEnabled: true,
         liveVoiceActive: false,
         liveSessionState: 'disconnected'
       })
@@ -337,7 +345,7 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    await userEvent.click(await screen.findByRole('button', { name: /turn ai on and start voice/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /reconnect and start voice/i }));
 
     await waitFor(() => {
       expect(controls.invokeRuntime).toHaveBeenCalledWith('live.setEnabled', { enabled: true });
@@ -472,7 +480,8 @@ describe('Electron renderer App', () => {
       'settings',
       makeSnapshot({
         operationMode: 'SAFE',
-        visionMode: 'OCR'
+        visionMode: 'OCR',
+        wakeWordEnabled: true
       })
     );
 
@@ -482,12 +491,14 @@ describe('Electron renderer App', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /^auto$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^robo$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /wake word on/i }));
     await userEvent.click(screen.getByRole('button', { name: /sign out/i }));
 
     await waitFor(() => {
-      expect(controls.closeSettingsWindow).toHaveBeenCalledTimes(3);
+      expect(controls.closeSettingsWindow).toHaveBeenCalledTimes(4);
       expect(controls.invokeRuntime).toHaveBeenCalledWith('mode.set', { value: 'AUTO' });
       expect(controls.invokeRuntime).toHaveBeenCalledWith('vision.set', { value: 'ROBO' });
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('wakeWord.setEnabled', { enabled: false });
       expect(controls.invokeRuntime).toHaveBeenCalledWith('auth.logout', undefined);
     });
   });
@@ -647,18 +658,38 @@ describe('Electron renderer App', () => {
       'notch',
       makeSnapshot({
         backgroundHidden: true,
-        liveEnabled: false,
+        liveEnabled: true,
+        liveSessionState: 'disconnected',
+        wakeWordEnabled: false,
+        wakeWordState: 'disabled',
         recentActionUpdates: []
       })
     );
 
     render(<App />);
 
-    expect(await screen.findByText(/pixelpilot minimized/i)).toBeInTheDocument();
+    expect(await screen.findByText(/gemini live is disconnected/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /restore overlay/i }));
 
     await waitFor(() => {
       expect(controls.setBackgroundHidden).toHaveBeenCalledWith(false);
+    });
+  });
+
+  it('enters tray-only mode from the notch controls', async () => {
+    const controls = setupApi(
+      'notch',
+      makeSnapshot({
+        backgroundHidden: true,
+        recentActionUpdates: []
+      })
+    );
+
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /run in tray only/i }));
+    await waitFor(() => {
+      expect(controls.setTrayOnly).toHaveBeenCalledWith(true);
     });
   });
 
@@ -676,7 +707,8 @@ describe('Electron renderer App', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: /restore overlay/i }));
 
-    expect(await screen.findByText(/bridge still connecting/i)).toBeInTheDocument();
+    const matches = await screen.findAllByText(/bridge still connecting/i);
+    expect(matches.length).toBeGreaterThan(0);
   });
 
   it('renders the sidecar shell and shows incoming preview frames', async () => {

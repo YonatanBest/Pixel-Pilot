@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createRequire } from 'node:module';
-import net from 'node:net';
+import net, { type Server as NetServer } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
@@ -10,7 +10,7 @@ const { app } = require('electron') as typeof import('electron');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const BRIDGE_START_TIMEOUT_MS = 15000;
+const BRIDGE_START_TIMEOUT_MS = 30000;
 const BRIDGE_POLL_INTERVAL_MS = 150;
 
 function prependEnvPath(currentValue: string | undefined, nextEntry: string): string {
@@ -64,9 +64,12 @@ async function canConnect(url: string): Promise<boolean> {
 
 async function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
-    const server = net.createServer();
+    const server: NetServer = net.createServer();
     server.unref();
-    server.on('error', reject);
+    (server as unknown as { on: (event: string, listener: (error: Error) => void) => void }).on(
+      'error',
+      (error: Error) => reject(error)
+    );
     server.listen(0, '127.0.0.1', () => {
       const address = server.address();
       server.close(() => {
@@ -85,6 +88,15 @@ export class RuntimeProcessManager {
   private token = '';
   private port = 0;
   private launchError: Error | null = null;
+  private endpoints: { controlUrl: string; sidecarUrl: string } | null = null;
+
+  isRunning(): boolean {
+    return Boolean(this.child && this.child.exitCode === null);
+  }
+
+  getBridgeEndpoints(): { controlUrl: string; sidecarUrl: string } | null {
+    return this.endpoints;
+  }
 
   async start(): Promise<{ controlUrl: string; sidecarUrl: string }> {
     this.port = await getFreePort();
@@ -105,7 +117,11 @@ export class RuntimeProcessManager {
       env,
       stdio: 'pipe'
     });
-    this.child.once('error', (error) => {
+    (
+      this.child as unknown as {
+        on: (event: string, listener: (error: Error) => void) => void;
+      }
+    ).on('error', (error: Error) => {
       this.launchError = error instanceof Error ? error : new Error(String(error));
     });
 
@@ -123,15 +139,18 @@ export class RuntimeProcessManager {
       throw error;
     }
 
-    return {
+    this.endpoints = {
       controlUrl: `ws://127.0.0.1:${this.port}/control?token=${this.token}`,
       sidecarUrl: `ws://127.0.0.1:${this.port}/sidecar?token=${this.token}`
     };
+
+    return this.endpoints;
   }
 
   stop(): void {
     this.child?.kill();
     this.child = null;
+    this.endpoints = null;
   }
 
   private async waitForBridgeServer(): Promise<void> {

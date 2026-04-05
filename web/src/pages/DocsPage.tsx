@@ -4,14 +4,8 @@ import { Footer } from '../components/Footer';
 
 const envVars = [
     { key: 'GEMINI_API_KEY', note: 'Required' },
-    { key: 'GEMINI_MODEL', note: 'Default: gemini-3-flash-preview' },
-    { key: 'DEFAULT_MODE', note: 'guide | safe | auto' },
-    { key: 'VISION_MODE', note: 'robo | ocr' },
-    { key: 'LIVE_MODE_DEFAULT_VOICE_ENABLED', note: 'Optional: true | false' },
-    { key: 'ENABLE_GATEWAY', note: 'Optional: true | false' },
-    { key: 'GATEWAY_HOST', note: 'Optional: default localhost' },
-    { key: 'GATEWAY_PORT', note: 'Optional: default 8765' },
-    { key: 'PIXELPILOT_GATEWAY_TOKEN', note: 'Optional' }
+    { key: 'BACKEND_URL', note: 'Required for backend mode' },
+    { key: 'Advanced tuning', note: 'Edit src/config.py for all other runtime values' }
 ];
 
 const moduleMap = [
@@ -33,7 +27,7 @@ const modeGuide = [
     { mode: 'GUIDANCE', detail: 'Live read-only coaching mode. Pixie tutors the user but does not take desktop actions.' },
     { mode: 'SAFE', detail: 'Live autonomous mode that confirms every mutating desktop action.' },
     { mode: 'AUTO', detail: 'Live autonomous mode without per-action confirmation.' },
-    { mode: 'AI power', detail: 'When available, AI and live voice start enabled by default and the Live button becomes an AI on/off control.' }
+    { mode: 'Live connection', detail: 'When available, Live stays enabled and the top-bar control disconnects or reconnects the session instead of toggling AI off.' }
 ];
 
 const visionGuide = [

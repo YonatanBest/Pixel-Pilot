@@ -34,6 +34,10 @@ export type RuntimeSnapshot = {
   liveEnabled: boolean;
   liveVoiceActive: boolean;
   liveSessionState: string;
+  wakeWordEnabled: boolean;
+  wakeWordState: string;
+  wakeWordPhrase: string;
+  wakeWordUnavailableReason: string;
   userAudioLevel: number;
   assistantAudioLevel: number;
   expanded: boolean;
@@ -85,6 +89,7 @@ export type PixelPilotApi = {
   invokeRuntime: (method: string, payload?: RuntimeCommandPayload) => Promise<Record<string, unknown>>;
   setExpanded: (expanded: boolean) => Promise<Record<string, unknown>>;
   setBackgroundHidden: (hidden: boolean) => Promise<Record<string, unknown>>;
+  setTrayOnly: (enabled: boolean) => Promise<Record<string, unknown>>;
   toggleSettingsWindow: () => Promise<{ visible: boolean }>;
   closeSettingsWindow: () => Promise<{ visible: boolean }>;
   updateWindowLayout: (payload: WindowLayoutPayload) => Promise<void>;
