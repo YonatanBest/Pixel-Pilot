@@ -161,6 +161,99 @@ class LiveSessionManager(QObject):
         if clean:
             self.status_received.emit(clean)
 
+    def _queue_uac_runtime_hint_to_model(self, *, active: bool, message: str = "") -> None:
+        if not self.enabled or self._transport is None or self._shutdown_event.is_set():
+            return
+        if self._reconnect_in_progress:
+            return
+
+        status_text = str(message or "").strip()
+        if bool(active):
+            hint = (
+                "Runtime UAC update. This is internal state, not a new user request. "
+                "UAC mode is active and elevation is pending. Do not claim an administrator "
+                "launch succeeded yet. Wait for UAC result confirmation (ALLOW or DENY) "
+                "from uac_get_progress or runtime status updates before reporting outcome."
+            )
+        else:
+            hint = (
+                "Runtime UAC update. This is internal state, not a new user request. "
+                "UAC mode is cleared. Report elevation outcome strictly from the final UAC "
+                "result, and only claim administrator success when the resolved decision is ALLOW."
+            )
+
+        if status_text:
+            hint = f"{hint} Runtime status: {json.dumps(status_text, ensure_ascii=True)}"
+
+        self._submit_async(
+            self._send_realtime_text(hint, allow_retry=False),
+            ensure_loop=False,
+        )
+
+    @staticmethod
+    def _looks_like_admin_completion_claim(text: str) -> bool:
+        clean = str(text or "").strip().lower()
+        if not clean:
+            return False
+
+        if any(
+            marker in clean
+            for marker in (
+                "can't",
+                "cannot",
+                "unable",
+                "won't",
+                "will not",
+                "didn't",
+                "did not",
+                "pending",
+                "waiting",
+                "not yet",
+                "denied",
+            )
+        ):
+            return False
+
+        completion_markers = (
+            "opened",
+            "launched",
+            "started",
+            "completed",
+            "done",
+            "successful",
+            "succeeded",
+            "granted",
+            "approved",
+        )
+        admin_markers = (
+            "administrator",
+            "as admin",
+            "admin mode",
+            "elevat",
+            "uac",
+        )
+        return any(word in clean for word in completion_markers) and any(
+            word in clean for word in admin_markers
+        )
+
+    def _guard_assistant_output_for_uac(self, text: str) -> str:
+        clean = str(text or "").strip()
+        if not clean:
+            return clean
+        if not bool(self._runtime_uac_mode_active):
+            return clean
+        if not self._looks_like_admin_completion_claim(clean):
+            return clean
+
+        logger.info(
+            "LIVE_UAC_RESPONSE_GUARD original=%s",
+            self._truncate_log_text(clean),
+        )
+        return (
+            "UAC approval is still pending. I will confirm administrator launch status only "
+            "after UAC resolves with ALLOW or DENY."
+        )
+
     def _set_runtime_uac_mode(
         self,
         active: bool,
@@ -185,6 +278,10 @@ class LiveSessionManager(QObject):
                 is_active,
                 str(source or "live_session"),
                 self._truncate_log_text(state.get("message")),
+            )
+            self._queue_uac_runtime_hint_to_model(
+                active=is_active,
+                message=str(state.get("message") or message or ""),
             )
         return state
 
@@ -1949,6 +2046,7 @@ class LiveSessionManager(QObject):
                     output_transcription = server_content.get("output_transcription")
                     if isinstance(output_transcription, dict):
                         output_text = str(output_transcription.get("text") or "")
+                        output_text = self._guard_assistant_output_for_uac(output_text)
                         if output_text:
                             self._assistant_buffer = self._merge_transcript_text(self._assistant_buffer, output_text)
                             self.transcript_received.emit("assistant", self._assistant_buffer, False)
@@ -1971,6 +2069,7 @@ class LiveSessionManager(QObject):
                                 and not has_output_transcription
                                 and not bool(part.get("thought"))
                             ):
+                                part_text = self._guard_assistant_output_for_uac(part_text)
                                 self._assistant_buffer = self._merge_transcript_text(
                                     self._assistant_buffer,
                                     part_text,
@@ -2013,7 +2112,10 @@ class LiveSessionManager(QObject):
                         self._schedule_typed_turn_idle_finish(reason="generation_complete")
 
                     if should_finalize_turn:
-                        assistant_text = str(self._assistant_buffer or "").strip()
+                        assistant_text = self._guard_assistant_output_for_uac(
+                            str(self._assistant_buffer or "").strip()
+                        )
+                        self._assistant_buffer = assistant_text
                         self._drain_transcript_buffers(emit_final=True)
                         self._finish_text_turn(assistant_text=assistant_text)
                         self.assistant_audio_level_changed.emit(0.0)
