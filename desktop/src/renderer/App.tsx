@@ -31,6 +31,8 @@ import {
 import type {
   ActionUpdate,
   AuthState,
+  BridgeStatus,
+  DoctorReport,
   ExtensionSummary,
   MessageEntry,
   RendererConfirmationRequest,
@@ -86,10 +88,17 @@ const emptyExtensionSummary: ExtensionSummary = {
   toolNames: []
 };
 
+const emptyDoctorReport: DoctorReport = {
+  status: 'unknown',
+  checks: []
+};
+
 type WindowLayout = {
   width: number;
   height: number;
 };
+
+type SettingsSectionId = 'general' | 'startup' | 'sessions' | 'extensions' | 'diagnostics';
 
 type LiveVisualState =
   | 'disabled'
@@ -300,6 +309,77 @@ function parseExtensionSummary(payload: unknown): ExtensionSummary {
     mcpServerNames: Array.isArray(record.mcpServerNames) ? record.mcpServerNames.map((value) => String(value)) : [],
     toolNames: Array.isArray(record.toolNames) ? record.toolNames.map((value) => String(value)) : []
   };
+}
+
+function parseDoctorReport(payload: unknown): DoctorReport {
+  if (!payload || typeof payload !== 'object') {
+    return emptyDoctorReport;
+  }
+  const record = payload as Record<string, unknown>;
+  return {
+    status: typeof record.status === 'string' ? record.status : 'unknown',
+    checks: Array.isArray(record.checks)
+      ? record.checks
+          .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+          .map((item) => ({
+            name: typeof item.name === 'string' ? item.name : 'Unknown check',
+            status: typeof item.status === 'string' ? item.status : 'unknown',
+            summary: typeof item.summary === 'string' ? item.summary : '',
+            details: item.details && typeof item.details === 'object'
+              ? (item.details as Record<string, unknown>)
+              : {}
+          }))
+      : []
+  };
+}
+
+function renderDoctorReportText(report: DoctorReport): string {
+  const lines = [`PixelPilot doctor: ${String(report.status || 'unknown').toUpperCase()}`];
+  for (const check of report.checks) {
+    lines.push(`- ${check.name}: ${check.status}${check.summary ? ` - ${check.summary}` : ''}`);
+  }
+  return lines.join('\n');
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  const value = String(text || '');
+  if (navigator?.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = typeof document.execCommand === 'function' && document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) {
+    throw new Error('Clipboard access is unavailable right now.');
+  }
+}
+
+function isBridgeBusyStatus(status: BridgeStatus): boolean {
+  return status === 'starting' || status === 'recovering';
+}
+
+function bridgeStatusText(snapshot: RuntimeSnapshot): string {
+  const status = snapshot.bridgeStatus;
+  const message = String(snapshot.bridgeStatusMessage || '').trim();
+  if (status === 'starting') {
+    return message || 'Starting runtime...';
+  }
+  if (status === 'recovering') {
+    return message || 'Reconnecting runtime...';
+  }
+  if (status === 'failed') {
+    return message || 'PixelPilot lost the runtime connection.';
+  }
+  return '';
 }
 
 function speakerLabel(entry: MessageEntry): string {
@@ -514,9 +594,18 @@ function buildCommandBarStatus(
   localError: string,
   runtimeError: string
 ): CommandBarStatus {
+  const bridgeText = bridgeStatusText(snapshot);
+  if (isBridgeBusyStatus(snapshot.bridgeStatus) && bridgeText) {
+    return { kind: 'busy', tone: 'status', text: bridgeText };
+  }
+
   const errorText = String(localError || runtimeError || '').trim();
   if (errorText) {
     return { kind: 'error', tone: 'error', text: errorText };
+  }
+
+  if (snapshot.bridgeStatus === 'failed' && bridgeText) {
+    return { kind: 'error', tone: 'error', text: bridgeText };
   }
 
   const pendingText = String(busyText || '').trim();
@@ -865,14 +954,17 @@ function LiveModeButton({
   snapshot,
   pending = false,
   compact = false,
+  disabled = false,
   onClick
 }: {
   snapshot: RuntimeSnapshot;
   pending?: boolean;
   compact?: boolean;
+  disabled?: boolean;
   onClick?: () => void;
 }): React.JSX.Element {
   const presentation = liveButtonPresentation(snapshot, pending);
+  const isDisabled = presentation.disabled || disabled;
   const toneClasses: Record<LiveVisualState, string> = {
     disabled: 'text-slate-400',
     off: 'text-slate-600',
@@ -902,13 +994,13 @@ function LiveModeButton({
       type="button"
       aria-label={presentation.label}
       title={presentation.description}
-      disabled={presentation.disabled}
+      disabled={isDisabled}
       onClick={onClick}
       className={[
         'no-drag relative flex items-center justify-center text-slate-800 transition-all',
         compact ? 'h-8 w-10 rounded-xl' : 'h-10 w-10 rounded-2xl',
         presentation.state === 'off' || presentation.state === 'disabled' ? softShell : activeShell,
-        presentation.disabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-white/24'
+        isDisabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-white/24'
       ].join(' ')}
     >
       {animated && (
@@ -931,14 +1023,17 @@ function MicControlButton({
   snapshot,
   pending = false,
   compact = false,
+  disabled = false,
   onClick
 }: {
   snapshot: RuntimeSnapshot;
   pending?: boolean;
   compact?: boolean;
+  disabled?: boolean;
   onClick?: () => void;
 }): React.JSX.Element {
   const presentation = micButtonPresentation(snapshot, pending);
+  const isDisabled = presentation.disabled || disabled;
   const effectiveLevel =
     presentation.state === 'speaking_assistant'
       ? Math.max(0.2, clamp(snapshot.assistantAudioLevel))
@@ -979,13 +1074,13 @@ function MicControlButton({
       aria-label={presentation.label}
       title={presentation.description}
       aria-pressed={presentation.state === 'listening_user'}
-      disabled={presentation.disabled}
+      disabled={isDisabled}
       onClick={onClick}
       className={[
         'no-drag relative flex items-center justify-center text-slate-800 transition-all',
         compact ? 'h-8 w-10 rounded-xl' : 'h-10 w-10 rounded-2xl',
         presentation.state === 'idle' || presentation.state === 'disabled' ? softShell : activeShell,
-        presentation.disabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-white/24'
+        isDisabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-white/24'
       ].join(' ')}
     >
       <span
@@ -1121,12 +1216,7 @@ function StatusPill({
 }
 
 function isSettingsWindowKind(kind: WindowKind | null): boolean {
-  return (
-    kind === 'settings'
-    || kind === 'startup-settings'
-    || kind === 'session-settings'
-    || kind === 'extensions-settings'
-  );
+  return kind === 'settings';
 }
 
 function LoadingShell({
@@ -1142,28 +1232,16 @@ function LoadingShell({
       : windowKind === 'sidecar'
         ? 'w-[380px]'
         : windowKind === 'settings'
-          ? 'w-[220px]'
-          : windowKind === 'startup-settings'
-            ? 'w-[320px]'
-            : windowKind === 'session-settings'
-              ? 'w-[420px]'
-              : windowKind === 'extensions-settings'
-                ? 'w-[460px]'
-            : 'w-[560px]';
+          ? 'w-[640px]'
+          : 'w-[560px]';
   useWindowLayout(
     windowKind === 'notch'
       ? { width: 420, height: 88 }
       : windowKind === 'sidecar'
         ? { width: 380, height: 320 }
         : windowKind === 'settings'
-          ? { width: 220, height: 124 }
-          : windowKind === 'startup-settings'
-            ? { width: 320, height: 164 }
-            : windowKind === 'session-settings'
-              ? { width: 420, height: 224 }
-              : windowKind === 'extensions-settings'
-                ? { width: 460, height: 224 }
-            : { width: 560, height: 128 }
+          ? { width: 640, height: 560 }
+          : { width: 560, height: 128 }
   );
   return (
     <div className="relative flex w-full items-start justify-center p-3 text-slate-900">
@@ -1199,7 +1277,13 @@ function startupDefaultsSourceLabel(source: StartupDefaultsSnapshot['source']): 
   return 'Using fallback defaults';
 }
 
-function StartupDefaultsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
+function StartupDefaultsSection({
+  snapshot,
+  disabled = false
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled?: boolean;
+}): React.JSX.Element {
   const [localError, setLocalError] = useState('');
   const [statusText, setStatusText] = useState('');
   const [loading, setLoading] = useState(true);
@@ -1207,16 +1291,6 @@ function StartupDefaultsShell({ snapshot }: { snapshot: RuntimeSnapshot }): Reac
   const [source, setSource] = useState<StartupDefaultsSnapshot['source']>('fallback');
   const [operationMode, setOperationMode] = useState<StartupDefaultsSnapshot['operationMode']>(snapshot.operationMode);
   const [visionMode, setVisionMode] = useState<StartupDefaultsSnapshot['visionMode']>(snapshot.visionMode);
-  const shellRef = useRef<HTMLDivElement>(null);
-
-  useMeasuredWindowLayout(
-    shellRef,
-    {
-      width: 320,
-      height: localError || statusText ? 388 : 356,
-    },
-    [localError, statusText, operationMode, visionMode]
-  );
 
   useEffect(() => {
     let cancelled = false;
@@ -1247,17 +1321,8 @@ function StartupDefaultsShell({ snapshot }: { snapshot: RuntimeSnapshot }): Reac
     };
   }, []);
 
-  const closeWindow = async (): Promise<void> => {
-    setLocalError('');
-    try {
-      await window.pixelPilot.closeStartupSettingsWindow();
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to close startup settings right now.');
-    }
-  };
-
   const saveDefaults = async (): Promise<void> => {
-    if (saving) {
+    if (saving || disabled) {
       return;
     }
     setSaving(true);
@@ -1276,67 +1341,78 @@ function StartupDefaultsShell({ snapshot }: { snapshot: RuntimeSnapshot }): Reac
   };
 
   return (
-    <motion.div
-      ref={shellRef}
-      className="w-full"
-      initial={{ opacity: 0, y: -6 }}
-      animate={{ opacity: 1, y: 0 }}
-    >
-      <div className="w-full rounded-[12px] border border-[#d3dce8] bg-[#f8fafc] p-2 shadow-[0_18px_32px_rgba(15,23,42,0.18)]">
-        <div className="px-3.5 py-1.5 text-[12px] font-semibold text-slate-500">
-          Startup Defaults
+    <div className="space-y-4">
+      <div>
+        <div className="text-sm font-semibold text-slate-900">Startup Defaults</div>
+        <div className="mt-1 text-sm text-slate-600">
+          Save the mode and vision defaults PixelPilot should apply on the next launch.
         </div>
-        {loading ? (
-          <div className="px-3.5 py-6 text-[12px] text-slate-500">Loading startup defaults...</div>
-        ) : (
-          <>
-            <div className="px-3.5 py-1 text-[11px] text-slate-500">
-              Mode on startup
+      </div>
+
+      {loading ? (
+        <div className="rounded-[18px] border border-white/38 bg-white/48 px-4 py-5 text-sm text-slate-500">
+          Loading startup defaults...
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="rounded-[18px] border border-white/38 bg-white/46 p-3">
+              <div className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                Mode On Startup
+              </div>
+              {modes.map((mode) => (
+                <MenuItemButton
+                  key={`startup-${mode.id}`}
+                  label={mode.label}
+                  active={operationMode === mode.id}
+                  disabled={disabled || saving}
+                  onClick={() => setOperationMode(mode.id)}
+                />
+              ))}
             </div>
-            {modes.map((mode) => (
-              <MenuItemButton
-                key={`startup-${mode.id}`}
-                label={mode.label}
-                active={operationMode === mode.id}
-                onClick={() => setOperationMode(mode.id)}
-              />
-            ))}
-            <div className="mx-1 my-1 h-px bg-[#e2e8f0]" />
-            <div className="px-3.5 py-1 text-[11px] text-slate-500">
-              Vision on startup
+
+            <div className="rounded-[18px] border border-white/38 bg-white/46 p-3">
+              <div className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                Vision On Startup
+              </div>
+              {visions.map((vision) => (
+                <MenuItemButton
+                  key={`startup-vision-${vision.id}`}
+                  label={vision.label}
+                  active={visionMode === vision.id}
+                  disabled={disabled || saving}
+                  onClick={() => setVisionMode(vision.id)}
+                />
+              ))}
             </div>
-            {visions.map((vision) => (
-              <MenuItemButton
-                key={`startup-vision-${vision.id}`}
-                label={vision.label}
-                active={visionMode === vision.id}
-                onClick={() => setVisionMode(vision.id)}
-              />
-            ))}
-            <div className="mx-1 my-1 h-px bg-[#e2e8f0]" />
-            <div className="px-3.5 pb-2 text-[11px] text-slate-500">
+          </div>
+
+          <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Status</div>
+            <div className="mt-2 text-sm text-slate-700">
               {statusText || startupDefaultsSourceLabel(source)}
             </div>
-            <div className="flex items-center gap-2 px-2 pb-1">
-              <SegmentedButton label="Close" onClick={() => void closeWindow()} />
-              <button
-                type="button"
-                onClick={() => void saveDefaults()}
-                disabled={saving}
-                className="no-drag flex-1 rounded-lg bg-slate-900 px-3.5 py-2 text-left text-[13px] font-semibold text-white transition hover:bg-slate-800 disabled:opacity-50"
-              >
-                {saving ? 'Saving...' : 'Save startup defaults'}
-              </button>
-            </div>
-          </>
-        )}
-        {localError && (
-          <div className="mt-1 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-900">
-            {localError}
           </div>
-        )}
-      </div>
-    </motion.div>
+
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => void saveDefaults()}
+              disabled={disabled || saving}
+              className="no-drag rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              {saving ? 'Saving...' : 'Save Startup Defaults'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {localError && (
+        <div className="rounded-[18px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1745,6 +1821,7 @@ function OverlayShell({
     [optimisticLiveVoiceActive, snapshot]
   );
   const isBarOnly = !effectiveSnapshot.expanded;
+  const bridgeBusy = isBridgeBusyStatus(effectiveSnapshot.bridgeStatus);
   const commandBarStatus = useMemo(
     () =>
       buildCommandBarStatus(
@@ -1807,7 +1884,7 @@ function OverlayShell({
 
   const submitCommand = async (): Promise<void> => {
     const text = commandText.trim();
-    if (!text || submittingRef.current) {
+    if (!text || submittingRef.current || bridgeBusy) {
       return;
     }
     submittingRef.current = true;
@@ -1825,7 +1902,7 @@ function OverlayShell({
   };
 
   const toggleAgentViewFromBar = async (): Promise<void> => {
-    if (!effectiveSnapshot.agentViewEnabled) {
+    if (!effectiveSnapshot.agentViewEnabled || bridgeBusy) {
       return;
     }
 
@@ -1842,6 +1919,9 @@ function OverlayShell({
   };
 
   const openSettingsMenu = async (): Promise<void> => {
+    if (bridgeBusy) {
+      return;
+    }
     setLocalError('');
     try {
       await window.pixelPilot.toggleSettingsWindow();
@@ -1851,7 +1931,7 @@ function OverlayShell({
   };
 
   const toggleLiveMode = async (): Promise<void> => {
-    if (pendingLiveToggle) {
+    if (pendingLiveToggle || bridgeBusy) {
       return;
     }
     if (!effectiveSnapshot.liveAvailable) {
@@ -1885,7 +1965,7 @@ function OverlayShell({
   };
 
   const toggleVoiceInput = async (): Promise<void> => {
-    if (pendingVoiceToggle || pendingLiveToggle) {
+    if (pendingVoiceToggle || pendingLiveToggle || bridgeBusy) {
       return;
     }
     if (!effectiveSnapshot.liveAvailable) {
@@ -1977,7 +2057,7 @@ function OverlayShell({
         <input
           value={commandText}
           onChange={(event) => setCommandText(event.target.value)}
-          readOnly={!effectiveSnapshot.liveAvailable}
+          readOnly={!effectiveSnapshot.liveAvailable || bridgeBusy}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault();
@@ -1992,13 +2072,20 @@ function OverlayShell({
           ].join(' ')}
         />
       </div>
-      <MicControlButton snapshot={effectiveSnapshot} pending={pendingVoiceToggle} compact onClick={() => void toggleVoiceInput()} />
+      <MicControlButton
+        snapshot={effectiveSnapshot}
+        pending={pendingVoiceToggle}
+        compact
+        disabled={bridgeBusy}
+        onClick={() => void toggleVoiceInput()}
+      />
       {showInlineStop && (
         <button
           type="button"
           aria-label="Stop current turn"
           title="Stop current turn"
           onClick={() => void invoke('live.stop')}
+          disabled={bridgeBusy}
           className="no-drag flex h-8 items-center justify-center rounded-xl border border-white/36 bg-white/34 px-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-700 transition hover:bg-white/48"
         >
           Stop
@@ -2008,7 +2095,7 @@ function OverlayShell({
         type="button"
         aria-label="Send command"
         onClick={() => void submitCommand()}
-        disabled={!effectiveSnapshot.liveAvailable || !commandText.trim()}
+        disabled={!effectiveSnapshot.liveAvailable || bridgeBusy || !commandText.trim()}
         className="no-drag flex h-8 min-w-[38px] items-center justify-center rounded-xl bg-slate-900 px-2.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white transition hover:bg-slate-800 disabled:opacity-40"
       >
         Go
@@ -2034,17 +2121,23 @@ function OverlayShell({
 
               {commandComposer}
 
-              <IconButton
+                <IconButton
+                  compact
+                  label={workspaceBadgeLabel(effectiveSnapshot)}
+                  active={effectiveSnapshot.workspace === 'agent' && effectiveSnapshot.agentViewRequested}
+                  disabled={!effectiveSnapshot.agentViewEnabled || bridgeBusy}
+                  onClick={() => void toggleAgentViewFromBar()}
+                >
+                  {workspaceIcon(effectiveSnapshot.workspace)}
+                </IconButton>
+              <LiveModeButton
+                snapshot={effectiveSnapshot}
+                pending={pendingLiveToggle}
                 compact
-                label={workspaceBadgeLabel(effectiveSnapshot)}
-                active={effectiveSnapshot.workspace === 'agent' && effectiveSnapshot.agentViewRequested}
-                disabled={!effectiveSnapshot.agentViewEnabled}
-                onClick={() => void toggleAgentViewFromBar()}
-              >
-                {workspaceIcon(effectiveSnapshot.workspace)}
-              </IconButton>
-              <LiveModeButton snapshot={effectiveSnapshot} pending={pendingLiveToggle} compact onClick={() => void toggleLiveMode()} />
-              <IconButton compact label="Open settings menu" onClick={() => void openSettingsMenu()}>
+                disabled={bridgeBusy}
+                onClick={() => void toggleLiveMode()}
+              />
+              <IconButton compact label="Open settings menu" disabled={bridgeBusy} onClick={() => void openSettingsMenu()}>
                 <Settings2 className="h-4 w-4" />
               </IconButton>
               <IconButton compact label="Hide to notch" onClick={() => void hideToNotch()}>
@@ -2065,17 +2158,23 @@ function OverlayShell({
 
               {commandComposer}
 
-              <IconButton
+                <IconButton
+                  compact
+                  label={workspaceBadgeLabel(effectiveSnapshot)}
+                  active={effectiveSnapshot.workspace === 'agent' && effectiveSnapshot.agentViewRequested}
+                  disabled={!effectiveSnapshot.agentViewEnabled || bridgeBusy}
+                  onClick={() => void toggleAgentViewFromBar()}
+                >
+                  {workspaceIcon(effectiveSnapshot.workspace)}
+                </IconButton>
+              <LiveModeButton
+                snapshot={effectiveSnapshot}
+                pending={pendingLiveToggle}
                 compact
-                label={workspaceBadgeLabel(effectiveSnapshot)}
-                active={effectiveSnapshot.workspace === 'agent' && effectiveSnapshot.agentViewRequested}
-                disabled={!effectiveSnapshot.agentViewEnabled}
-                onClick={() => void toggleAgentViewFromBar()}
-              >
-                {workspaceIcon(effectiveSnapshot.workspace)}
-              </IconButton>
-              <LiveModeButton snapshot={effectiveSnapshot} pending={pendingLiveToggle} compact onClick={() => void toggleLiveMode()} />
-              <IconButton compact label="Open settings menu" onClick={() => void openSettingsMenu()}>
+                disabled={bridgeBusy}
+                onClick={() => void toggleLiveMode()}
+              />
+              <IconButton compact label="Open settings menu" disabled={bridgeBusy} onClick={() => void openSettingsMenu()}>
                 <Settings2 className="h-4 w-4" />
               </IconButton>
               <IconButton compact label="Hide to notch" onClick={() => void hideToNotch()}>
@@ -2116,23 +2215,19 @@ function OverlayShell({
   );
 }
 
-function SessionSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
+function SessionSettingsSection({
+  snapshot,
+  disabled = false
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled?: boolean;
+}): React.JSX.Element {
   const [localError, setLocalError] = useState('');
   const [busyAction, setBusyAction] = useState('');
   const [sessionContext, setSessionContext] = useState<SessionContextSummary>(
     parseSessionContext(snapshot.latestSessionContext)
   );
-  const shellRef = useRef<HTMLDivElement>(null);
   const sessionDirectory = String(snapshot.sessionDirectory || '').trim();
-
-  useMeasuredWindowLayout(
-    shellRef,
-    {
-      width: 420,
-      height: localError ? 418 : 386
-    },
-    [localError, busyAction, sessionContext.available, sessionContext.summaryText, sessionContext.sessionId, sessionDirectory]
-  );
 
   useEffect(() => {
     setSessionContext(parseSessionContext(snapshot.latestSessionContext));
@@ -2160,16 +2255,10 @@ function SessionSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): Reac
     };
   }, []);
 
-  const closeWindow = async (): Promise<void> => {
-    setLocalError('');
-    try {
-      await window.pixelPilot.closeSessionSettingsWindow();
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to close sessions right now.');
-    }
-  };
-
   const resumeLastContext = async (): Promise<void> => {
+    if (disabled) {
+      return;
+    }
     setBusyAction('resume');
     setLocalError('');
     try {
@@ -2183,6 +2272,9 @@ function SessionSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): Reac
   };
 
   const openSessionFolder = async (): Promise<void> => {
+    if (disabled) {
+      return;
+    }
     setBusyAction('open-folder');
     setLocalError('');
     try {
@@ -2195,111 +2287,77 @@ function SessionSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): Reac
   };
 
   return (
-    <motion.div
-      ref={shellRef}
-      className="w-full"
-      initial={{ opacity: 0, y: -6 }}
-      animate={{ opacity: 1, y: 0 }}
-    >
-      <div className="w-full rounded-[14px] border border-[#d3dce8] bg-[#f8fafc] p-2 shadow-[0_18px_32px_rgba(15,23,42,0.18)]">
-        <div className="flex items-center justify-between gap-3 px-3.5 py-1.5">
-          <div>
-            <div className="text-[12px] font-semibold text-slate-500">Sessions</div>
-            <div className="text-[11px] text-slate-500">Manual resume and session log access.</div>
-          </div>
-          <button
-            type="button"
-            aria-label="Close sessions window"
-            onClick={() => void closeWindow()}
-            className="no-drag flex h-7 w-7 items-center justify-center rounded-full text-slate-500 transition hover:bg-[#e2e8f0] hover:text-slate-800"
-          >
-            <X className="h-4 w-4" />
-          </button>
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-sm font-semibold text-slate-900">Sessions</div>
+          <div className="mt-1 text-sm text-slate-600">Manual resume and session log access for the current workspace.</div>
         </div>
-
-        <div className="mt-1 grid gap-2 px-1 sm:grid-cols-2">
+        <div className="flex flex-wrap gap-2">
           <button
             type="button"
             onClick={() => void resumeLastContext()}
-            disabled={!sessionContext.available || busyAction !== ''}
-            className="no-drag rounded-lg bg-slate-900 px-3.5 py-2 text-[12px] font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+            disabled={!sessionContext.available || busyAction !== '' || disabled}
+            className="no-drag rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
           >
             {busyAction === 'resume' ? 'Resuming...' : 'Resume Last Context'}
           </button>
           <button
             type="button"
             onClick={() => void openSessionFolder()}
-            disabled={!sessionDirectory || busyAction !== ''}
-            className="no-drag rounded-lg border border-[#d3dce8] bg-white px-3.5 py-2 text-[12px] font-semibold text-slate-800 transition hover:bg-[#eef2f7] disabled:cursor-not-allowed disabled:opacity-45"
+            disabled={!sessionDirectory || busyAction !== '' || disabled}
+            className="no-drag rounded-xl border border-white/38 bg-white/46 px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-white/62 disabled:cursor-not-allowed disabled:opacity-45"
           >
             {busyAction === 'open-folder' ? 'Opening...' : 'Open Session Logs'}
           </button>
         </div>
-
-        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3.5 py-3">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-            Latest Summary
-          </div>
-          <div className="mt-2 text-[13px] leading-6 text-slate-700">
-            {sessionContext.available
-              ? sessionContext.summaryText || 'A resumable session exists, but no compact summary was stored yet.'
-              : 'No resumable session context has been stored yet.'}
-          </div>
-        </div>
-
-        <div className="mt-2 grid gap-2 px-1 sm:grid-cols-2">
-          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Last activity</div>
-            <div className="mt-1 break-all text-[13px] text-slate-700">
-              {sessionContext.lastActivityAt || 'Unknown'}
-            </div>
-          </div>
-          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Session ID</div>
-            <div className="mt-1 break-all text-[13px] text-slate-700">
-              {sessionContext.sessionId || 'Unavailable'}
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Session directory</div>
-          <div className="mt-1 break-all text-[13px] text-slate-700">{sessionDirectory || 'Unavailable'}</div>
-        </div>
-
-        {localError && (
-          <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-900">
-            {localError}
-          </div>
-        )}
       </div>
-    </motion.div>
+
+      <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Latest Summary</div>
+        <div className="mt-2 text-sm leading-6 text-slate-700">
+          {sessionContext.available
+            ? sessionContext.summaryText || 'A resumable session exists, but no compact summary was stored yet.'
+            : 'No resumable session context has been stored yet.'}
+        </div>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Last Activity</div>
+          <div className="mt-2 break-all text-sm text-slate-700">{sessionContext.lastActivityAt || 'Unknown'}</div>
+        </div>
+        <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Session ID</div>
+          <div className="mt-2 break-all text-sm text-slate-700">{sessionContext.sessionId || 'Unavailable'}</div>
+        </div>
+      </div>
+
+      <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Session Directory</div>
+        <div className="mt-2 break-all text-sm text-slate-700">{sessionDirectory || 'Unavailable'}</div>
+      </div>
+
+      {localError && (
+        <div className="rounded-[18px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
   );
 }
 
-function ExtensionsSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
+function ExtensionsSettingsSection({
+  snapshot,
+  disabled = false
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled?: boolean;
+}): React.JSX.Element {
   const [localError, setLocalError] = useState('');
   const [busy, setBusy] = useState(false);
   const [extensionSummary, setExtensionSummary] = useState<ExtensionSummary>(
     parseExtensionSummary(snapshot.extensions)
-  );
-  const shellRef = useRef<HTMLDivElement>(null);
-
-  useMeasuredWindowLayout(
-    shellRef,
-    {
-      width: 460,
-      height: localError ? 458 : 426
-    },
-    [
-      localError,
-      busy,
-      extensionSummary.status,
-      extensionSummary.toolCount,
-      extensionSummary.pluginCount,
-      extensionSummary.mcpServerCount,
-      extensionSummary.toolNames.length
-    ]
   );
 
   useEffect(() => {
@@ -2328,16 +2386,10 @@ function ExtensionsSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): R
     };
   }, []);
 
-  const closeWindow = async (): Promise<void> => {
-    setLocalError('');
-    try {
-      await window.pixelPilot.closeExtensionsSettingsWindow();
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to close extensions right now.');
-    }
-  };
-
   const reloadExtensions = async (): Promise<void> => {
+    if (disabled) {
+      return;
+    }
     setBusy(true);
     setLocalError('');
     try {
@@ -2351,216 +2403,411 @@ function ExtensionsSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): R
   };
 
   return (
-    <motion.div
-      ref={shellRef}
-      className="w-full"
-      initial={{ opacity: 0, y: -6 }}
-      animate={{ opacity: 1, y: 0 }}
-    >
-      <div className="w-full rounded-[14px] border border-[#d3dce8] bg-[#f8fafc] p-2 shadow-[0_18px_32px_rgba(15,23,42,0.18)]">
-        <div className="flex items-center justify-between gap-3 px-3.5 py-1.5">
-          <div>
-            <div className="text-[12px] font-semibold text-slate-500">Extensions</div>
-            <div className="text-[11px] text-slate-500">Plugin and MCP tool discovery.</div>
-          </div>
-          <button
-            type="button"
-            aria-label="Close extensions window"
-            onClick={() => void closeWindow()}
-            className="no-drag flex h-7 w-7 items-center justify-center rounded-full text-slate-500 transition hover:bg-[#e2e8f0] hover:text-slate-800"
-          >
-            <X className="h-4 w-4" />
-          </button>
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-sm font-semibold text-slate-900">Extensions</div>
+          <div className="mt-1 text-sm text-slate-600">Plugin and MCP tool discovery with explicit local opt-in.</div>
         </div>
-
-        <div className="mt-1 px-1">
-          <button
-            type="button"
-            onClick={() => void reloadExtensions()}
-            disabled={busy}
-            className="no-drag w-full rounded-lg bg-slate-900 px-3.5 py-2 text-[12px] font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            {busy ? 'Reloading...' : 'Reload Extensions'}
-          </button>
-        </div>
-
-        <div className="mt-2 grid gap-2 px-1 sm:grid-cols-3">
-          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Health</div>
-            <div className="mt-1 text-[13px] text-slate-700">
-              {extensionSummary.status === 'ready'
-                ? extensionSummary.toolCount > 0
-                  ? 'Ready'
-                  : 'No tools loaded'
-                : extensionSummary.status || 'Unknown'}
-            </div>
-          </div>
-          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Plugins</div>
-            <div className="mt-1 text-[13px] text-slate-700">{extensionSummary.pluginCount}</div>
-          </div>
-          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">MCP servers</div>
-            <div className="mt-1 text-[13px] text-slate-700">{extensionSummary.mcpServerCount}</div>
-          </div>
-        </div>
-
-        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Plugin IDs</div>
-          <div className="mt-1 text-[13px] text-slate-700">
-            {extensionSummary.pluginIds && extensionSummary.pluginIds.length > 0
-              ? extensionSummary.pluginIds.join(', ')
-              : 'No plugins loaded.'}
-          </div>
-        </div>
-
-        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">MCP servers</div>
-          <div className="mt-1 text-[13px] text-slate-700">
-            {extensionSummary.mcpServerNames && extensionSummary.mcpServerNames.length > 0
-              ? extensionSummary.mcpServerNames.join(', ')
-              : 'No MCP servers configured.'}
-          </div>
-        </div>
-
-        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Tool names</div>
-          <div className="mt-1 max-h-[140px] overflow-y-auto text-[13px] leading-6 text-slate-700">
-            {extensionSummary.toolNames.length > 0
-              ? extensionSummary.toolNames.join(', ')
-              : 'No extension tools are currently loaded.'}
-          </div>
-        </div>
-
-        {localError && (
-          <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-900">
-            {localError}
-          </div>
-        )}
+        <button
+          type="button"
+          onClick={() => void reloadExtensions()}
+          disabled={busy || disabled}
+          className="no-drag rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          {busy ? 'Reloading...' : 'Reload Extensions'}
+        </button>
       </div>
-    </motion.div>
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Health</div>
+          <div className="mt-2 text-sm text-slate-700">
+            {extensionSummary.status === 'ready'
+              ? extensionSummary.toolCount > 0
+                ? 'Ready'
+                : 'No tools loaded'
+              : extensionSummary.status || 'Unknown'}
+          </div>
+        </div>
+        <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Plugins</div>
+          <div className="mt-2 text-sm text-slate-700">{extensionSummary.pluginCount}</div>
+        </div>
+        <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">MCP Servers</div>
+          <div className="mt-2 text-sm text-slate-700">{extensionSummary.mcpServerCount}</div>
+        </div>
+      </div>
+
+      <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Plugin IDs</div>
+        <div className="mt-2 text-sm text-slate-700">
+          {extensionSummary.pluginIds && extensionSummary.pluginIds.length > 0
+            ? extensionSummary.pluginIds.join(', ')
+            : 'No plugins loaded.'}
+        </div>
+      </div>
+
+      <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">MCP Servers</div>
+        <div className="mt-2 text-sm text-slate-700">
+          {extensionSummary.mcpServerNames && extensionSummary.mcpServerNames.length > 0
+            ? extensionSummary.mcpServerNames.join(', ')
+            : 'No MCP servers configured.'}
+        </div>
+      </div>
+
+      <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Tool Names</div>
+        <div className="mt-2 max-h-[180px] overflow-y-auto text-sm leading-6 text-slate-700">
+          {extensionSummary.toolNames.length > 0
+            ? extensionSummary.toolNames.join(', ')
+            : 'No extension tools are currently loaded.'}
+        </div>
+      </div>
+
+      {localError && (
+        <div className="rounded-[18px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
   );
 }
 
-function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
+function GeneralSettingsSection({
+  snapshot,
+  disabled = false
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled?: boolean;
+}): React.JSX.Element {
   const [localError, setLocalError] = useState('');
-  const shellRef = useRef<HTMLDivElement>(null);
 
-  useMeasuredWindowLayout(
-    shellRef,
-    {
-      width: 220,
-      height: localError ? 452 : 420
-    },
-    [localError, snapshot.operationMode, snapshot.visionMode]
-  );
-
-  const openStartupDefaults = async (): Promise<void> => {
-    setLocalError('');
-    try {
-      await window.pixelPilot.closeSettingsWindow();
-      await window.pixelPilot.toggleStartupSettingsWindow();
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to open startup defaults right now.');
+  const runAction = async (method: string, payload?: Record<string, unknown>): Promise<void> => {
+    if (disabled) {
+      return;
     }
-  };
-
-  const runMenuAction = async (method: string, payload?: Record<string, unknown>): Promise<void> => {
     setLocalError('');
     try {
-      await window.pixelPilot.closeSettingsWindow();
       await window.pixelPilot.invokeRuntime(method, payload);
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : 'Unable to update settings right now.');
     }
   };
 
-  const openSessionSettings = async (): Promise<void> => {
+  return (
+    <div className="space-y-4">
+      <div>
+        <div className="text-sm font-semibold text-slate-900">General</div>
+        <div className="mt-1 text-sm text-slate-600">Adjust the active mode, vision pipeline, and account state.</div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="rounded-[18px] border border-white/38 bg-white/46 p-3">
+          <div className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Mode</div>
+          {modes.map((mode) => (
+            <MenuItemButton
+              key={`general-mode-${mode.id}`}
+              label={mode.label}
+              active={snapshot.operationMode === mode.id}
+              disabled={disabled}
+              onClick={() => void runAction('mode.set', { value: mode.id })}
+            />
+          ))}
+        </div>
+
+        <div className="rounded-[18px] border border-white/38 bg-white/46 p-3">
+          <div className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Vision</div>
+          {visions.map((vision) => (
+            <MenuItemButton
+              key={`general-vision-${vision.id}`}
+              label={vision.label}
+              active={snapshot.visionMode === vision.id}
+              disabled={disabled}
+              onClick={() => void runAction('vision.set', { value: vision.id })}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Settings Sources</div>
+        <div className="mt-2 space-y-2 text-sm text-slate-700">
+          {snapshot.settingsSources.length > 0 ? (
+            snapshot.settingsSources.map((source) => (
+              <div key={source} className="break-all rounded-xl border border-white/28 bg-white/54 px-3 py-2">
+                {source}
+              </div>
+            ))
+          ) : (
+            <div>No JSON settings files are active right now.</div>
+          )}
+        </div>
+      </div>
+
+      <div className="flex justify-start">
+        <button
+          type="button"
+          onClick={() => void runAction('auth.logout')}
+          disabled={disabled}
+          className="no-drag rounded-xl border border-white/38 bg-white/46 px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-white/62 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          Sign Out
+        </button>
+      </div>
+
+      {localError && (
+        <div className="rounded-[18px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiagnosticsSettingsSection({
+  snapshot,
+  disabled = false
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled?: boolean;
+}): React.JSX.Element {
+  const [localError, setLocalError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<DoctorReport>(parseDoctorReport(snapshot.lastDoctorReport));
+  const [doctorText, setDoctorText] = useState(() => renderDoctorReportText(parseDoctorReport(snapshot.lastDoctorReport)));
+
+  useEffect(() => {
+    const nextReport = parseDoctorReport(snapshot.lastDoctorReport);
+    setReport(nextReport);
+    setDoctorText((current) => current || renderDoctorReportText(nextReport));
+  }, [snapshot.lastDoctorReport]);
+
+  const runDiagnostics = async (): Promise<void> => {
+    if (disabled) {
+      return;
+    }
+    setBusy(true);
     setLocalError('');
     try {
-      await window.pixelPilot.closeSettingsWindow();
-      await window.pixelPilot.toggleSessionSettingsWindow();
+      const result = await window.pixelPilot.invokeRuntime('doctor.run');
+      const nextReport = parseDoctorReport(result.doctor);
+      setReport(nextReport);
+      setDoctorText(String(result.text || renderDoctorReportText(nextReport)));
     } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to open sessions right now.');
+      setLocalError(error instanceof Error ? error.message : 'Unable to run diagnostics right now.');
+    } finally {
+      setBusy(false);
     }
   };
 
-  const openExtensionsSettings = async (): Promise<void> => {
+  const copyDoctorText = async (): Promise<void> => {
     setLocalError('');
     try {
-      await window.pixelPilot.closeSettingsWindow();
-      await window.pixelPilot.toggleExtensionsSettingsWindow();
+      await copyTextToClipboard(doctorText || renderDoctorReportText(report));
     } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to open extensions right now.');
+      setLocalError(error instanceof Error ? error.message : 'Unable to copy the doctor text right now.');
+    }
+  };
+
+  const copyDoctorJson = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await copyTextToClipboard(JSON.stringify(report, null, 2));
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to copy the doctor JSON right now.');
     }
   };
 
   return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-sm font-semibold text-slate-900">Diagnostics</div>
+          <div className="mt-1 text-sm text-slate-600">Run the shared doctor pipeline and copy the latest runtime health report.</div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void runDiagnostics()}
+            disabled={busy || disabled}
+            className="no-drag rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {busy ? 'Running...' : 'Run Diagnostics'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void copyDoctorText()}
+            disabled={busy}
+            className="no-drag rounded-xl border border-white/38 bg-white/46 px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-white/62 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            Copy Doctor Text
+          </button>
+          <button
+            type="button"
+            onClick={() => void copyDoctorJson()}
+            disabled={busy}
+            className="no-drag rounded-xl border border-white/38 bg-white/46 px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-white/62 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            Copy Doctor JSON
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Overall Status</div>
+        <div className="mt-2 text-sm text-slate-700">{report.status || 'Unknown'}</div>
+      </div>
+
+      <div className="space-y-3">
+        {report.checks.length > 0 ? (
+          report.checks.map((check) => (
+            <div key={check.name} className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-slate-900">{check.name}</div>
+                <StatusPill label={humanizeState(check.status)} active={check.status === 'ok'} />
+              </div>
+              <div className="mt-2 text-sm text-slate-700">{check.summary || 'No summary provided.'}</div>
+            </div>
+          ))
+        ) : (
+          <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-5 text-sm text-slate-600">
+            No diagnostics report has been captured yet. Run diagnostics to inspect runtime, wake word, audio, UAC, and extension health.
+          </div>
+        )}
+      </div>
+
+      {localError && (
+        <div className="rounded-[18px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SettingsNavButton({
+  label,
+  active,
+  onClick
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        'no-drag flex w-full items-center rounded-xl px-3 py-2.5 text-left text-sm font-medium transition',
+        active ? 'bg-white/60 text-slate-900 shadow-[0_8px_18px_rgba(15,23,42,0.08)]' : 'text-slate-700 hover:bg-white/38'
+      ].join(' ')}
+    >
+      {label}
+    </button>
+  );
+}
+
+function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('general');
+  const [localError, setLocalError] = useState('');
+  const bridgeBusy = isBridgeBusyStatus(snapshot.bridgeStatus);
+  const bridgeStateText = bridgeStatusText(snapshot);
+
+  useWindowLayout({ width: 640, height: 560 });
+
+  const closeWindow = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await window.pixelPilot.closeSettingsWindow();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to close settings right now.');
+    }
+  };
+
+  const sections: { id: SettingsSectionId; label: string }[] = [
+    { id: 'general', label: 'General' },
+    { id: 'startup', label: 'Startup' },
+    { id: 'sessions', label: 'Sessions' },
+    { id: 'extensions', label: 'Extensions' },
+    { id: 'diagnostics', label: 'Diagnostics' }
+  ];
+
+  return (
     <motion.div
-      ref={shellRef}
-      className="w-full"
+      className="w-[640px]"
       initial={{ opacity: 0, y: -6 }}
       animate={{ opacity: 1, y: 0 }}
     >
-      <div className="w-full rounded-[10px] border border-[#d3dce8] bg-[#f8fafc] p-1.5 shadow-[0_18px_32px_rgba(15,23,42,0.18)]">
-        <div className="px-3.5 py-1.5 text-[12px] font-semibold text-slate-500">
-          Mode
-        </div>
-        {modes.map((mode) => (
-          <MenuItemButton
-            key={mode.id}
-            label={mode.label}
-            active={snapshot.operationMode === mode.id}
-            onClick={() => void runMenuAction('mode.set', { value: mode.id })}
-          />
-        ))}
-        <div className="mx-1 my-1 h-px bg-[#e2e8f0]" />
-        <div className="px-3.5 py-1.5 text-[12px] font-semibold text-slate-500">
-          Vision
-        </div>
-        {visions.map((vision) => (
-          <MenuItemButton
-            key={vision.id}
-            label={vision.label}
-            active={snapshot.visionMode === vision.id}
-            onClick={() => void runMenuAction('vision.set', { value: vision.id })}
-          />
-        ))}
-        <div className="mx-1 my-1 h-px bg-[#e2e8f0]" />
-        <button
-          type="button"
-          onClick={() => void openStartupDefaults()}
-          className="no-drag flex w-full items-center rounded-lg px-3.5 py-2 text-left text-[13px] text-slate-800 transition hover:bg-[#e2e8f0]"
-        >
-          Startup Defaults
-        </button>
-        <button
-          type="button"
-          onClick={() => void openSessionSettings()}
-          className="no-drag flex w-full items-center rounded-lg px-3.5 py-2 text-left text-[13px] text-slate-800 transition hover:bg-[#e2e8f0]"
-        >
-          Sessions
-        </button>
-        <button
-          type="button"
-          onClick={() => void openExtensionsSettings()}
-          className="no-drag flex w-full items-center rounded-lg px-3.5 py-2 text-left text-[13px] text-slate-800 transition hover:bg-[#e2e8f0]"
-        >
-          Extensions
-        </button>
-        <div className="mx-1 my-1 h-px bg-[#e2e8f0]" />
-        <button
-          type="button"
-          onClick={() => void runMenuAction('auth.logout')}
-          className="no-drag flex w-full items-center rounded-lg px-3.5 py-2 text-left text-[13px] text-slate-800 transition hover:bg-[#e2e8f0]"
-        >
-          Sign Out
-        </button>
-        {localError && (
-          <div className="mt-1 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-900">
-            {localError}
+      <div className="overflow-hidden rounded-[28px] border border-white/45 bg-[rgba(236,245,255,0.82)] shadow-[0_24px_56px_rgba(15,23,42,0.18)] backdrop-blur-2xl">
+        <div className="flex h-[560px] min-h-[560px]">
+          <aside className="flex w-[176px] shrink-0 flex-col border-r border-white/30 bg-[rgba(255,255,255,0.56)] px-3 py-4">
+            <div className="px-2">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Settings Hub</div>
+              <div className="mt-2 text-sm text-slate-700">Startup, sessions, extensions, and diagnostics now live in one place.</div>
+            </div>
+            <div className="mt-5 flex-1 space-y-1">
+              {sections.map((section) => (
+                <SettingsNavButton
+                  key={section.id}
+                  label={section.label}
+                  active={activeSection === section.id}
+                  onClick={() => setActiveSection(section.id)}
+                />
+              ))}
+            </div>
+            {bridgeStateText && snapshot.bridgeStatus !== 'connected' && (
+              <div
+                className={[
+                  'mt-3 rounded-2xl border px-3 py-2 text-xs',
+                  snapshot.bridgeStatus === 'failed'
+                    ? 'border-rose-200 bg-rose-50 text-rose-900'
+                    : 'border-sky-200 bg-sky-50 text-sky-900'
+                ].join(' ')}
+              >
+                {bridgeStateText}
+              </div>
+            )}
+          </aside>
+
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex items-center justify-between gap-3 border-b border-white/28 px-5 py-4">
+              <div>
+                <div className="text-lg font-semibold text-slate-950">
+                  {sections.find((section) => section.id === activeSection)?.label}
+                </div>
+                <div className="mt-1 text-sm text-slate-600">
+                  {snapshot.bridgeStatus === 'connected' ? 'Runtime connected' : bridgeStateText}
+                </div>
+              </div>
+              <button
+                type="button"
+                aria-label="Close settings hub"
+                onClick={() => void closeWindow()}
+                className="no-drag flex h-9 w-9 items-center justify-center rounded-full border border-white/34 bg-white/32 text-slate-700 transition hover:bg-white/48"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              {activeSection === 'general' && <GeneralSettingsSection snapshot={snapshot} disabled={bridgeBusy} />}
+              {activeSection === 'startup' && <StartupDefaultsSection snapshot={snapshot} disabled={bridgeBusy} />}
+              {activeSection === 'sessions' && <SessionSettingsSection snapshot={snapshot} disabled={bridgeBusy} />}
+              {activeSection === 'extensions' && <ExtensionsSettingsSection snapshot={snapshot} disabled={bridgeBusy} />}
+              {activeSection === 'diagnostics' && <DiagnosticsSettingsSection snapshot={snapshot} disabled={bridgeBusy} />}
+
+              {localError && (
+                <div className="mt-4 rounded-[18px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+                  {localError}
+                </div>
+              )}
+            </div>
           </div>
-        )}
+        </div>
       </div>
     </motion.div>
   );
@@ -3022,12 +3269,6 @@ export default function App(): React.JSX.Element {
     <SidecarShell snapshot={snapshot} frame={sidecarFrame} />
   ) : windowKind === 'settings' ? (
     <SettingsShell snapshot={snapshot} />
-  ) : windowKind === 'startup-settings' ? (
-    <StartupDefaultsShell snapshot={snapshot} />
-  ) : windowKind === 'session-settings' ? (
-    <SessionSettingsShell snapshot={snapshot} />
-  ) : windowKind === 'extensions-settings' ? (
-    <ExtensionsSettingsShell snapshot={snapshot} />
   ) : (
     <OverlayShell
       snapshot={snapshot}

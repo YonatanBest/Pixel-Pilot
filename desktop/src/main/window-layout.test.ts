@@ -49,60 +49,21 @@ describe('window-layout', () => {
     });
   });
 
-  it('clamps the settings popup within the available work area', () => {
+  it('clamps the settings hub within the available work area', () => {
     const size = normalizeWindowSize('settings', { x: 0, y: 0, width: 240, height: 260 }, { width: 900, height: 999 });
 
     expect(size).toEqual({
-      width: 240,
-      height: 212
+      width: 520,
+      height: 420
     });
   });
 
-  it('lets the settings popup grow to fit taller content when the display has room', () => {
-    const size = normalizeWindowSize('settings', workArea, { width: 220, height: 520 });
+  it('preserves the intended settings hub size when the display has room', () => {
+    const size = normalizeWindowSize('settings', workArea, { width: 640, height: 560 });
 
     expect(size).toEqual({
-      width: 220,
-      height: 520
-    });
-  });
-
-  it('clamps the startup settings popup within the available work area', () => {
-    const size = normalizeWindowSize(
-      'startup-settings',
-      { x: 0, y: 0, width: 300, height: 340 },
-      { width: 900, height: 999 }
-    );
-
-    expect(size).toEqual({
-      width: 260,
-      height: 292
-    });
-  });
-
-  it('clamps the session settings popup within the available work area', () => {
-    const size = normalizeWindowSize(
-      'session-settings',
-      { x: 0, y: 0, width: 420, height: 360 },
-      { width: 900, height: 999 }
-    );
-
-    expect(size).toEqual({
-      width: 372,
-      height: 312
-    });
-  });
-
-  it('clamps the extensions settings popup within the available work area', () => {
-    const size = normalizeWindowSize(
-      'extensions-settings',
-      { x: 0, y: 0, width: 460, height: 380 },
-      { width: 900, height: 999 }
-    );
-
-    expect(size).toEqual({
-      width: 412,
-      height: 332
+      width: 640,
+      height: 560
     });
   });
 });

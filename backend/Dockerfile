@@ -4,14 +4,10 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV EASYOCR_MODEL_DIR=/app/.easyocr
-
-ARG TORCH_WHEEL_INDEX=https://download.pytorch.org/whl/cpu
-ARG TORCH_PACKAGES="torch torchvision"
+ENV TORCHFREE_OCR_MODULE_PATH=/app/.easyocr-onnx
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --index-url ${TORCH_WHEEL_INDEX} ${TORCH_PACKAGES}
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

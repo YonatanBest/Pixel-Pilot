@@ -15,79 +15,82 @@ logger = logging.getLogger("backend.ocr")
 
 OCR_USE_GPU = (os.getenv("OCR_USE_GPU", "auto").strip().lower() or "auto")
 OCR_MODEL_DIR = Path(
-    os.getenv(
-        "EASYOCR_MODEL_DIR",
-        str(Path(__file__).resolve().parent / ".easyocr"),
-    )
+    os.getenv("TORCHFREE_OCR_MODULE_PATH")
+    or os.getenv("EASYOCR_MODEL_DIR")
+    or str(Path(__file__).resolve().parent / ".easyocr-onnx")
 )
 
 _READER_LOCK = threading.Lock()
-_READERS: dict[tuple[str, bool], Any] = {}
+_READERS: dict[str, Any] = {}
 
 
-def _resolve_gpu_mode() -> bool:
+def _import_easyocr_onnx():
+    import torchfree_ocr
+    from torchfree_ocr import utils as torchfree_utils
+
+    progress_factory = getattr(torchfree_utils, "printProgressBar", None)
+    if callable(progress_factory) and not getattr(progress_factory, "_pixelpilot_ascii", False):
+        def ascii_progress_bar(
+            prefix: str = "",
+            suffix: str = "",
+            decimals: int = 1,
+            length: int = 100,
+            fill: str = "#",
+        ):
+            return progress_factory(
+                prefix=prefix,
+                suffix=suffix,
+                decimals=decimals,
+                length=length,
+                fill=fill,
+            )
+
+        ascii_progress_bar._pixelpilot_ascii = True  # type: ignore[attr-defined]
+        torchfree_utils.printProgressBar = ascii_progress_bar
+
+    return torchfree_ocr
+
+
+def _device_name() -> str:
+    return "cpu"
+
+
+def _validate_device_config() -> None:
     mode = OCR_USE_GPU
     if mode not in {"auto", "off", "require"}:
         mode = "auto"
-
-    if mode == "off":
-        return False
-
-    try:
-        import torch
-
-        available = bool(torch.cuda.is_available())
-    except Exception as exc:  # noqa: BLE001
-        if mode == "require":
-            raise RuntimeError(
-                f"OCR_USE_GPU=require but CUDA detection failed: {exc}"
-            ) from exc
-        logger.debug("Torch CUDA detection failed; falling back to CPU", exc_info=True)
-        return False
-
-    if mode == "require" and not available:
-        raise RuntimeError("OCR_USE_GPU=require but CUDA is unavailable.")
-
-    return available
+    if mode == "require":
+        raise RuntimeError(
+            "EasyOCR-ONNX is CPU-only; OCR_USE_GPU=require is not supported."
+        )
 
 
-def _reader_key(lang: str, use_gpu: bool) -> tuple[str, bool]:
-    return ((lang or "en").strip().lower() or "en", bool(use_gpu))
-
-
-def _device_name(use_gpu: bool) -> str:
-    return "cuda" if use_gpu else "cpu"
-
-
-def _create_reader(lang: str, use_gpu: bool):
-    import easyocr
+def _create_reader(lang: str):
+    os.environ.setdefault("TORCHFREE_OCR_MODULE_PATH", str(OCR_MODEL_DIR))
+    torchfree_ocr = _import_easyocr_onnx()
 
     OCR_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     logger.info(
-        "Initializing backend EasyOCR reader (lang=%s, device=%s)",
+        "Initializing backend EasyOCR-ONNX reader (lang=%s, device=%s)",
         lang,
-        _device_name(use_gpu),
+        _device_name(),
     )
-    return easyocr.Reader(
-        [lang],
-        gpu=use_gpu,
-        model_storage_directory=str(OCR_MODEL_DIR),
-    )
+    return torchfree_ocr.Reader([lang])
 
 
 def _get_reader(lang: str) -> tuple[Any, str]:
-    use_gpu = _resolve_gpu_mode()
-    key = _reader_key(lang, use_gpu)
+    _validate_device_config()
+    key = (lang or "en").strip().lower() or "en"
     reader = _READERS.get(key)
     if reader is not None:
-        return reader, _device_name(use_gpu)
+        return reader, _device_name()
 
     with _READER_LOCK:
         reader = _READERS.get(key)
         if reader is None:
-            reader = _create_reader(key[0], use_gpu)
+            reader = _create_reader(key)
             _READERS[key] = reader
-    return reader, _device_name(use_gpu)
+    return reader, _device_name()
 
 
 def prefetch_reader(lang: str = "en") -> str:
@@ -137,7 +140,7 @@ def run_easyocr_array(np_image: np.ndarray, *, lang: str = "en") -> dict[str, An
 
     total_ms = int((time.perf_counter() - total_start) * 1000)
     return {
-        "provider": "easyocr",
+        "provider": "easyocr-onnx",
         "device": device,
         "hosted": True,
         "results": results,
@@ -153,7 +156,7 @@ def run_easyocr(image_bytes: bytes, *, lang: str = "en") -> dict[str, Any]:
     decode_start = time.perf_counter()
     with Image.open(io.BytesIO(image_bytes)) as image:
         rgb_image = image.convert("RGB")
-        np_image = np.array(rgb_image)
+        np_image = np.array(rgb_image)[:, :, ::-1]
     decode_ms = int((time.perf_counter() - decode_start) * 1000)
 
     payload = run_easyocr_array(np_image, lang=lang)

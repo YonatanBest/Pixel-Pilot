@@ -210,14 +210,14 @@ async def _easyocr_with_rate_limit(
         )
 
     try:
-        logger.info("Running backend EasyOCR for user %s", user_id)
+        logger.info("Running backend EasyOCR-ONNX for user %s", user_id)
         result = await asyncio.to_thread(
             ocr_service.run_easyocr,
             image_bytes,
             lang=str(request.lang or "en"),
         )
     except Exception:
-        logger.exception("EasyOCR error for user %s", user_id)
+        logger.exception("EasyOCR-ONNX error for user %s", user_id)
         try:
             await rate_limiter.refund_ocr_request(reservation, redis_client)
         except Exception:
@@ -386,7 +386,7 @@ async def easyocr_route(
             headers = _build_rate_limit_headers(e.detail)
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=headers)
     except Exception:
-        logger.exception("Unexpected EasyOCR handler error")
+        logger.exception("Unexpected EasyOCR-ONNX handler error")
         raise HTTPException(status_code=500, detail="OCR failed")
 
 

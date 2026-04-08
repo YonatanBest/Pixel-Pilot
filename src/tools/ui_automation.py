@@ -4,15 +4,15 @@ import ctypes
 import hashlib
 import json
 import logging
-import tempfile
 import time
 from collections import Counter, deque
-from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 from PIL import Image
 
 from config import Config
+from tools.easyocr_onnx import import_easyocr_onnx
 
 logger = logging.getLogger("pixelpilot.uia")
 
@@ -1264,9 +1264,9 @@ def _import_ocr_engine() -> tuple[Any | None, str]:
         return None, _OCR_IMPORT_ERROR
 
     try:
-        from rapidocr_onnxruntime import RapidOCR
+        torchfree_ocr = import_easyocr_onnx()
 
-        _OCR_ENGINE = RapidOCR()
+        _OCR_ENGINE = torchfree_ocr.Reader(["en"])
         return _OCR_ENGINE, ""
     except Exception as exc:
         _OCR_IMPORT_ERROR = str(exc)
@@ -1300,28 +1300,23 @@ def _extract_text_with_ocr(
     if engine is None:
         return "", {
             "available": False,
-            "provider": "RapidOCR",
-            "error": f"rapidocr_onnxruntime not available: {import_error}",
+            "provider": "EasyOCR-ONNX",
+            "error": f"torchfree_ocr not available: {import_error}",
         }
 
     image = _capture_workspace_image(workspace, desktop_manager)
     if image is None:
         return "", {
             "available": True,
-            "provider": "RapidOCR",
+            "provider": "EasyOCR-ONNX",
             "error": "screen_capture_failed",
         }
 
-    temp_path: Optional[Path] = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            image.save(tmp, format="PNG")
-            temp_path = Path(tmp.name)
-
-        ocr_result, _ = engine(str(temp_path))
+        ocr_result = engine.readtext(np.array(image)[:, :, ::-1])
         lines: list[str] = []
         for item in ocr_result or []:
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
+            if isinstance(item, (list, tuple)) and len(item) >= 3:
                 maybe_text = item[1]
                 if isinstance(maybe_text, str) and maybe_text.strip():
                     lines.append(maybe_text.strip())
@@ -1332,21 +1327,15 @@ def _extract_text_with_ocr(
 
         return text, {
             "available": True,
-            "provider": "RapidOCR",
+            "provider": "EasyOCR-ONNX",
             "line_count": len(lines),
         }
     except Exception as exc:
         return "", {
             "available": True,
-            "provider": "RapidOCR",
+            "provider": "EasyOCR-ONNX",
             "error": f"OCR execution failed: {exc}",
         }
-    finally:
-        if temp_path is not None:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 def read_text(
@@ -1457,7 +1446,7 @@ def read_text(
                     "status": "ok",
                     "reason": "ok",
                     "text": ocr_text,
-                    "source": "OCR.RapidOCR",
+                    "source": "OCR.EasyOCR-ONNX",
                     "workspace": workspace,
                     "target": safe_target,
                     "ui_element_id": ui_element_id,

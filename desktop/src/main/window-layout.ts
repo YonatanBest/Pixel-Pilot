@@ -47,29 +47,8 @@ export function normalizeWindowSize(kind: WindowKind, workArea: ScreenWorkArea, 
 
   if (kind === 'settings') {
     return {
-      width: clamp(Math.round(size.width), 200, Math.min(280, maxWidth)),
-      height: clamp(Math.round(size.height), 180, Math.min(640, maxHeight))
-    };
-  }
-
-  if (kind === 'startup-settings') {
-    return {
-      width: clamp(Math.round(size.width), 260, Math.min(380, maxWidth)),
-      height: clamp(Math.round(size.height), 220, Math.min(460, maxHeight))
-    };
-  }
-
-  if (kind === 'session-settings') {
-    return {
-      width: clamp(Math.round(size.width), 360, Math.min(520, maxWidth)),
-      height: clamp(Math.round(size.height), 260, Math.min(520, maxHeight))
-    };
-  }
-
-  if (kind === 'extensions-settings') {
-    return {
-      width: clamp(Math.round(size.width), 380, Math.min(560, maxWidth)),
-      height: clamp(Math.round(size.height), 260, Math.min(560, maxHeight))
+      width: clamp(Math.round(size.width), 520, Math.min(720, maxWidth)),
+      height: clamp(Math.round(size.height), 420, Math.min(720, maxHeight))
     };
   }
 

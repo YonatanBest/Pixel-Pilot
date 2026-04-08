@@ -32,7 +32,7 @@ const modeGuide = [
 
 const visionGuide = [
     { mode: 'UIA', detail: 'Blind-first UI Automation snapshotting, targeting, text reads, and window focus.' },
-    { mode: 'OCR', detail: 'EasyOCR + OpenCV for fast local parsing when semantics are enough.' },
+    { mode: 'OCR', detail: 'EasyOCR-ONNX + OpenCV for fast local parsing when semantics are enough.' },
     { mode: 'ROBO', detail: 'Gemini Robotics-ER fallback for semantic UI disambiguation.' }
 ];
 

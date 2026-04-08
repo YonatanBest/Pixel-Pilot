@@ -10,6 +10,7 @@ import base64
 from backend_client import get_backend_proxy_client, get_client
 from config import Config
 from agent.prompts import ROBOTICS_EYE_DYNAMIC_PROMPT, ROBOTICS_EYE_GENERAL_PROMPT
+from tools.easyocr_onnx import import_easyocr_onnx
 
 warnings.filterwarnings(
     "ignore", message="'pin_memory' argument is set as true but no accelerator is found"
@@ -32,11 +33,12 @@ class LocalCVEye:
     @property
     def reader(self):
         if self._reader is None:
-            import easyocr
-            import torch
-            use_gpu = torch.cuda.is_available() if self._use_gpu is None else self._use_gpu
-            logger.info(f"Initializing EasyOCR Reader (GPU={use_gpu})...")
-            self._reader = easyocr.Reader([self.lang], gpu=use_gpu)
+            torchfree_ocr = import_easyocr_onnx()
+
+            if self._use_gpu:
+                logger.warning("EasyOCR-ONNX runs on CPU only; ignoring use_gpu=%s", self._use_gpu)
+            logger.info("Initializing EasyOCR-ONNX Reader (device=cpu)...")
+            self._reader = torchfree_ocr.Reader([self.lang])
         return self._reader
 
     def _should_use_backend_eye(self) -> bool:
@@ -52,16 +54,7 @@ class LocalCVEye:
     def _run_local_ocr(self, img):
         logger.info("Running local OCR...")
         self.last_ocr_source = "local"
-        try:
-            import torch
-
-            self.last_ocr_device = (
-                "cuda"
-                if (torch.cuda.is_available() if self._use_gpu is None else bool(self._use_gpu))
-                else "cpu"
-            )
-        except Exception:
-            self.last_ocr_device = "cpu"
+        self.last_ocr_device = "cpu"
         return self.reader.readtext(img)
 
     def _run_backend_eye(self, image_path: str):

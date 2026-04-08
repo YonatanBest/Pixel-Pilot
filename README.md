@@ -45,8 +45,8 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
   - text extraction (`read_ui_text`)
   - window listing/focus (`list_windows`, `focus_window`)
 - Vision pipeline:
-  - backend-hosted eye pipeline (`EasyOCR` + OpenCV icon detection) for signed-in users
-  - local OCR/CV (`EasyOCR` + OpenCV) for direct API-key mode
+  - backend-hosted eye pipeline (`EasyOCR-ONNX` + OpenCV icon detection) for signed-in users
+  - local OCR/CV (`EasyOCR-ONNX` + OpenCV) for direct API-key mode
   - optional Robotics-ER fallback
   - annotated overlay + optional reference sheet
 - UAC secure desktop support through hardened orchestrator/agent helpers (`src/uac/`) with per-request IPC and explicit user confirmation before allow.
@@ -79,7 +79,7 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
 - Desktop shell: Electron + React + TypeScript + Tailwind
 - Runtime/backend process: Python + PySide6 Core (headless event loop only)
 - AI: Google GenAI SDK (`google-genai`)
-- Vision: EasyOCR, OpenCV, Pillow
+- Vision: EasyOCR-ONNX, OpenCV, Pillow
 - Automation: pyautogui, ctypes/Win32, keyboard, UIAutomation (`uiautomation`)
 - Live mode audio: PyAudio + openWakeWord wake-word detection
 - Optional backend: FastAPI + MongoDB + Redis + JWT
@@ -153,7 +153,8 @@ Startup behavior:
 - When Live is available, the session starts disconnected, Gemini voice stays off, and wake-word listening can arm locally if configured. If wake-word is disabled or unavailable, PixelPilot reconnects Gemini Live automatically.
 - Backend mode (no local key): Electron shows the auth gate, Gemini Live uses the backend Gemini key after sign-in, and OCR mode runs the full eye pipeline on the backend.
 - The desktop shell stays least-privileged at startup; secure desktop/UAC automation uses the MSI-installed helper tasks when needed.
-- The expanded details view now includes `Diagnostics`, `Resume Last Context`, `Extensions`, and read-only runtime configuration paths.
+- The expanded details view stays focused on transcript/thinking state only.
+- Startup defaults, sessions, extensions, diagnostics, and read-only runtime configuration now live inside the unified `Settings Hub`.
 
 Packaged runtime build:
 
@@ -212,6 +213,9 @@ LIVE_SESSION_HEARTBEAT_SECONDS=10
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Notes:
+- `EasyOCR-ONNX` currently runs on CPU only. Leave `OCR_USE_GPU` at `auto` or set it to `off`.
+
 4. Point desktop app:
 ```env
 BACKEND_URL=http://localhost:8000
@@ -222,7 +226,7 @@ Backend endpoints:
 - `POST /auth/login`
 - `GET /auth/me`
 - `POST /v1/generate` (JWT protected, Redis rate limited)
-- `POST /v1/vision/easyocr` (JWT protected, backend EasyOCR helper)
+- `POST /v1/vision/easyocr` (JWT protected, backend EasyOCR-ONNX helper)
 - `POST /v1/vision/local-eye` (JWT protected, backend-hosted OCR + icon detection pipeline)
 - `WS /ws/live` (JWT protected, backend Gemini Live relay with Redis-backed Live session limits)
 - `GET /health`
@@ -267,7 +271,7 @@ Run the shared diagnostics pipeline locally:
 python src/main.py doctor
 ```
 
-The same doctor report is also available in the expanded Electron details view, where you can run diagnostics and copy the rendered text or JSON output.
+The same doctor report is also available in the Electron `Settings Hub` under `Diagnostics`, where you can run diagnostics and copy the rendered text or JSON output.
 
 ## Uninstall
 

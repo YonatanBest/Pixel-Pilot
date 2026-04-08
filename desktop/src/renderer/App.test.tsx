@@ -85,6 +85,8 @@ function makeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot
     settingsSources: [],
     sessionDirectory: 'C:\\Users\\tester\\.pixelpilot\\sessions',
     lastDoctorReport: {},
+    bridgeStatus: 'connected',
+    bridgeStatusMessage: '',
     ...overrides
   };
 }
@@ -97,12 +99,6 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
   setExpanded: ReturnType<typeof vi.fn>;
   toggleSettingsWindow: ReturnType<typeof vi.fn>;
   closeSettingsWindow: ReturnType<typeof vi.fn>;
-  toggleStartupSettingsWindow: ReturnType<typeof vi.fn>;
-  closeStartupSettingsWindow: ReturnType<typeof vi.fn>;
-  toggleSessionSettingsWindow: ReturnType<typeof vi.fn>;
-  closeSessionSettingsWindow: ReturnType<typeof vi.fn>;
-  toggleExtensionsSettingsWindow: ReturnType<typeof vi.fn>;
-  closeExtensionsSettingsWindow: ReturnType<typeof vi.fn>;
   setStartupDefaults: ReturnType<typeof vi.fn>;
   updateWindowLayout: ReturnType<typeof vi.fn>;
   resolveConfirmation: ReturnType<typeof vi.fn>;
@@ -129,12 +125,6 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
   const setExpanded = vi.fn().mockResolvedValue({});
   const toggleSettingsWindow = vi.fn().mockResolvedValue({ visible: true });
   const closeSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
-  const toggleStartupSettingsWindow = vi.fn().mockResolvedValue({ visible: true });
-  const closeStartupSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
-  const toggleSessionSettingsWindow = vi.fn().mockResolvedValue({ visible: true });
-  const closeSessionSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
-  const toggleExtensionsSettingsWindow = vi.fn().mockResolvedValue({ visible: true });
-  const closeExtensionsSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
   const setStartupDefaults = vi.fn().mockResolvedValue({
     operationMode: (snapshot?.operationMode || 'AUTO').toUpperCase(),
     visionMode: (snapshot?.visionMode || 'OCR').toUpperCase(),
@@ -155,12 +145,6 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
     setTrayOnly,
     toggleSettingsWindow,
     closeSettingsWindow,
-    toggleStartupSettingsWindow,
-    closeStartupSettingsWindow,
-    toggleSessionSettingsWindow,
-    closeSessionSettingsWindow,
-    toggleExtensionsSettingsWindow,
-    closeExtensionsSettingsWindow,
     setStartupDefaults,
     updateWindowLayout,
     resolveConfirmation,
@@ -204,12 +188,6 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
     setExpanded,
     toggleSettingsWindow,
     closeSettingsWindow,
-    toggleStartupSettingsWindow,
-    closeStartupSettingsWindow,
-    toggleSessionSettingsWindow,
-    closeSessionSettingsWindow,
-    toggleExtensionsSettingsWindow,
-    closeExtensionsSettingsWindow,
     setStartupDefaults,
     updateWindowLayout,
     resolveConfirmation,
@@ -240,6 +218,11 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
 describe('Electron renderer App', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn().mockResolvedValue(undefined)
+      }
+    });
   });
 
   it('shows the auth gate and submits a direct API key', async () => {
@@ -532,7 +515,7 @@ describe('Electron renderer App', () => {
     });
   });
 
-  it('renders the separate settings window and wires the menu actions', async () => {
+  it('renders the unified settings hub and wires the general section actions', async () => {
     const controls = setupApi(
       'settings',
       makeSnapshot({
@@ -543,59 +526,26 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/^mode$/i)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /wake word on/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /wake word off/i })).not.toBeInTheDocument();
+    expect(await screen.findByText(/settings hub/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^general$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^startup$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^sessions$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^extensions$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^diagnostics$/i })).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /^auto$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^robo$/i }));
     await userEvent.click(screen.getByRole('button', { name: /sign out/i }));
 
     await waitFor(() => {
-      expect(controls.closeSettingsWindow).toHaveBeenCalledTimes(3);
       expect(controls.invokeRuntime).toHaveBeenCalledWith('mode.set', { value: 'AUTO' });
       expect(controls.invokeRuntime).toHaveBeenCalledWith('vision.set', { value: 'ROBO' });
       expect(controls.invokeRuntime).toHaveBeenCalledWith('auth.logout', undefined);
     });
   });
 
-  it('opens startup defaults popup from settings list', async () => {
+  it('switches to the startup section and saves persisted defaults', async () => {
     const controls = setupApi('settings', makeSnapshot({ operationMode: 'SAFE', visionMode: 'OCR' }));
-
-    render(<App />);
-
-    expect(await screen.findByText(/^mode$/i)).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole('button', { name: /startup defaults/i }));
-
-    await waitFor(() => {
-      expect(controls.closeSettingsWindow).toHaveBeenCalledTimes(1);
-      expect(controls.toggleStartupSettingsWindow).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it('opens session and extensions popups from the settings list', async () => {
-    const controls = setupApi('settings', makeSnapshot({ operationMode: 'SAFE', visionMode: 'OCR' }));
-
-    render(<App />);
-
-    expect(await screen.findByText(/^mode$/i)).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole('button', { name: /^sessions$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^extensions$/i }));
-
-    await waitFor(() => {
-      expect(controls.closeSettingsWindow).toHaveBeenCalledTimes(2);
-      expect(controls.toggleSessionSettingsWindow).toHaveBeenCalledTimes(1);
-      expect(controls.toggleExtensionsSettingsWindow).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it('renders startup defaults popup and saves persisted defaults', async () => {
-    const controls = setupApi(
-      'startup-settings',
-      makeSnapshot({ operationMode: 'SAFE', visionMode: 'OCR' })
-    );
     controls.getStartupDefaults.mockResolvedValueOnce({
       operationMode: 'SAFE',
       visionMode: 'OCR',
@@ -605,9 +555,10 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/^Startup Defaults$/i)).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: /^auto$/i })).toBeInTheDocument();
+    expect(await screen.findByText(/settings hub/i)).toBeInTheDocument();
 
+    await userEvent.click(screen.getByRole('button', { name: /^startup$/i }));
+    expect(await screen.findByText(/^startup defaults$/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /^auto$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^robo$/i }));
     await userEvent.click(screen.getByRole('button', { name: /save startup defaults/i }));
@@ -688,6 +639,27 @@ describe('Electron renderer App', () => {
     expect(screen.getByText(/planning the next action/i)).toBeInTheDocument();
   });
 
+  it('shows loading bridge state and disables runtime controls during startup', async () => {
+    const controls = setupApi(
+      'overlay',
+      makeSnapshot({
+        expanded: false,
+        bridgeStatus: 'starting',
+        bridgeStatusMessage: 'Starting runtime...'
+      })
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/starting runtime/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /open settings menu/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /disconnect live session/i })).toBeDisabled();
+
+    await userEvent.type(screen.getByPlaceholderText(/type a command/i), 'hello');
+    expect(screen.getByRole('button', { name: /send command/i })).toBeDisabled();
+    expect(controls.invokeRuntime).not.toHaveBeenCalledWith('live.submitText', expect.anything());
+  });
+
   it('keeps the expanded details view focused on the process log only', async () => {
     setupApi(
       'overlay',
@@ -709,9 +681,9 @@ describe('Electron renderer App', () => {
     expect(screen.queryByText(/sessions and extensions now live in the settings menu/i)).not.toBeInTheDocument();
   });
 
-  it('renders the session settings window and wires resume and open-folder actions', async () => {
+  it('renders the sessions section and wires resume and open-folder actions', async () => {
     const controls = setupApi(
-      'session-settings',
+      'settings',
       makeSnapshot({
         latestSessionContext: {
           available: true,
@@ -752,25 +724,26 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/^sessions$/i)).toBeInTheDocument();
+    expect(await screen.findByText(/settings hub/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^sessions$/i }));
+
+    expect(await screen.findByText(/manual resume and session log access for the current workspace/i)).toBeInTheDocument();
     expect(screen.getByText(/recovered context from the deployment dashboard\./i)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /^resume last context$/i }));
     await userEvent.click(screen.getByRole('button', { name: /open session logs/i }));
-    await userEvent.click(screen.getByRole('button', { name: /close sessions window/i }));
 
     await waitFor(() => {
       expect(controls.invokeRuntime).toHaveBeenCalledWith('session.resumeLatestContext');
       expect(controls.invokeRuntime).toHaveBeenCalledWith('session.openFolder');
-      expect(controls.closeSessionSettingsWindow).toHaveBeenCalledTimes(1);
     });
 
     expect(await screen.findByText(/resumed context from the deployment dashboard\./i)).toBeInTheDocument();
   });
 
-  it('renders the extensions settings window and reloads extension state', async () => {
+  it('renders the extensions and diagnostics sections and handles their actions', async () => {
     const controls = setupApi(
-      'extensions-settings',
+      'settings',
       makeSnapshot({
         extensions: {
           status: 'ready',
@@ -780,6 +753,17 @@ describe('Electron renderer App', () => {
           pluginIds: ['demo'],
           mcpServerNames: ['demo-server'],
           toolNames: ['plugin__demo__echo', 'mcp__demo__list_windows']
+        },
+        lastDoctorReport: {
+          status: 'ok',
+          checks: [
+            {
+              name: 'Audio',
+              status: 'ok',
+              summary: 'Input and output devices detected.',
+              details: {}
+            }
+          ]
         }
       })
     );
@@ -815,23 +799,51 @@ describe('Electron renderer App', () => {
           }
         });
       }
+      if (method === 'doctor.run') {
+        return Promise.resolve({
+          doctor: {
+            status: 'ok',
+            checks: [
+              {
+                name: 'Wake word',
+                status: 'ok',
+                summary: 'Wake word assets are installed.',
+                details: {}
+              }
+            ]
+          },
+          text: 'PixelPilot doctor: OK\n- Wake word: ok - Wake word assets are installed.'
+        });
+      }
       return Promise.resolve({});
     });
 
     render(<App />);
 
-    expect(await screen.findByText(/^extensions$/i)).toBeInTheDocument();
+    expect(await screen.findByText(/settings hub/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^extensions$/i }));
+
+    expect(await screen.findByText(/plugin and mcp tool discovery with explicit local opt-in/i)).toBeInTheDocument();
     expect(screen.getByText(/plugin__demo__echo/i)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /reload extensions/i }));
-    await userEvent.click(screen.getByRole('button', { name: /close extensions window/i }));
 
     await waitFor(() => {
       expect(controls.invokeRuntime).toHaveBeenCalledWith('extensions.reload');
-      expect(controls.closeExtensionsSettingsWindow).toHaveBeenCalledTimes(1);
     });
 
     expect(await screen.findByText(/plugin__demo__summarize/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /^diagnostics$/i }));
+    expect(await screen.findByText(/run the shared doctor pipeline and copy the latest runtime health report/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /run diagnostics/i }));
+    await userEvent.click(screen.getByRole('button', { name: /copy doctor text/i }));
+    await userEvent.click(screen.getByRole('button', { name: /copy doctor json/i }));
+
+    await waitFor(() => {
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('doctor.run');
+      expect(navigator.clipboard.writeText).toHaveBeenCalled();
+    });
   });
 
   it('auto-scrolls the expanded log when new conversation content arrives', async () => {

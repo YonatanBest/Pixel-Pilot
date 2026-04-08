@@ -58,6 +58,8 @@ export type ExtensionSummary = {
   toolNames: string[];
 };
 
+export type BridgeStatus = 'starting' | 'connected' | 'recovering' | 'failed';
+
 export type RuntimeSnapshot = {
   operationMode: 'GUIDANCE' | 'SAFE' | 'AUTO';
   visionMode: 'ROBO' | 'OCR';
@@ -89,6 +91,8 @@ export type RuntimeSnapshot = {
   settingsSources: string[];
   sessionDirectory: string;
   lastDoctorReport: DoctorReport | Record<string, never>;
+  bridgeStatus: BridgeStatus;
+  bridgeStatusMessage: string;
 };
 
 export type RuntimeEventEnvelope = {
@@ -123,10 +127,7 @@ export type WindowKind =
   | 'overlay'
   | 'notch'
   | 'sidecar'
-  | 'settings'
-  | 'startup-settings'
-  | 'session-settings'
-  | 'extensions-settings';
+  | 'settings';
 
 export type RuntimeCommandPayload = Record<string, unknown>;
 
@@ -145,12 +146,6 @@ export type PixelPilotApi = {
   setTrayOnly: (enabled: boolean) => Promise<Record<string, unknown>>;
   toggleSettingsWindow: () => Promise<{ visible: boolean }>;
   closeSettingsWindow: () => Promise<{ visible: boolean }>;
-  toggleStartupSettingsWindow: () => Promise<{ visible: boolean }>;
-  closeStartupSettingsWindow: () => Promise<{ visible: boolean }>;
-  toggleSessionSettingsWindow: () => Promise<{ visible: boolean }>;
-  closeSessionSettingsWindow: () => Promise<{ visible: boolean }>;
-  toggleExtensionsSettingsWindow: () => Promise<{ visible: boolean }>;
-  closeExtensionsSettingsWindow: () => Promise<{ visible: boolean }>;
   setStartupDefaults: (payload: {
     operationMode: 'GUIDANCE' | 'SAFE' | 'AUTO';
     visionMode: 'ROBO' | 'OCR';

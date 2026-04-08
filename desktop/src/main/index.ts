@@ -3,7 +3,7 @@ import { RuntimeBridgeClient } from './bridge-client.js';
 import { RuntimeProcessManager } from './runtime-process.js';
 import { StartupDefaultsStore } from './startup-defaults.js';
 import { WindowManager } from './window-manager.js';
-import type { RuntimeEventEnvelope } from '../shared/types.js';
+import type { BridgeStatus, RuntimeEventEnvelope } from '../shared/types.js';
 
 const require = createRequire(import.meta.url);
 const { app } = require('electron') as typeof import('electron');
@@ -24,8 +24,39 @@ let bridgeRecoveryPromise: Promise<void> | null = null;
 let bridgeClientPromise: Promise<RuntimeBridgeClient> | null = null;
 let shuttingDown = false;
 let runtimeBridgeEndpoints: { controlUrl: string; sidecarUrl: string } | null = null;
+let bridgeStatus: BridgeStatus = 'starting';
+let bridgeStatusMessage = 'Starting runtime...';
+let hasConnectedBridge = false;
 
 const BRIDGE_RECOVERY_GRACE_MS = 8000;
+const BRIDGE_COMMAND_TIMEOUT_MS = 10000;
+
+function bridgeMessageFor(status: BridgeStatus, message = ''): string {
+  const trimmed = String(message || '').trim();
+  if (trimmed) {
+    return trimmed;
+  }
+  if (status === 'starting') {
+    return 'Starting runtime...';
+  }
+  if (status === 'recovering') {
+    return 'Reconnecting runtime...';
+  }
+  if (status === 'failed') {
+    return 'PixelPilot lost the runtime connection.';
+  }
+  return '';
+}
+
+function currentWaitStatus(): BridgeStatus {
+  return hasConnectedBridge || bridgeRecoveryInProgress || bridgeRecoveryTimer ? 'recovering' : 'starting';
+}
+
+function setBridgeStatus(status: BridgeStatus, message = ''): void {
+  bridgeStatus = status;
+  bridgeStatusMessage = bridgeMessageFor(status, message);
+  windowManager?.setBridgeState(bridgeStatus, bridgeStatusMessage);
+}
 
 function clearBridgeRecoveryTimer(): void {
   if (bridgeRecoveryTimer) {
@@ -34,12 +65,65 @@ function clearBridgeRecoveryTimer(): void {
   }
 }
 
+function isTransientBridgeError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /runtime bridge (closed|disconnected|reconnecting)/i.test(message)
+    || /disconnected while waiting/i.test(message);
+}
+
+async function waitForCommandClient(
+  timeoutMs: number = BRIDGE_COMMAND_TIMEOUT_MS,
+): Promise<RuntimeBridgeClient> {
+  const client = await ensureBridgeClient();
+  if (client.isControlConnected()) {
+    return client;
+  }
+
+  const waitStatus = currentWaitStatus();
+  setBridgeStatus(waitStatus);
+
+  const connected = await waitForBridgeConnected(client, timeoutMs);
+  if (connected) {
+    return bridgeClient ?? client;
+  }
+
+  if (waitStatus === 'recovering') {
+    void recoverRuntimeBridge().catch(() => undefined);
+  }
+
+  throw new Error(
+    waitStatus === 'starting'
+      ? 'PixelPilot is still starting. Please try again in a few seconds.'
+      : 'PixelPilot is still reconnecting. Please try again in a few seconds.'
+  );
+}
+
 async function invokeRuntimeFromMain(
   method: string,
   payload: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>> {
-  const client = await ensureBridgeClient();
-  return client.sendCommand(method, payload);
+  const client = await waitForCommandClient();
+  try {
+    const result = await client.sendCommand(method, payload);
+    if (bridgeStatus !== 'connected') {
+      setBridgeStatus('connected');
+    }
+    return result;
+  } catch (error) {
+    if (isTransientBridgeError(error)) {
+      const waitStatus = currentWaitStatus();
+      setBridgeStatus(waitStatus);
+      if (waitStatus === 'recovering') {
+        void recoverRuntimeBridge().catch(() => undefined);
+      }
+      throw new Error(
+        waitStatus === 'starting'
+          ? 'PixelPilot is still starting. Please try again in a few seconds.'
+          : 'PixelPilot is still reconnecting. Please try again in a few seconds.'
+      );
+    }
+    throw error instanceof Error ? error : new Error(String(error));
+  }
 }
 
 async function beginBridgeClientStart(
@@ -132,13 +216,23 @@ function scheduleBridgeRecovery(): void {
 function attachBridgeHandlers(client: RuntimeBridgeClient): void {
   client.on('connected', () => {
     clearBridgeRecoveryTimer();
+    hasConnectedBridge = true;
+    setBridgeStatus('connected');
   });
 
   client.on('disconnected', () => {
+    if (shuttingDown) {
+      return;
+    }
+    setBridgeStatus(currentWaitStatus());
     scheduleBridgeRecovery();
   });
 
   client.on('bridge-error', () => {
+    if (shuttingDown) {
+      return;
+    }
+    setBridgeStatus(currentWaitStatus());
     scheduleBridgeRecovery();
   });
 
@@ -217,9 +311,11 @@ async function recoverRuntimeBridge(): Promise<void> {
   }
 
   if (bridgeClient?.isControlConnected()) {
+    setBridgeStatus('connected');
     return;
   }
 
+  setBridgeStatus('recovering');
   bridgeRecoveryInProgress = true;
   bridgeRecoveryPromise = (async () => {
     try {
@@ -242,10 +338,15 @@ async function recoverRuntimeBridge(): Promise<void> {
       runtimeProcess?.stop();
       runtimeProcess = null;
       runtimeBridgeEndpoints = null;
+
       const restartedClient = await beginBridgeClientStart({ reuseRuntime: false });
-      await waitForBridgeConnected(restartedClient, 5000);
+      const restarted = await waitForBridgeConnected(restartedClient, 5000);
+      if (!restarted) {
+        throw new Error('Runtime bridge restart timed out.');
+      }
     } catch (error) {
       console.error('Failed to recover runtime bridge.', error);
+      setBridgeStatus('failed', 'Runtime recovery failed. PixelPilot will keep retrying in the background.');
       scheduleBridgeRecovery();
     } finally {
       bridgeRecoveryInProgress = false;
@@ -262,7 +363,7 @@ async function bootstrap(): Promise<void> {
     invokeRuntimeFromMain,
     startupDefaultsStore,
   );
-
+  setBridgeStatus('starting');
   windowManager.createWindows();
   await beginBridgeClientStart({ reuseRuntime: false });
 }
@@ -292,8 +393,5 @@ app.on('before-quit', () => {
 });
 
 app.on('second-instance', () => {
-  // Bring the primary app UI back when a second launch is attempted.
-  void bridgeClient
-    ?.sendCommand('shell.setBackgroundHidden', { hidden: false })
-    .catch(() => undefined);
+  void invokeRuntimeFromMain('shell.setBackgroundHidden', { hidden: false }).catch(() => undefined);
 });

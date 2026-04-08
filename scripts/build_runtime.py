@@ -60,6 +60,8 @@ def build_target(target: BuildTarget, python_exe: str) -> Path | None:
         "PyInstaller",
         "--onefile",
         "--noconsole",
+        "--collect-data",
+        "torchfree_ocr",
         "--paths",
         str(SRC_DIR),
         "--distpath",
