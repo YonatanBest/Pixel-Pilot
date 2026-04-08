@@ -142,6 +142,22 @@ class LiveSessionManager(QObject):
         self.tools.set_guidance_mode(self._is_guidance_mode())
         self.availability_changed.emit(self.is_available, self.unavailable_reason)
 
+    def _session_store_call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        store = getattr(self.agent, "session_store", None)
+        if store is None:
+            return None
+        method = getattr(store, method_name, None)
+        if not callable(method):
+            return None
+        try:
+            return method(*args, **kwargs)
+        except Exception:
+            logger.debug("Session store call failed: %s", method_name, exc_info=True)
+            return None
+
+    def _record_resume_metadata(self) -> None:
+        self._session_store_call("record_resume_metadata", self._build_resume_summary())
+
     def _mode_key(self, mode: Optional[object] = None) -> str:
         value = self._mode if mode is None else mode
         if isinstance(value, OperationMode):
@@ -1272,6 +1288,7 @@ class LiveSessionManager(QObject):
             }
 
         self._log_user_request(clean, source="queued_connecting")
+        self._session_store_call("record_user_text", clean, source="queued_connecting")
 
         self._clear_manual_disconnect_request()
         depth, replaced = self._queue_pending_text_command(clean)
@@ -1308,6 +1325,7 @@ class LiveSessionManager(QObject):
             }
 
         self._log_user_request(clean, source="steering_nudge")
+        self._session_store_call("record_user_text", clean, source="steering_nudge")
 
         replaced = False
         with self._turn_state_lock:
@@ -1360,6 +1378,7 @@ class LiveSessionManager(QObject):
                 "message": error_message or "Unable to submit command.",
             }
         self._log_user_request(clean, source="typed_submit")
+        self._session_store_call("record_user_text", clean, source="typed_submit")
         self._clear_manual_disconnect_request()
         queued_for_connect = self.is_connection_pending
         submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
@@ -1397,6 +1416,11 @@ class LiveSessionManager(QObject):
             }
 
         self._log_user_request(str(waiter.get("submitted_text") or text), source="typed_wait")
+        self._session_store_call(
+            "record_user_text",
+            str(waiter.get("submitted_text") or text),
+            source="typed_wait",
+        )
         self._clear_manual_disconnect_request()
         submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
         if not submitted:
@@ -1530,6 +1554,13 @@ class LiveSessionManager(QObject):
 
     def notify_mode_changed(self, mode: object) -> None:
         self._mode = mode
+        self._session_store_call(
+            "record_session_event",
+            "mode_changed",
+            {
+                "mode": self._mode_key(mode),
+            },
+        )
         self.tools.set_guidance_mode(self._is_guidance_mode())
         self._clear_manual_disconnect_request()
         self._clear_session_context(reason="Mode changed. Started a fresh live session.")
@@ -1831,6 +1862,14 @@ class LiveSessionManager(QObject):
 
     async def _connect_session(self):
         self.session_state_changed.emit("connecting")
+        self._session_store_call(
+            "record_session_event",
+            "connecting",
+            {
+                "mode": self._mode_key(),
+                "workspace": self._workspace,
+            },
+        )
         self._connect_in_progress = True
         transport = self._create_transport()
         try:
@@ -1861,6 +1900,16 @@ class LiveSessionManager(QObject):
             if self._voice_enabled and (self._mic_task is None or self._mic_task.done()):
                 self._mic_task = asyncio.create_task(self._microphone_loop())
             self.session_state_changed.emit("listening")
+            self._session_store_call(
+                "record_session_event",
+                "connected",
+                {
+                    "mode": self._mode_key(),
+                    "workspace": self._workspace,
+                    "voiceEnabled": self._voice_enabled,
+                },
+            )
+            self._record_resume_metadata()
             if self._pending_text_commands:
                 self._schedule_pending_text_command_flush(reason="session_connected")
             return transport
@@ -1879,6 +1928,7 @@ class LiveSessionManager(QObject):
         close_client: bool = False,
         reconnecting: bool = False,
     ) -> None:
+        self._record_resume_metadata()
         current_task = asyncio.current_task()
         tasks = [
             self._mic_task,
@@ -1922,8 +1972,24 @@ class LiveSessionManager(QObject):
         self._transport = None
         if reconnecting and self.enabled and not self._shutdown_event.is_set():
             self.session_state_changed.emit("connecting")
+            self._session_store_call(
+                "record_session_event",
+                "reconnecting",
+                {
+                    "workspace": self._workspace,
+                    "closeClient": bool(close_client),
+                },
+            )
         else:
             self.session_state_changed.emit("disconnected")
+            self._session_store_call(
+                "record_session_event",
+                "disconnected",
+                {
+                    "workspace": self._workspace,
+                    "closeClient": bool(close_client),
+                },
+            )
 
     def _build_connect_config(self) -> dict[str, Any]:
         guidance_mode = self._is_guidance_mode()
@@ -2212,6 +2278,12 @@ class LiveSessionManager(QObject):
                 call_name,
                 self._serialize_log_value(args),
             )
+            self._session_store_call(
+                "record_tool_call",
+                call_name,
+                args,
+                call_id=call_id,
+            )
             result = await asyncio.to_thread(
                 self.tools.execute,
                 call_name,
@@ -2222,6 +2294,12 @@ class LiveSessionManager(QObject):
                 call_id,
                 call_name,
                 self._serialize_log_value(result),
+            )
+            self._session_store_call(
+                "record_tool_result",
+                call_name,
+                result if isinstance(result, dict) else {"value": result},
+                call_id=call_id,
             )
             if call_name == "request_reasoning_escalation":
                 escalation_result = result.get("result") if isinstance(result, dict) else None
@@ -2259,6 +2337,8 @@ class LiveSessionManager(QObject):
 
         if responses and self._transport is not None:
             await self._transport.send_tool_responses(responses)
+        if responses:
+            self._record_resume_metadata()
 
         while self._pending_capture_paths and self._transport is not None:
             path, summary = self._pending_capture_paths.popleft()
@@ -2946,8 +3026,8 @@ class LiveSessionManager(QObject):
             "resume_hint": resume_hint,
             "recent_user_steering": list(self._recent_user_steering),
             "recent_action_updates": list(self._recent_action_updates),
-            "last_uia_summary": self.tools.last_snapshot_summary,
-            "last_capture_summary": self.tools.last_capture_summary,
+            "last_uia_summary": getattr(self.tools, "last_snapshot_summary", None),
+            "last_capture_summary": getattr(self.tools, "last_capture_summary", None),
         }
         clean = {key: value for key, value in payload.items() if value}
         return json.dumps(clean, ensure_ascii=True)
@@ -2959,17 +3039,32 @@ class LiveSessionManager(QObject):
         }
         if emit_final:
             if fragments["user"]:
+                self._session_store_call(
+                    "record_transcript",
+                    "user",
+                    fragments["user"],
+                    final=True,
+                    source="live",
+                )
                 logger.info(
                     "LIVE_USER_TRANSCRIPT_FINAL text=%s",
                     self._truncate_log_text(fragments["user"]),
                 )
                 self.transcript_received.emit("user", fragments["user"], True)
             if fragments["assistant"]:
+                self._session_store_call(
+                    "record_transcript",
+                    "assistant",
+                    fragments["assistant"],
+                    final=True,
+                    source="live",
+                )
                 logger.info(
                     "LIVE_ASSISTANT_RESPONSE_FINAL text=%s",
                     self._truncate_log_text(fragments["assistant"]),
                 )
                 self.transcript_received.emit("assistant", fragments["assistant"], True)
+        self._record_resume_metadata()
         self._user_buffer = ""
         self._assistant_buffer = ""
         return fragments
@@ -3127,6 +3222,7 @@ class LiveSessionManager(QObject):
 
     def _on_action_update(self, payload: dict[str, Any]) -> None:
         self._recent_action_updates.append(payload)
+        self._session_store_call("record_action_update", payload)
         logger.info(
             "LIVE_ACTION_UPDATE payload=%s",
             self._serialize_log_value(self._compact_action_update(payload)),
@@ -3149,6 +3245,7 @@ class LiveSessionManager(QObject):
                     reason=f"action_{status}",
                 )
         self._queue_action_update_prompt(payload)
+        self._record_resume_metadata()
         self.action_state_changed.emit(payload)
 
     def _on_capture_ready(self, screenshot_path: str, summary: dict[str, Any]) -> None:

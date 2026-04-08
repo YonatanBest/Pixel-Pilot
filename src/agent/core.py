@@ -7,6 +7,9 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from config import Config, OperationMode
+from extensions import ExtensionManager
+from session_store import SessionStore
+from settings import RuntimeSettings
 from tools.app_index_service import AppIndexService
 
 
@@ -37,6 +40,7 @@ class AgentOrchestrator:
         self.mode = mode or Config.DEFAULT_MODE
         self.chat_window = chat_window
         self.robotics_eye = robotics_eye
+        self.runtime_settings = RuntimeSettings.load(project_root=Config.PROJECT_ROOT)
 
         self._stop_event = threading.Event()
         self._keyboard = None
@@ -47,6 +51,18 @@ class AgentOrchestrator:
             cache_path=Config.APP_INDEX_PATH,
             auto_refresh=Config.APP_INDEX_AUTO_REFRESH,
             include_processes=Config.APP_INDEX_INCLUDE_PROCESSES,
+        )
+        self.session_store = (
+            SessionStore(
+                workspace_root=Config.PROJECT_ROOT,
+                settings=self.runtime_settings.session,
+            )
+            if self.runtime_settings.session.enabled
+            else None
+        )
+        self.extension_manager = ExtensionManager(
+            settings=self.runtime_settings.extensions,
+            project_root=Config.PROJECT_ROOT,
         )
 
         self.desktop_manager = None

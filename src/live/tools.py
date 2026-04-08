@@ -10,6 +10,8 @@ import pyautogui
 
 from config import Config, OperationMode
 from live.broker import LiveActionBroker
+from settings import PermissionRuleSet
+from tool_policy import HookOverride, PermissionMode, ToolPolicyEvaluator
 from uac.approval import resolve_uac_allow_decision
 from uac.detection import get_uac_state_snapshot
 from uac.flow import (
@@ -46,6 +48,26 @@ class LiveToolRegistry:
         "workspace_switch",
         "ui_focus_window",
     }
+    REQUIRED_PERMISSION_MODES = {
+        "ui_get_snapshot": PermissionMode.READ_ONLY,
+        "ui_list_windows": PermissionMode.READ_ONLY,
+        "ui_read_text": PermissionMode.READ_ONLY,
+        "capture_screen": PermissionMode.READ_ONLY,
+        "capture_and_detail": PermissionMode.READ_ONLY,
+        "uac_get_state": PermissionMode.READ_ONLY,
+        "uac_get_progress": PermissionMode.READ_ONLY,
+        "get_action_status": PermissionMode.READ_ONLY,
+        "wait_for_action": PermissionMode.READ_ONLY,
+        "disconnect_live_session": PermissionMode.READ_ONLY,
+        "request_reasoning_escalation": PermissionMode.READ_ONLY,
+        "workspace_switch": PermissionMode.WORKSPACE_WRITE,
+        "ui_focus_window": PermissionMode.WORKSPACE_WRITE,
+        "mouse_click": PermissionMode.DANGER_FULL_ACCESS,
+        "keyboard_type_text": PermissionMode.DANGER_FULL_ACCESS,
+        "keyboard_press_key": PermissionMode.DANGER_FULL_ACCESS,
+        "keyboard_key_combo": PermissionMode.DANGER_FULL_ACCESS,
+        "app_open": PermissionMode.DANGER_FULL_ACCESS,
+    }
 
     def __init__(
         self,
@@ -63,6 +85,18 @@ class LiveToolRegistry:
         self.on_disconnect_requested = on_disconnect_requested
         self.on_reasoning_escalation = on_reasoning_escalation
         self.on_status_note = on_status_note
+        self.runtime_settings = getattr(agent, "runtime_settings", None)
+        self.extension_manager = getattr(agent, "extension_manager", None)
+        rule_set = (
+            getattr(self.runtime_settings, "tool_policy", None)
+            if self.runtime_settings is not None
+            else None
+        ) or PermissionRuleSet()
+        self._policy = ToolPolicyEvaluator(
+            rule_set=rule_set,
+            required_modes=self.REQUIRED_PERMISSION_MODES,
+            mutating_tools=self.MUTATING_TOOL_NAMES,
+        )
         self._guidance_mode = False
         self.last_snapshot_summary: Optional[dict[str, Any]] = None
         self.last_capture_summary: Optional[dict[str, Any]] = None
@@ -77,20 +111,13 @@ class LiveToolRegistry:
             return mode.value
         return str(getattr(mode, "value", mode) or "").strip().lower()
 
-    def _requires_confirmation(self, tool_name: str) -> bool:
-        return (
-            self._mode_key() == OperationMode.SAFE.value
-            and str(tool_name or "").strip() in self.MUTATING_TOOL_NAMES
-        )
-
-    def _confirm_mutating_action(
+    def _confirm_tool_action(
         self,
         tool_name: str,
         args: dict[str, Any],
+        *,
+        reason: str = "",
     ) -> dict[str, Any] | None:
-        if not self._requires_confirmation(tool_name):
-            return None
-
         chat_window = getattr(self.agent, "chat_window", None)
         if not chat_window or not hasattr(chat_window, "ask_confirmation"):
             return {
@@ -103,7 +130,7 @@ class LiveToolRegistry:
             }
 
         lines = [
-            "SAFE mode requires confirmation before each desktop action.",
+            str(reason or "Confirmation is required before this tool can run.").strip(),
             "",
             f"Action: {str(tool_name or '').strip()}",
             f"Workspace: {str(getattr(self.agent, 'active_workspace', 'user') or 'user')}",
@@ -366,13 +393,32 @@ class LiveToolRegistry:
         ]
 
     def get_declarations(self, *, read_only_only: bool = False) -> list[dict[str, Any]]:
-        all_declarations = self.declarations
+        all_declarations = list(self.declarations)
+        if self.extension_manager is not None:
+            try:
+                all_declarations.extend(
+                    self.extension_manager.get_declarations(
+                        read_only_only=read_only_only,
+                    )
+                )
+            except Exception:
+                logger.debug("Failed to load extension declarations", exc_info=True)
         if not read_only_only:
             return all_declarations
         return [
             item
             for item in all_declarations
-            if str(item.get("name") or "") in self.READ_ONLY_TOOL_NAMES
+            if (
+                str(item.get("name") or "") in self.READ_ONLY_TOOL_NAMES
+                or (
+                    self.extension_manager is not None
+                    and (
+                        (spec := self.extension_manager.get_tool_spec(str(item.get("name") or "").strip()))
+                        is not None
+                        and spec.permission_mode == PermissionMode.READ_ONLY
+                    )
+                )
+            )
         ]
 
     @staticmethod
@@ -419,9 +465,82 @@ class LiveToolRegistry:
     def execute(self, name: str, args: Optional[dict[str, Any]]) -> dict[str, Any]:
         tool_name = str(name or "").strip()
         payload = dict(args or {})
+        extension_plan = None
+        extension_spec = None
+        if self.extension_manager is not None:
+            try:
+                extension_plan = self.extension_manager.prepare_tool_invocation(tool_name, payload)
+            except Exception:
+                logger.debug("Failed to prepare extension tool invocation", exc_info=True)
+            if extension_plan is not None:
+                extension_spec = extension_plan.spec
+                payload = dict(extension_plan.args)
+                if str(extension_plan.message or "").strip() and self.on_status_note is not None:
+                    self.on_status_note(str(extension_plan.message))
 
-        if self._guidance_mode and tool_name in self.MUTATING_TOOL_NAMES:
+        if extension_spec is None and self._guidance_mode and tool_name in self.MUTATING_TOOL_NAMES:
             return self._guidance_mode_rejection(tool_name)
+
+        hook_override = None
+        if extension_plan is not None and str(extension_plan.permission_decision or "").strip():
+            hook_override = HookOverride(
+                decision=str(extension_plan.permission_decision).strip().lower(),
+                reason=str(extension_plan.permission_reason or "").strip(),
+            )
+        required_mode = extension_spec.permission_mode if extension_spec is not None else None
+        decision, _policy_context = self._policy.authorize(
+            tool_name=tool_name,
+            tool_input=payload,
+            operation_mode=getattr(self.agent, "mode", None),
+            workspace=str(getattr(self.agent, "active_workspace", "user") or "user"),
+            required_mode=required_mode,
+            hook_override=hook_override,
+        )
+        if decision.denied:
+            if self._guidance_mode and tool_name in self.MUTATING_TOOL_NAMES:
+                return self._guidance_mode_rejection(tool_name)
+            return self._tool_response(
+                tool_name,
+                success=False,
+                message=decision.reason or f"Tool '{tool_name}' was denied.",
+                error="permission_denied",
+                policy={
+                    "decision": decision.decision,
+                    "reason": decision.reason,
+                    "matched_rule": decision.matched_rule,
+                },
+            )
+        if decision.requires_prompt:
+            confirmation_result = self._confirm_tool_action(
+                tool_name,
+                payload,
+                reason=decision.reason,
+            )
+            if confirmation_result is not None:
+                confirmation_result["policy"] = {
+                    "decision": decision.decision,
+                    "reason": decision.reason,
+                    "matched_rule": decision.matched_rule,
+                }
+                return confirmation_result
+
+        if extension_spec is not None:
+            if extension_spec.permission_mode == PermissionMode.READ_ONLY:
+                return self._handle_extension_tool(
+                    {
+                        "__tool_name__": tool_name,
+                        "__tool_args__": payload,
+                    },
+                    None,
+                )
+            return self._queue_action(
+                tool_name,
+                {
+                    "__tool_name__": tool_name,
+                    "__tool_args__": payload,
+                },
+                self._handle_extension_tool,
+            )
 
         if tool_name == "mouse_click":
             return self._queue_action(tool_name, payload, self._handle_mouse_click)
@@ -500,9 +619,6 @@ class LiveToolRegistry:
     ) -> dict[str, Any]:
         if self._guidance_mode and str(name or "").strip() in self.MUTATING_TOOL_NAMES:
             return self._guidance_mode_rejection(name)
-        confirmation_result = self._confirm_mutating_action(name, args)
-        if confirmation_result is not None:
-            return confirmation_result
         submitted = self.broker.submit(
             name=name,
             args=args,
@@ -518,6 +634,23 @@ class LiveToolRegistry:
         if bool(settled.get("done")) or settled_status != "queued":
             return settled
         return submitted
+
+    def _handle_extension_tool(self, args: dict[str, Any], cancel_event) -> dict[str, Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            return {
+                "success": False,
+                "cancelled": True,
+                "message": "Action cancelled before extension tool execution.",
+            }
+        tool_name = str(args.get("__tool_name__") or "").strip()
+        payload = dict(args.get("__tool_args__") or {})
+        if not tool_name or self.extension_manager is None:
+            return {
+                "success": False,
+                "message": "Extension tool metadata was unavailable.",
+                "error": "extension_unavailable",
+            }
+        return self.extension_manager.execute_tool(tool_name, payload)
 
     def _emit_status_note(self, message: str) -> None:
         clean = str(message or "").strip()

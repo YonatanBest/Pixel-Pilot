@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QTimer
 
 from auth_manager import get_auth_manager
 from config import Config
+from doctor import run_doctor
 from uac.detection import get_uac_state_snapshot
 from uac.flow import (
     get_external_uac_mode,
@@ -103,11 +104,36 @@ class ElectronRuntimeService(QObject):
         updates = list(getattr(live_session, "_recent_action_updates", []) or [])
         return [dict(item) for item in updates if isinstance(item, dict)]
 
+    def _session_store(self):
+        agent = getattr(self.controller, "agent", None)
+        return getattr(agent, "session_store", None)
+
+    def _latest_session_context(self) -> dict[str, Any]:
+        store = self._session_store()
+        if store is None:
+            return {"available": False}
+        latest = store.latest_context()
+        return latest.as_dict() if hasattr(latest, "as_dict") else {"available": False}
+
+    def _extension_summary(self) -> dict[str, Any]:
+        agent = getattr(self.controller, "agent", None)
+        manager = getattr(agent, "extension_manager", None)
+        if manager is None:
+            return {"pluginCount": 0, "mcpServerCount": 0, "toolCount": 0, "toolNames": []}
+        try:
+            return dict(manager.summary())
+        except Exception:
+            return {"pluginCount": 0, "mcpServerCount": 0, "toolCount": 0, "toolNames": []}
+
     def _build_snapshot(self) -> dict[str, Any]:
         return build_runtime_snapshot(
             state_store=self.state_store,
             message_feed_model=self.message_feed_model,
             recent_action_updates=self._recent_action_updates(),
+            extra={
+                "latestSessionContext": self._latest_session_context(),
+                "extensions": self._extension_summary(),
+            },
         )
 
     def _handle_command(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -125,6 +151,32 @@ class ElectronRuntimeService(QObject):
             return self._auth_logout()
         if command == "live.submitText":
             return self.controller.handle_user_command(body.get("text"))
+        if command == "doctor.run":
+            report = run_doctor(
+                agent=getattr(self.controller, "agent", None),
+                controller=self.controller,
+                runtime_service=self,
+            )
+            return {
+                "doctor": report.as_dict(),
+                "text": report.render_text(),
+            }
+        if command == "session.getLatestContext":
+            return {"session": self._latest_session_context()}
+        if command == "session.resumeLatestContext":
+            store = self._session_store()
+            if store is None:
+                return {"session": {"available": False}}
+            latest = store.resume_latest_context()
+            payload = latest.as_dict() if hasattr(latest, "as_dict") else {"available": False}
+            if bool(payload.get("available")):
+                summary = str(payload.get("summaryText") or "").strip()
+                if summary:
+                    self.adapter.add_activity_message("Previous session context is available for manual resume.")
+                    self.adapter.add_system_message(summary)
+            return {"session": payload}
+        if command == "extensions.getSummary":
+            return {"extensions": self._extension_summary()}
         if command == "live.setEnabled":
             self.controller.handle_live_mode_changed(bool(body.get("enabled")))
             return {

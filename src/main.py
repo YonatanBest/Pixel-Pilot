@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from doctor import main as doctor_main
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DESKTOP_DIR = REPO_ROOT / "desktop"
@@ -39,6 +41,9 @@ def _resolve_packaged_exe() -> Path | None:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and str(sys.argv[1]).strip().lower() in {"doctor", "--doctor"}:
+        return int(doctor_main(sys.argv[2:] if sys.argv[1].lower() == "doctor" else sys.argv[1:]))
+
     packaged_exe = _resolve_packaged_exe()
     if packaged_exe is not None:
         return _run([str(packaged_exe)], cwd=packaged_exe.parent)
