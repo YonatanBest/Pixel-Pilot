@@ -1,6 +1,5 @@
 .features-section {
     height: 380vh;
-    /* Determines length of scroll */
     position: relative;
     background: rgba(255, 255, 255, 0.015);
     border-top: 1px solid rgba(255, 255, 255, 0.04);
@@ -87,45 +86,77 @@
     max-width: 300px;
 }
 
-@media (max-width: 960px) {
+@media (max-width: 1100px) {
     .features-section {
-        height: 420vh;
+        height: auto;
+        padding: 5rem 0;
+    }
+
+    .sticky-wrapper {
+        position: static;
+        height: auto;
+        overflow: visible;
+    }
+
+    .features-track {
+        transform: none !important;
+        display: grid;
+        gap: 1.25rem;
+        padding: 0 1.5rem;
+    }
+
+    .feature-intro,
+    .feature-panel {
+        min-width: 0;
+        width: 100%;
     }
 
     .feature-intro {
-        min-width: 70vw;
+        padding-bottom: 0.5rem;
+    }
+
+    .feature-intro h2 {
+        font-size: clamp(2.2rem, 8vw, 3.5rem);
+    }
+
+    .feature-intro p {
+        font-size: 1rem;
+        margin-bottom: 1rem;
+    }
+
+    .scroll-hint {
+        letter-spacing: 0.08em;
     }
 
     .feature-panel {
-        min-width: 74vw;
+        height: auto;
+        min-height: 15rem;
+        padding: 2rem 1.5rem;
+        gap: 1.75rem;
     }
 
     .feature-title {
-        font-size: 2.2rem;
+        font-size: clamp(1.7rem, 7vw, 2.4rem);
+        margin-bottom: 0.75rem;
+    }
+
+    .feature-desc {
+        max-width: none;
+        font-size: 1rem;
     }
 }
 
 @media (max-width: 700px) {
     .features-section {
-        height: 450vh;
+        padding: 4rem 0;
     }
 
     .features-track {
-        gap: 1.5rem;
-        padding-left: 1rem;
-    }
-
-    .feature-intro {
-        min-width: 84vw;
-    }
-
-    .feature-intro h2 {
-        font-size: 2.4rem;
+        padding: 0 1rem;
     }
 
     .feature-panel {
-        min-width: 84vw;
-        height: 56vh;
-        padding: 2rem;
+        padding: 1.5rem 1.25rem;
+        border-radius: 16px;
     }
 }

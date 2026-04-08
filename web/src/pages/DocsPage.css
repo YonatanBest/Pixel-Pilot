@@ -320,6 +320,19 @@
         padding: 7.5rem 0 4rem;
     }
 
+    .docs-kicker {
+        letter-spacing: 0.18em;
+    }
+
+    .docs-hero-actions {
+        flex-direction: column;
+    }
+
+    .docs-cta {
+        width: 100%;
+        text-align: center;
+    }
+
     .docs-grid,
     .module-grid {
         grid-template-columns: 1fr;
@@ -331,5 +344,21 @@
 
     .docs-columns {
         grid-template-columns: 1fr;
+    }
+
+    .docs-card,
+    .module-card,
+    .docs-diagram {
+        border-radius: 16px;
+    }
+
+    .docs-card,
+    .module-card {
+        padding: 1.35rem;
+        min-height: auto;
+    }
+
+    .docs-section {
+        padding: 3.75rem 0;
     }
 }

@@ -80,7 +80,39 @@
 }
 
 @media (max-width: 768px) {
+    .big-footer {
+        padding: 5rem 0 3rem;
+    }
+
+    .footer-inner {
+        gap: 3rem;
+    }
+
+    .footer-callout {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1.5rem;
+    }
+
     .footer-callout h2 {
         font-size: 4rem;
+        line-height: 0.9;
+    }
+
+    .scroll-top-btn {
+        width: 4.5rem;
+        height: 4.5rem;
+        font-size: 1.6rem;
+    }
+
+    .footer-bottom {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+    }
+
+    .footer-links {
+        flex-wrap: wrap;
+        gap: 1rem 1.25rem;
     }
 }

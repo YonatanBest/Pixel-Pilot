@@ -109,3 +109,55 @@
 .docs-link:hover {
     border-color: var(--color-primary);
 }
+
+@media (max-width: 700px) {
+    .quickstart-section {
+        min-height: auto;
+        padding: 5rem 0;
+    }
+
+    .qs-content {
+        margin-bottom: 2.5rem;
+    }
+
+    .qs-title {
+        font-size: 2.1rem;
+    }
+
+    .qs-subtitle {
+        font-size: 1rem;
+    }
+
+    .terminal-header {
+        padding: 0.7rem 0.85rem;
+    }
+
+    .t-title {
+        margin-left: 0.5rem;
+        font-size: 0.68rem;
+        overflow-wrap: anywhere;
+    }
+
+    .terminal-body {
+        padding: 1.2rem 1rem;
+        min-height: auto;
+    }
+
+    .cmd-line {
+        gap: 0.55rem;
+    }
+
+    .cmd-text,
+    .cmd-output {
+        font-size: 0.88rem;
+        line-height: 1.6;
+    }
+
+    .cmd-output {
+        padding-left: 1rem;
+    }
+
+    .qs-actions {
+        margin-top: 2.5rem;
+    }
+}

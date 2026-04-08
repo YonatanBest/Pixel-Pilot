@@ -150,3 +150,22 @@ main {
     font-size: 1rem;
     overflow-wrap: anywhere;
 }
+
+@media (max-width: 700px) {
+    .auth-page {
+        padding: 7rem 1rem 2rem;
+    }
+
+    .auth-card {
+        border-radius: 1.25rem;
+        padding: 1.4rem;
+    }
+
+    .auth-card h1 {
+        font-size: 1.8rem;
+    }
+
+    .auth-card p {
+        line-height: 1.6;
+    }
+}

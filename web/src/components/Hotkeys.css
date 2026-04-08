@@ -51,3 +51,31 @@
     color: var(--color-text-muted);
     font-weight: 500;
 }
+
+@media (max-width: 700px) {
+    .hotkeys-section {
+        padding: 5rem 0;
+    }
+
+    .hotkeys-grid {
+        gap: 1rem;
+    }
+
+    .tilt-card {
+        width: 100%;
+        padding: 2rem 1.25rem;
+    }
+
+    .hk-card-inner {
+        gap: 1.4rem;
+    }
+
+    .keys-row {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    .hk-action {
+        font-size: 1rem;
+    }
+}

@@ -53,6 +53,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+body,
+button,
+input,
+textarea,
+select {
+  font-family: var(--font-sans);
+}
+
 .route-loading {
   min-height: 100vh;
   display: grid;
@@ -113,5 +121,15 @@ body {
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 700px) {
+  html {
+    font-size: 15px;
+  }
+
+  .container {
+    padding: 0 1rem;
   }
 }

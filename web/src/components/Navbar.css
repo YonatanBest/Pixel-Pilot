@@ -8,60 +8,150 @@
 .navbar-pill {
     position: fixed;
     top: 2rem;
-    left: 50%;
-    transform: translateX(-50%) !important;
-    /* Override framer's x transform if needed, but we use x: '-50%' in style usually. Here we center via CSS and let framer handle y */
-    margin-left: -200px;
-    /* Centering hack if width is known, or use transform */
-    z-index: 100;
-}
-
-/* Better centering approach for fixed element */
-.navbar-pill {
     left: 0;
     right: 0;
     margin: auto;
-    width: fit-content;
+    width: min(100% - 2rem, 50rem);
     transform: none !important;
-    /* Let framer handle y */
+    z-index: 100;
 }
-
-/* Wait, framer sets transform style inline/JS. 
-   If I want to center a fixed element and animate Y:
-   left: 50%, x: -50% in framer.
-*/
 
 .navbar-inner {
     background: rgba(15, 15, 15, 0.6);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 0.75rem 1.5rem;
+    padding: 0.85rem 1rem;
     border-radius: 999px;
     display: flex;
     align-items: center;
-    gap: 1.5rem;
+    justify-content: space-between;
+    gap: 1rem;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+}
+
+.navbar-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.navbar-brand span {
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text);
+}
+
+.navbar-links {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
 }
 
 .nav-link {
     background: none;
     border: none;
     color: var(--color-text-muted);
-    font-size: 0.9rem;
-    font-weight: 500;
+    font-size: 0.88rem;
+    font-weight: 600;
     cursor: pointer;
-    transition: color 0.3s ease;
+    transition: color 0.3s ease, background 0.3s ease, border-color 0.3s ease;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    text-decoration: none;
+    padding: 0.55rem 0.85rem;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.5rem;
 }
 
 .nav-link:hover {
     color: var(--color-text);
+    background: rgba(124, 182, 240, 0.08);
 }
 
-.nav-separator {
-    width: 1px;
-    height: 16px;
-    background: rgba(255, 255, 255, 0.1);
+.navbar-menu-toggle {
+    display: none;
+    width: 2.75rem;
+    height: 2.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--color-text);
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 0.28rem;
+}
+
+.navbar-menu-toggle span {
+    display: block;
+    width: 1rem;
+    height: 2px;
+    border-radius: 999px;
+    background: currentColor;
+}
+
+@media (max-width: 820px) {
+    .fixed-logo-container {
+        top: 1rem;
+        left: 1rem;
+    }
+
+    .navbar-pill {
+        top: 1rem;
+        width: min(100% - 1rem, 28rem);
+    }
+
+    .navbar-inner {
+        border-radius: 1.5rem;
+        padding: 0.8rem 0.9rem;
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+
+    .navbar-brand span {
+        font-size: 0.8rem;
+    }
+
+    .navbar-menu-toggle {
+        display: inline-flex;
+    }
+
+    .navbar-links {
+        display: none;
+        width: 100%;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.5rem;
+        padding-top: 0.6rem;
+    }
+
+    .navbar-links.open {
+        display: flex;
+    }
+
+    .navbar-links > * {
+        width: 100%;
+    }
+
+    .navbar-links .nav-link {
+        width: 100%;
+        justify-content: flex-start;
+        padding-inline: 1rem;
+        background: rgba(255, 255, 255, 0.02);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+}
+
+@media (min-width: 821px) {
+    .navbar-links {
+        display: flex !important;
+    }
 }
