@@ -1,5 +1,6 @@
 import type { BrowserWindow as BrowserWindowType, Tray as TrayType } from 'electron';
 import { createRequire } from 'node:module';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -137,6 +138,7 @@ export class WindowManager {
     const window = new BrowserWindow({
       width,
       height,
+      icon: this.resolveIconPath(),
       frame: false,
       show: kind === 'overlay',
       transparent: true,
@@ -188,7 +190,8 @@ export class WindowManager {
   }
 
   private createTray(): void {
-    const icon = nativeImage.createFromPath(path.join(__dirname, '../../..', 'src', 'logos', 'pixelpilot-icon.ico'));
+    const iconPath = this.resolveIconPath();
+    const icon = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
     this.tray = new Tray(icon);
     this.tray.setToolTip('PixelPilot');
     this.tray.setContextMenu(
@@ -202,6 +205,28 @@ export class WindowManager {
     this.tray.on('click', () => {
       this.fireAndForget(this.setBackgroundHidden(false));
     });
+  }
+
+  private resolveIconPath(): string | undefined {
+    const candidates = app.isPackaged
+      ? [path.join(process.resourcesPath, 'tray-icon.ico')]
+      : [
+          path.join(app.getAppPath(), 'build', 'icon.ico'),
+          path.join(__dirname, '../../build/icon.ico'),
+          path.join(__dirname, '../../..', 'src', 'logos', 'pixelpilot-icon.ico'),
+        ];
+
+    for (const candidate of candidates) {
+      try {
+        if (fs.existsSync(candidate)) {
+          return candidate;
+        }
+      } catch {
+        // Keep trying fallbacks.
+      }
+    }
+
+    return undefined;
   }
 
   private registerShortcuts(): void {

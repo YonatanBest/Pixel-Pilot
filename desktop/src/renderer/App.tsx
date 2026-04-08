@@ -259,7 +259,7 @@ function speakerLabel(entry: MessageEntry): string {
     return 'Activity';
   }
   if (entry.kind === 'error') {
-    return 'Runtime';
+    return 'System Alert';
   }
   return 'System';
 }
@@ -1066,7 +1066,13 @@ function StatusPill({
   );
 }
 
-function LoadingShell({ windowKind }: { windowKind: WindowKind | null }): React.JSX.Element {
+function LoadingShell({
+  windowKind,
+  statusText,
+}: {
+  windowKind: WindowKind | null;
+  statusText?: string;
+}): React.JSX.Element {
   const widthClass =
     windowKind === 'notch'
       ? 'w-[420px]'
@@ -1102,7 +1108,7 @@ function LoadingShell({ windowKind }: { windowKind: WindowKind | null }): React.
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold text-slate-900">Starting PixelPilot</div>
-              <div className="text-sm text-slate-600">Connecting the Electron shell to the Python runtime.</div>
+              <div className="text-sm text-slate-600">{statusText || 'Preparing your secure workspace.'}</div>
             </div>
             <LoaderCircle className="h-5 w-5 animate-spin text-slate-700" />
           </div>
@@ -1117,7 +1123,7 @@ function startupDefaultsSourceLabel(source: StartupDefaultsSnapshot['source']): 
     return 'Using saved startup defaults';
   }
   if (source === 'runtime') {
-    return 'Using current runtime values';
+    return 'Using current app values';
   }
   return 'Using fallback defaults';
 }
@@ -1722,7 +1728,7 @@ function OverlayShell({
     try {
       await window.pixelPilot.invokeRuntime(method, payload);
     } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Runtime request failed.');
+      setLocalError(error instanceof Error ? error.message : 'Action could not be completed right now.');
     }
   };
 
@@ -2296,7 +2302,7 @@ function SidecarShell({
               ) : (
                 <div className="flex aspect-[16/10] w-full items-center justify-center px-6 text-center text-sm text-slate-600">
                   {snapshot.agentPreviewAvailable
-                    ? 'Waiting for the next frame from the Python desktop capture stream.'
+                    ? 'Waiting for the next desktop preview frame.'
                     : 'Agent preview will appear once the workspace is ready and the desktop manager is attached.'}
                 </div>
               )}
@@ -2388,7 +2394,7 @@ function usePixelPilotModel(): {
         }
         startTransition(() => {
           setReady(true);
-          setRuntimeError(error instanceof Error ? error.message : 'Unable to connect to the runtime.');
+          setRuntimeError(error instanceof Error ? error.message : 'PixelPilot is still starting. Please wait a moment.');
         });
       }
     };
@@ -2406,7 +2412,7 @@ function usePixelPilotModel(): {
     const offEvent = window.pixelPilot.onEvent((envelope) => {
       startTransition(() => {
         if (envelope.kind === 'error' || envelope.method === 'runtime.error') {
-          setRuntimeError(String(envelope.payload.message || 'Runtime bridge error.'));
+          setRuntimeError(String(envelope.payload.message || 'PixelPilot is temporarily unavailable.'));
           return;
         }
 
@@ -2542,8 +2548,17 @@ export default function App(): React.JSX.Element {
     resolveConfirmation
   } = usePixelPilotModel();
 
-  if (!ready || !snapshot) {
+  if (!ready) {
     return <LoadingShell windowKind={windowKind} />;
+  }
+
+  if (!snapshot) {
+    return (
+      <LoadingShell
+        windowKind={windowKind}
+        statusText={runtimeError || 'PixelPilot is starting. We will reconnect automatically.'}
+      />
+    );
   }
 
   const shellBody = snapshot.auth.needsAuth ? (

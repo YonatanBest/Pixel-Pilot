@@ -32,112 +32,37 @@ else:
     _FEATURE_IMPORT_ERROR = ""
 
 try:
-    import torch
-    from torch import nn
+    import onnxruntime as ort
 except Exception as exc:  # noqa: BLE001
-    torch = None
-    nn = None
-    _TORCH_IMPORT_ERROR = str(exc)
+    ort = None
+    _ONNX_IMPORT_ERROR = str(exc)
 else:
-    _TORCH_IMPORT_ERROR = ""
+    _ONNX_IMPORT_ERROR = ""
+
+FEATURE_EXTRACTOR_MODEL_NAMES = {"pixie.onnx"}
+FEATURE_EXTRACTOR_DATA_FILENAMES = ("pixie.onnx.data",)
 
 
-if nn is not None:
-
-    class PixieWakeWordClassifier(nn.Module):
-        def __init__(self, modules: list[nn.Module]) -> None:
-            super().__init__()
-            self.network = nn.Sequential(*modules)
-
-        def forward(self, x):
-            return self.network(x)
-
-        @classmethod
-        def from_state_dict(cls, state_dict):
-            linear_indices: list[int] = []
-            for key, value in state_dict.items():
-                parts = str(key).split(".")
-                if len(parts) != 3 or parts[0] != "network" or parts[2] != "weight":
-                    continue
-                if getattr(value, "ndim", 0) != 2:
-                    continue
-                try:
-                    linear_indices.append(int(parts[1]))
-                except Exception:
-                    continue
-
-            linear_indices = sorted(set(linear_indices))
-            if not linear_indices:
-                raise RuntimeError("Could not infer Pixie classifier layers from the checkpoint.")
-
-            modules: list[nn.Module] = []
-            for position, layer_index in enumerate(linear_indices):
-                weight = state_dict[f"network.{layer_index}.weight"]
-                out_features, in_features = weight.shape
-                modules.append(nn.Linear(int(in_features), int(out_features)))
-
-                is_last_layer = position == len(linear_indices) - 1
-                if is_last_layer:
-                    modules.append(nn.Sigmoid())
-                    continue
-
-                batchnorm_index = layer_index + 1
-                batchnorm_prefix = f"network.{batchnorm_index}"
-                if (
-                    f"{batchnorm_prefix}.weight" in state_dict
-                    and f"{batchnorm_prefix}.bias" in state_dict
-                    and f"{batchnorm_prefix}.running_mean" in state_dict
-                    and f"{batchnorm_prefix}.running_var" in state_dict
-                ):
-                    modules.append(nn.BatchNorm1d(int(out_features)))
-
-                modules.append(nn.ReLU())
-                modules.append(nn.Dropout(0.3))
-
-            return cls(modules)
+def uses_feature_extractor_model(model_path: Path | None) -> bool:
+    if model_path is None:
+        return False
+    return model_path.name.lower() in FEATURE_EXTRACTOR_MODEL_NAMES
 
 
-else:
-
-    class PixieWakeWordClassifier:  # type: ignore[no-redef]
-        def __init__(self) -> None:
-            raise RuntimeError("torch is required to load Pixie wake-word checkpoints.")
-
-        @classmethod
-        def from_state_dict(cls, state_dict):
-            raise RuntimeError("torch is required to load Pixie wake-word checkpoints.")
-
-
-def _normalize_pixie_state_dict(raw_state_dict):
-    state_dict = raw_state_dict
-    if isinstance(state_dict, dict):
-        for nested_key in ("state_dict", "model_state_dict"):
-            nested = state_dict.get(nested_key)
-            if isinstance(nested, dict):
-                state_dict = nested
-                break
-    if not isinstance(state_dict, dict):
-        raise RuntimeError("Pixie wake-word checkpoint did not contain a valid state_dict.")
-
-    normalized = {}
-    for key, value in state_dict.items():
-        normalized[str(key).removeprefix("module.")] = value
-    return normalized
+def resolve_feature_extractor_data_path(model_path: Path | None) -> Optional[Path]:
+    if model_path is None:
+        return None
+    for filename in FEATURE_EXTRACTOR_DATA_FILENAMES:
+        candidate = model_path.parent / filename
+        if candidate.exists():
+            return candidate
+    if FEATURE_EXTRACTOR_DATA_FILENAMES:
+        return model_path.parent / FEATURE_EXTRACTOR_DATA_FILENAMES[0]
+    return None
 
 
-def load_pixie_wake_word_classifier(model_path: str | Path):
-    if torch is None:
-        raise RuntimeError("torch is required to load Pixie wake-word checkpoints.")
-    state_dict = torch.load(
-        str(model_path),
-        map_location=torch.device("cpu"),
-        weights_only=True,
-    )
-    normalized_state_dict = _normalize_pixie_state_dict(state_dict)
-    classifier = PixieWakeWordClassifier.from_state_dict(normalized_state_dict)
-    classifier.load_state_dict(normalized_state_dict)
-    classifier.eval()
-    return classifier
+def _sigmoid_logit(value: float) -> float:
+    return float(1.0 / (1.0 + np.exp(-float(value))))
 
 
 def _dedupe_paths(candidates: list[Path]) -> list[Path]:
@@ -213,18 +138,18 @@ def resolve_openwakeword_model_path(
         )
 
     runtime_candidates = [
-        runtime_dir / "wakeword" / "pixie_model.pth",
+        runtime_dir / "wakeword" / "pixie.onnx",
         runtime_dir / "wakeword" / "hey-pixie.onnx",
         runtime_dir / "wakeword" / "hey_pixie.onnx",
         runtime_dir / "wakeword" / "hey-pixie.tflite",
         runtime_dir / "wakeword" / "hey_pixie.tflite",
     ]
     project_candidates = [
-        project_root / "model" / "pixie_model.pth",
-        project_root / "model" / "hey-pixie.onnx",
-        project_root / "model" / "hey_pixie.onnx",
-        project_root / "model" / "hey-pixie.tflite",
-        project_root / "model" / "hey_pixie.tflite",
+        project_root / "models" / "pixie.onnx",
+        project_root / "models" / "hey-pixie.onnx",
+        project_root / "models" / "hey_pixie.onnx",
+        project_root / "models" / "hey-pixie.tflite",
+        project_root / "models" / "hey_pixie.tflite",
         project_root / "resources" / "wakeword" / "hey-pixie.onnx",
         project_root / "resources" / "wakeword" / "hey_pixie.onnx",
         project_root / "resources" / "wakeword" / "hey-pixie.tflite",
@@ -254,7 +179,7 @@ def _support_asset_candidates(
         runtime_dir / filename,
     ]
     project_candidates = [
-        project_root / "model" / filename,
+        project_root / "models" / filename,
         project_root / "resources" / "wakeword" / filename,
     ]
 
@@ -392,7 +317,7 @@ class OpenWakeWordDetector(WakeWordDetector):
         if self._model_path is None:
             return False, (
                 "Wake-word model not found. Set WAKE_WORD_OPENWAKEWORD_MODEL_PATH "
-                'or add "hey-pixie.onnx" under resources.'
+                'or add a supported wake-word model under models or runtime/wakeword.'
             )
         if not self._model_path.exists():
             return False, f"Wake-word model not found: {self._model_path}"
@@ -534,7 +459,7 @@ class OpenWakeWordDetector(WakeWordDetector):
         self._model = None
 
 
-class TorchOpenWakeWordDetector(WakeWordDetector):
+class OnnxFeatureWakeWordDetector(WakeWordDetector):
     SAMPLE_RATE = 16000
     CHUNK = 4000
     BUFFER_SAMPLES = 48000
@@ -567,7 +492,9 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
         self._audio: pyaudio.PyAudio | None = None
         self._stream = None
         self._feature_extractor = None
-        self._classifier = None
+        self._classifier_session = None
+        self._classifier_input_name: str | None = None
+        self._model_data_path = resolve_feature_extractor_data_path(self._model_path)
         self._buffer = np.zeros(self.BUFFER_SAMPLES, dtype=np.int16)
         self._cooldown_chunks = 0
 
@@ -586,7 +513,7 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
                 self._mic_released.clear()
                 self._thread = threading.Thread(
                     target=self._run,
-                    name="WakeWordOpenWakeWordTorch",
+                    name="WakeWordOpenWakeWordOnnx",
                     daemon=True,
                 )
                 self._thread.start()
@@ -638,20 +565,24 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
                 "Wake-word feature extractor unavailable. Install openwakeword to enable the local wake word."
                 + (f" ({_FEATURE_IMPORT_ERROR})" if _FEATURE_IMPORT_ERROR else "")
             )
-        if torch is None or nn is None:
+        if ort is None:
             return False, (
-                "Wake-word classifier unavailable. Install torch to enable the local wake word."
-                + (f" ({_TORCH_IMPORT_ERROR})" if _TORCH_IMPORT_ERROR else "")
+                "Wake-word ONNX runtime unavailable. Install onnxruntime to enable the local wake word."
+                + (f" ({_ONNX_IMPORT_ERROR})" if _ONNX_IMPORT_ERROR else "")
             )
         if self._model_path is None:
             return False, (
                 "Wake-word model not found. Set WAKE_WORD_OPENWAKEWORD_MODEL_PATH "
-                'or add "pixie_model.pth" under model or runtime/wakeword.'
+                'or add "pixie.onnx" under models or runtime/wakeword.'
             )
         if not self._model_path.exists():
             return False, f"Wake-word model not found: {self._model_path}"
-        if self._model_path.suffix.lower() != ".pth":
-            return False, f"PyTorch wake-word models must be .pth. Received: {self._model_path.name}"
+        if self._model_path.suffix.lower() != ".onnx":
+            return False, f"Feature-extractor wake-word models must be .onnx. Received: {self._model_path.name}"
+        if self._model_data_path is None:
+            return False, 'Wake-word model weights not found: "pixie.onnx.data"'
+        if not self._model_data_path.exists():
+            return False, f"Wake-word model weights not found: {self._model_data_path}"
         if self._melspec_model_path is None:
             return False, 'Wake-word feature model not found: "melspectrogram.onnx"'
         if not self._melspec_model_path.exists():
@@ -726,7 +657,11 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
                 self._thread = None
 
     def _ensure_model(self) -> bool:
-        if self._feature_extractor is not None and self._classifier is not None:
+        if (
+            self._feature_extractor is not None
+            and self._classifier_session is not None
+            and self._classifier_input_name is not None
+        ):
             return True
         if (
             not self.is_available
@@ -734,7 +669,7 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
             or self._melspec_model_path is None
             or self._embedding_model_path is None
             or OpenWakeWordAudioFeatures is None
-            or torch is None
+            or ort is None
         ):
             self._set_state("unavailable", self.unavailable_reason)
             return False
@@ -746,7 +681,11 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
                 inference_framework="onnx",
                 device="cpu",
             )
-            self._classifier = load_pixie_wake_word_classifier(self._model_path)
+            self._classifier_session = ort.InferenceSession(str(self._model_path))
+            classifier_inputs = self._classifier_session.get_inputs()
+            if not classifier_inputs:
+                raise RuntimeError("Wake-word classifier ONNX model does not expose any inputs.")
+            self._classifier_input_name = classifier_inputs[0].name
             return True
         except Exception as exc:  # noqa: BLE001
             self._close_model()
@@ -754,7 +693,7 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
             return False
 
     def _ensure_audio_handles(self) -> bool:
-        if self._classifier is None or self._feature_extractor is None:
+        if self._classifier_session is None or self._feature_extractor is None:
             return False
         if self._audio is None:
             try:
@@ -788,20 +727,31 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
         self._buffer[-chunk_length:] = audio_chunk
 
     def _predict_from_buffer(self) -> float | None:
-        if self._feature_extractor is None or self._classifier is None or torch is None:
+        if (
+            self._feature_extractor is None
+            or self._classifier_session is None
+            or self._classifier_input_name is None
+        ):
             return None
         features = self._feature_extractor.embed_clips(np.expand_dims(self._buffer, axis=0))
         if len(features) == 0:
             return None
-        vector = self._flatten_feature_frames(features[0])
-        if vector is None:
+        prepared_frames = self._prepare_feature_frames(features[0])
+        if prepared_frames is None:
             return None
-        x = torch.from_numpy(vector.reshape(1, -1)).float()
-        with torch.inference_mode():
-            return float(self._classifier(x).item())
+        outputs = self._classifier_session.run(
+            None,
+            {self._classifier_input_name: prepared_frames},
+        )
+        if not outputs:
+            return None
+        flattened_scores = np.asarray(outputs[0], dtype=np.float32).reshape(-1)
+        if flattened_scores.size == 0:
+            return None
+        return _sigmoid_logit(float(flattened_scores[0]))
 
     @classmethod
-    def _flatten_feature_frames(cls, feature_frames: np.ndarray) -> np.ndarray | None:
+    def _prepare_feature_frames(cls, feature_frames: np.ndarray) -> np.ndarray | None:
         if feature_frames is None or getattr(feature_frames, "ndim", 0) != 2:
             return None
         frame_count = int(feature_frames.shape[0])
@@ -810,7 +760,7 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
         else:
             pad_len = cls.FEATURE_FRAMES - frame_count
             selected = np.pad(feature_frames, ((pad_len, 0), (0, 0)), mode="constant")
-        return selected.reshape(-1).astype(np.float32, copy=False)
+        return selected.reshape(1, cls.FEATURE_FRAMES, selected.shape[1]).astype(np.float32, copy=False)
 
     @staticmethod
     def _compute_rms(audio_chunk: np.ndarray) -> float:
@@ -839,4 +789,5 @@ class TorchOpenWakeWordDetector(WakeWordDetector):
 
     def _close_model(self) -> None:
         self._feature_extractor = None
-        self._classifier = None
+        self._classifier_session = None
+        self._classifier_input_name = None

@@ -87,30 +87,29 @@ PixelPilot is a Windows desktop AI agent that executes computer tasks from natur
 
 ## Installation
 
-### Standard install
+### Windows install
 
 ```bash
-python install.py
+Use the PixelPilot MSI package.
 ```
 
-Installer does:
-- creates `venv`
-- installs `requirements.txt`
-- prefetches EasyOCR models
-- prebuilds app index cache
-- compiles packaged desktop runtime (`pixelpilot-runtime.exe`)
-- installs/builds the desktop shell in `desktop/`
-- compiles UAC helpers (`src/uac/orchestrator.py`, `src/uac/agent.py`)
-- creates scheduled tasks:
-  - `PixelPilotUACOrchestrator` (SYSTEM startup task)
-  - `PixelPilotApp` (launcher task)
-- creates desktop shortcut `Pixel Pilot.lnk`
+The MSI installer:
+- installs the Electron desktop app
+- installs the packaged runtime binaries
+- creates the required scheduled tasks:
+  - `PixelPilot Orchestrator`
+  - `PixelPilot UAC Agent`
+- offers an optional `Desktop shortcut` feature during setup
 
-### Dependencies only (skip tasks/shortcut)
+### Developer build workflow
 
 ```bash
-python install.py --no-tasks
+cd desktop
+npm install
+npm run package:msi
 ```
+
+That flow builds the packaged runtime binaries, stages them into the Electron app resources, customizes the generated WiX project, and outputs the MSI in `desktop/dist/`.
 
 ## Configuration
 
@@ -140,24 +139,23 @@ Startup behavior:
 - Direct mode (`GEMINI_API_KEY` present): Electron opens straight into the shell without a login gate.
 - When Live is available, the session starts disconnected, Gemini voice stays off, and wake-word listening can arm locally if configured. If wake-word is disabled or unavailable, PixelPilot reconnects Gemini Live automatically.
 - Backend mode (no local key): Electron shows the auth gate, Gemini Live uses the backend Gemini key after sign-in, and OCR mode runs the full eye pipeline on the backend.
-- The desktop shell stays least-privileged at startup; secure desktop/UAC automation uses the installed helper tasks when needed.
+- The desktop shell stays least-privileged at startup; secure desktop/UAC automation uses the MSI-installed helper tasks when needed.
 
-Python launcher helper:
+Packaged runtime build:
 
 ```bash
-.\venv\Scripts\python.exe .\src\main.py
+cd desktop
+npm run build:runtime
 ```
-
-That launcher now starts the Electron shell. It does not open any legacy Python UI.
 
 Windows package build:
 
 ```bash
 cd desktop
-npm run package:win
+npm run package:msi
 ```
 
-That package flow first builds `pixelpilot-runtime.exe`, then stages it into the Electron app resources before running `electron-builder`.
+That package flow builds `pixelpilot-runtime.exe`, `orchestrator.exe`, and `agent.exe`, stages them into the Electron app resources, customizes the generated MSI project, and then runs `electron-builder`.
 
 ### Testing Credentials
 
@@ -242,7 +240,6 @@ Expected payload format:
 ## Logs and Runtime Artifacts
 
 - App logs: `logs/pixelpilot.log`
-- Launcher logs (scheduled task install path): `logs/app_launch.log`
 - Media/debug captures: `media/`
 - Auth token cache: `%USERPROFILE%\\.pixelpilot\\auth.json`
 - App index cache: `%USERPROFILE%\\.pixelpilot\\app_index.json`
@@ -250,23 +247,14 @@ Expected payload format:
 ## Uninstall
 
 ```bash
-python uninstall.py
+Remove PixelPilot from Windows Settings > Apps or Apps & Features.
 ```
-
-Useful flags:
-- `--no-tasks`
-- `--keep-venv`
-- `--keep-dist`
-- `--keep-build`
-- `--keep-logs`
-- `--keep-media`
-- `--keep-cache`
 
 ## Troubleshooting
 
 - App opens then exits: confirm valid `GEMINI_API_KEY` or working backend login.
 - Backend errors: verify `BACKEND_URL` and backend `/health`.
 - UAC flow not working:
-  - Re-run `python install.py` as Administrator.
-  - Confirm `PixelPilotUACOrchestrator` task exists and is running.
+  - Reinstall PixelPilot from the MSI as Administrator.
+  - Confirm `PixelPilot Orchestrator` and `PixelPilot UAC Agent` exist in Task Scheduler.
 - Check logs in `logs/pixelpilot.log`.

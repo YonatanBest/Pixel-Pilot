@@ -42,7 +42,7 @@ for (const candidate of candidates) {
 
 if (lastFailure) {
   const detail = lastFailure.error ? `: ${lastFailure.error}` : '';
-  throw new Error(`Failed to build pixelpilot-runtime.exe with ${lastFailure.command} (status ${lastFailure.status ?? 'unknown'})${detail}`);
+  throw new Error(`Failed to build packaged runtime binaries with ${lastFailure.command} (status ${lastFailure.status ?? 'unknown'})${detail}`);
 }
 
-throw new Error('No usable Python executable was found to build pixelpilot-runtime.exe.');
+throw new Error('No usable Python executable was found to build the packaged runtime binaries.');
