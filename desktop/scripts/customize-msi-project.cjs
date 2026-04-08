@@ -2,6 +2,10 @@ const fs = require('node:fs');
 
 const MARKER_START = '<!-- PixelPilot MSI customization start -->';
 const MARKER_END = '<!-- PixelPilot MSI customization end -->';
+const MAIN_EXECUTABLE_COMPONENT_ID = 'MainExecutableComponent';
+const WIX_QUIET_EXEC_BINARY_KEY = 'WixCA';
+const WIX_QUIET_EXEC_REF_ID = 'WixQuietExec';
+const WIX_QUIET_EXEC_PROPERTY_ID = 'WixQuietExecCmdLine';
 const TASK_NAMES = {
   orchestrator: 'PixelPilot Orchestrator',
   agent: 'PixelPilot UAC Agent',
@@ -54,8 +58,9 @@ function buildRemoveTasksCommand() {
 function buildFeatureBlock(productName) {
   return [
     `<Feature Id="ProductFeature" Title="${xmlAttr(productName)}" Display="expand" Absent="disallow">`,
-    '  <ComponentGroupRef Id="ProductComponents"/>',
+    '  <ComponentGroupRef Id="ProductComponents" Primary="yes"/>',
     `  <Feature Id="DesktopShortcutFeature" Title="Desktop shortcut" Description="Create a desktop shortcut for ${xmlAttr(productName)}." Level="2" AllowAdvertise="no">`,
+    `    <ComponentRef Id="${MAIN_EXECUTABLE_COMPONENT_ID}"/>`,
     '    <ComponentGroupRef Id="DesktopShortcutComponents"/>',
     '  </Feature>',
     '</Feature>',
@@ -78,12 +83,14 @@ function buildCustomActionBlock() {
   const removeCommand = xmlAttr(buildRemoveTasksCommand());
   return `
     ${MARKER_START}
+    <Property Id="${WIX_QUIET_EXEC_PROPERTY_ID}" Hidden="yes"/>
+    <CustomActionRef Id="${WIX_QUIET_EXEC_REF_ID}"/>
     <SetProperty Id="PixelPilotRollbackTasks" Value="${removeCommand}" Before="PixelPilotRollbackTasks" Sequence="execute"/>
-    <CustomAction Id="PixelPilotRollbackTasks" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="rollback" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="PixelPilotRollbackTasks" BinaryKey="${WIX_QUIET_EXEC_BINARY_KEY}" DllEntry="${WIX_QUIET_EXEC_REF_ID}" Execute="rollback" Impersonate="no" Return="ignore"/>
     <SetProperty Id="PixelPilotInstallTasks" Value="${installCommand}" Before="PixelPilotInstallTasks" Sequence="execute"/>
-    <CustomAction Id="PixelPilotInstallTasks" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="check"/>
+    <CustomAction Id="PixelPilotInstallTasks" BinaryKey="${WIX_QUIET_EXEC_BINARY_KEY}" DllEntry="${WIX_QUIET_EXEC_REF_ID}" Execute="deferred" Impersonate="no" Return="check"/>
     <SetProperty Id="PixelPilotRemoveTasks" Value="${removeCommand}" Before="PixelPilotRemoveTasks" Sequence="execute"/>
-    <CustomAction Id="PixelPilotRemoveTasks" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Impersonate="no" Return="ignore"/>
+    <CustomAction Id="PixelPilotRemoveTasks" BinaryKey="${WIX_QUIET_EXEC_BINARY_KEY}" DllEntry="${WIX_QUIET_EXEC_REF_ID}" Execute="deferred" Impersonate="no" Return="ignore"/>
     <InstallExecuteSequence>
       <Custom Action="PixelPilotRollbackTasks" Before="PixelPilotInstallTasks">NOT Installed</Custom>
       <Custom Action="PixelPilotInstallTasks" After="InstallFiles">NOT Installed</Custom>
@@ -122,6 +129,13 @@ exports.default = async function customizeMsiProject(projectFilePath) {
     /<Feature Id="ProductFeature" Absent="disallow">\s*<ComponentGroupRef Id="ProductComponents"\/>\s*<\/Feature>/,
     buildFeatureBlock(productName),
     'default product feature block',
+  );
+
+  source = replaceOrThrow(
+    source,
+    /<Component>\s*(<File\b[^>]*\bId="mainExecutable"[^>]*>)/,
+    `<Component Id="${MAIN_EXECUTABLE_COMPONENT_ID}">\n$1`,
+    'main executable component',
   );
 
   source = replaceOrThrow(

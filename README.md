@@ -126,11 +126,24 @@ Notes:
 - Wake word now starts enabled whenever `ENABLE_WAKE_WORD` is true in config.
 - Gemini Live starts enabled when supported; voice still starts only when you toggle it on or trigger wake word.
 
+JSON settings overlay:
+- Non-secret runtime behavior now loads from JSON with precedence `user < project < local`.
+- User settings: `%USERPROFILE%\\.pixelpilot\\settings.json`
+- Project settings: `<repo>\\.pixelpilot\\settings.json`
+- Local override: `<repo>\\.pixelpilot\\settings.local.json`
+- Keep secrets such as `GEMINI_API_KEY` in `.env`.
+
+Current JSON sections:
+- `toolPolicy`: `allow`, `deny`, and `ask` rules for tool execution.
+- `session`: persistence and compaction tuning.
+- `extensions`: `pluginDirectories` and optional `mcpServers` for explicit local opt-in extensions.
+
 ## Run
 
 ```bash
 cd desktop
 npm install
+npm run build:runtime
 npm run build
 npm start
 ```
@@ -140,6 +153,7 @@ Startup behavior:
 - When Live is available, the session starts disconnected, Gemini voice stays off, and wake-word listening can arm locally if configured. If wake-word is disabled or unavailable, PixelPilot reconnects Gemini Live automatically.
 - Backend mode (no local key): Electron shows the auth gate, Gemini Live uses the backend Gemini key after sign-in, and OCR mode runs the full eye pipeline on the backend.
 - The desktop shell stays least-privileged at startup; secure desktop/UAC automation uses the MSI-installed helper tasks when needed.
+- The expanded details view now includes `Diagnostics`, `Resume Last Context`, `Extensions`, and read-only runtime configuration paths.
 
 Packaged runtime build:
 
@@ -243,6 +257,17 @@ Expected payload format:
 - Media/debug captures: `media/`
 - Auth token cache: `%USERPROFILE%\\.pixelpilot\\auth.json`
 - App index cache: `%USERPROFILE%\\.pixelpilot\\app_index.json`
+- Session logs and latest resumable summaries: `%USERPROFILE%\\.pixelpilot\\sessions\\`
+
+## Doctor
+
+Run the shared diagnostics pipeline locally:
+
+```bash
+python src/main.py doctor
+```
+
+The same doctor report is also available in the expanded Electron details view, where you can run diagnostics and copy the rendered text or JSON output.
 
 ## Uninstall
 

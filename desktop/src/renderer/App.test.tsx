@@ -70,6 +70,21 @@ function makeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot
         message: 'Launching the current project workspace'
       }
     ],
+    latestSessionContext: {
+      available: false
+    },
+    extensions: {
+      status: 'ready',
+      pluginCount: 0,
+      mcpServerCount: 0,
+      toolCount: 0,
+      pluginIds: [],
+      mcpServerNames: [],
+      toolNames: []
+    },
+    settingsSources: [],
+    sessionDirectory: 'C:\\Users\\tester\\.pixelpilot\\sessions',
+    lastDoctorReport: {},
     ...overrides
   };
 }
@@ -84,6 +99,10 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
   closeSettingsWindow: ReturnType<typeof vi.fn>;
   toggleStartupSettingsWindow: ReturnType<typeof vi.fn>;
   closeStartupSettingsWindow: ReturnType<typeof vi.fn>;
+  toggleSessionSettingsWindow: ReturnType<typeof vi.fn>;
+  closeSessionSettingsWindow: ReturnType<typeof vi.fn>;
+  toggleExtensionsSettingsWindow: ReturnType<typeof vi.fn>;
+  closeExtensionsSettingsWindow: ReturnType<typeof vi.fn>;
   setStartupDefaults: ReturnType<typeof vi.fn>;
   updateWindowLayout: ReturnType<typeof vi.fn>;
   resolveConfirmation: ReturnType<typeof vi.fn>;
@@ -112,6 +131,10 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
   const closeSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
   const toggleStartupSettingsWindow = vi.fn().mockResolvedValue({ visible: true });
   const closeStartupSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
+  const toggleSessionSettingsWindow = vi.fn().mockResolvedValue({ visible: true });
+  const closeSessionSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
+  const toggleExtensionsSettingsWindow = vi.fn().mockResolvedValue({ visible: true });
+  const closeExtensionsSettingsWindow = vi.fn().mockResolvedValue({ visible: false });
   const setStartupDefaults = vi.fn().mockResolvedValue({
     operationMode: (snapshot?.operationMode || 'AUTO').toUpperCase(),
     visionMode: (snapshot?.visionMode || 'OCR').toUpperCase(),
@@ -134,6 +157,10 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
     closeSettingsWindow,
     toggleStartupSettingsWindow,
     closeStartupSettingsWindow,
+    toggleSessionSettingsWindow,
+    closeSessionSettingsWindow,
+    toggleExtensionsSettingsWindow,
+    closeExtensionsSettingsWindow,
     setStartupDefaults,
     updateWindowLayout,
     resolveConfirmation,
@@ -179,6 +206,10 @@ function setupApi(windowKind: WindowKind, snapshot: RuntimeSnapshot | null): {
     closeSettingsWindow,
     toggleStartupSettingsWindow,
     closeStartupSettingsWindow,
+    toggleSessionSettingsWindow,
+    closeSessionSettingsWindow,
+    toggleExtensionsSettingsWindow,
+    closeExtensionsSettingsWindow,
     setStartupDefaults,
     updateWindowLayout,
     resolveConfirmation,
@@ -543,6 +574,23 @@ describe('Electron renderer App', () => {
     });
   });
 
+  it('opens session and extensions popups from the settings list', async () => {
+    const controls = setupApi('settings', makeSnapshot({ operationMode: 'SAFE', visionMode: 'OCR' }));
+
+    render(<App />);
+
+    expect(await screen.findByText(/^mode$/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /^sessions$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^extensions$/i }));
+
+    await waitFor(() => {
+      expect(controls.closeSettingsWindow).toHaveBeenCalledTimes(2);
+      expect(controls.toggleSessionSettingsWindow).toHaveBeenCalledTimes(1);
+      expect(controls.toggleExtensionsSettingsWindow).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('renders startup defaults popup and saves persisted defaults', async () => {
     const controls = setupApi(
       'startup-settings',
@@ -638,6 +686,152 @@ describe('Electron renderer App', () => {
     await userEvent.click(screen.getByRole('button', { name: /thinking>/i }));
 
     expect(screen.getByText(/planning the next action/i)).toBeInTheDocument();
+  });
+
+  it('keeps the expanded details view focused on the process log only', async () => {
+    setupApi(
+      'overlay',
+      makeSnapshot({
+        expanded: true,
+        settingsSources: [
+          'C:\\Users\\tester\\.pixelpilot\\settings.json',
+          'C:\\Users\\tester\\Videos\\GitHub\\Pixel-Pilot-Alpha\\.pixelpilot\\settings.local.json'
+        ]
+      })
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/process details/i)).toBeInTheDocument();
+    expect(screen.queryByText(/diagnostics/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/runtime configuration/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /run diagnostics/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/sessions and extensions now live in the settings menu/i)).not.toBeInTheDocument();
+  });
+
+  it('renders the session settings window and wires resume and open-folder actions', async () => {
+    const controls = setupApi(
+      'session-settings',
+      makeSnapshot({
+        latestSessionContext: {
+          available: true,
+          summaryText: 'Recovered context from the deployment dashboard.',
+          lastActivityAt: '2026-04-08T09:45:00Z',
+          sessionId: 'sess-123'
+        },
+        sessionDirectory: 'C:\\Users\\tester\\.pixelpilot\\sessions'
+      })
+    );
+
+    controls.invokeRuntime.mockImplementation((method: string) => {
+      if (method === 'session.getLatestContext') {
+        return Promise.resolve({
+          session: {
+            available: true,
+            summaryText: 'Recovered context from the deployment dashboard.',
+            lastActivityAt: '2026-04-08T09:45:00Z',
+            sessionId: 'sess-123'
+          }
+        });
+      }
+      if (method === 'session.resumeLatestContext') {
+        return Promise.resolve({
+          session: {
+            available: true,
+            summaryText: 'Resumed context from the deployment dashboard.',
+            lastActivityAt: '2026-04-08T10:15:00Z',
+            sessionId: 'sess-123'
+          }
+        });
+      }
+      if (method === 'session.openFolder') {
+        return Promise.resolve({ opened: true });
+      }
+      return Promise.resolve({});
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText(/^sessions$/i)).toBeInTheDocument();
+    expect(screen.getByText(/recovered context from the deployment dashboard\./i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /^resume last context$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /open session logs/i }));
+    await userEvent.click(screen.getByRole('button', { name: /close sessions window/i }));
+
+    await waitFor(() => {
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('session.resumeLatestContext');
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('session.openFolder');
+      expect(controls.closeSessionSettingsWindow).toHaveBeenCalledTimes(1);
+    });
+
+    expect(await screen.findByText(/resumed context from the deployment dashboard\./i)).toBeInTheDocument();
+  });
+
+  it('renders the extensions settings window and reloads extension state', async () => {
+    const controls = setupApi(
+      'extensions-settings',
+      makeSnapshot({
+        extensions: {
+          status: 'ready',
+          pluginCount: 1,
+          mcpServerCount: 1,
+          toolCount: 2,
+          pluginIds: ['demo'],
+          mcpServerNames: ['demo-server'],
+          toolNames: ['plugin__demo__echo', 'mcp__demo__list_windows']
+        }
+      })
+    );
+
+    controls.invokeRuntime.mockImplementation((method: string) => {
+      if (method === 'extensions.getSummary') {
+        return Promise.resolve({
+          extensions: {
+            status: 'ready',
+            pluginCount: 1,
+            mcpServerCount: 1,
+            toolCount: 2,
+            pluginIds: ['demo'],
+            mcpServerNames: ['demo-server'],
+            toolNames: ['plugin__demo__echo', 'mcp__demo__list_windows']
+          }
+        });
+      }
+      if (method === 'extensions.reload') {
+        return Promise.resolve({
+          extensions: {
+            status: 'ready',
+            pluginCount: 1,
+            mcpServerCount: 1,
+            toolCount: 3,
+            pluginIds: ['demo'],
+            mcpServerNames: ['demo-server'],
+            toolNames: [
+              'plugin__demo__echo',
+              'plugin__demo__summarize',
+              'mcp__demo__list_windows'
+            ]
+          }
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText(/^extensions$/i)).toBeInTheDocument();
+    expect(screen.getByText(/plugin__demo__echo/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /reload extensions/i }));
+    await userEvent.click(screen.getByRole('button', { name: /close extensions window/i }));
+
+    await waitFor(() => {
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('extensions.reload');
+      expect(controls.closeExtensionsSettingsWindow).toHaveBeenCalledTimes(1);
+    });
+
+    expect(await screen.findByText(/plugin__demo__summarize/i)).toBeInTheDocument();
   });
 
   it('auto-scrolls the expanded log when new conversation content arrives', async () => {

@@ -20,6 +20,8 @@ let windowManager: WindowManager | null = null;
 let startupDefaultsStore: StartupDefaultsStore | null = null;
 let bridgeRecoveryTimer: NodeJS.Timeout | null = null;
 let bridgeRecoveryInProgress = false;
+let bridgeRecoveryPromise: Promise<void> | null = null;
+let bridgeClientPromise: Promise<RuntimeBridgeClient> | null = null;
 let shuttingDown = false;
 let runtimeBridgeEndpoints: { controlUrl: string; sidecarUrl: string } | null = null;
 
@@ -30,6 +32,57 @@ function clearBridgeRecoveryTimer(): void {
     clearTimeout(bridgeRecoveryTimer);
     bridgeRecoveryTimer = null;
   }
+}
+
+async function invokeRuntimeFromMain(
+  method: string,
+  payload: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const client = await ensureBridgeClient();
+  return client.sendCommand(method, payload);
+}
+
+async function beginBridgeClientStart(
+  options: { reuseRuntime: boolean },
+): Promise<RuntimeBridgeClient> {
+  const promise = startRuntimeBridgeClient(options);
+  bridgeClientPromise = promise;
+  try {
+    const client = await promise;
+    bridgeClient = client;
+    return client;
+  } finally {
+    if (bridgeClientPromise === promise) {
+      bridgeClientPromise = null;
+    }
+  }
+}
+
+async function ensureBridgeClient(): Promise<RuntimeBridgeClient> {
+  if (bridgeClient) {
+    return bridgeClient;
+  }
+
+  if (bridgeClientPromise) {
+    return bridgeClientPromise;
+  }
+
+  if (bridgeRecoveryPromise) {
+    await bridgeRecoveryPromise;
+    if (bridgeClient) {
+      return bridgeClient;
+    }
+    if (bridgeClientPromise) {
+      return bridgeClientPromise;
+    }
+  }
+
+  if (shuttingDown) {
+    throw new Error('PixelPilot is shutting down.');
+  }
+
+  const canReuseRuntime = Boolean(runtimeProcess && runtimeProcess.isRunning() && runtimeBridgeEndpoints);
+  return beginBridgeClientStart({ reuseRuntime: canReuseRuntime });
 }
 
 async function waitForBridgeConnected(
@@ -160,7 +213,7 @@ async function startRuntimeBridgeClient(
 
 async function recoverRuntimeBridge(): Promise<void> {
   if (shuttingDown || bridgeRecoveryInProgress) {
-    return;
+    return bridgeRecoveryPromise ?? Promise.resolve();
   }
 
   if (bridgeClient?.isControlConnected()) {
@@ -168,42 +221,50 @@ async function recoverRuntimeBridge(): Promise<void> {
   }
 
   bridgeRecoveryInProgress = true;
-  try {
-    bridgeClient?.dispose();
-    bridgeClient = null;
+  bridgeRecoveryPromise = (async () => {
+    try {
+      bridgeClient?.dispose();
+      bridgeClient = null;
 
-    const canReuseRuntime = Boolean(runtimeProcess && runtimeProcess.isRunning() && runtimeBridgeEndpoints);
-    if (canReuseRuntime) {
-      const reattachedClient = await startRuntimeBridgeClient({ reuseRuntime: true });
-      const reattached = await waitForBridgeConnected(reattachedClient, 3500);
-      if (reattached) {
-        bridgeClient = reattachedClient;
-        return;
+      const canReuseRuntime = Boolean(runtimeProcess && runtimeProcess.isRunning() && runtimeBridgeEndpoints);
+      if (canReuseRuntime) {
+        const reattachedClient = await beginBridgeClientStart({ reuseRuntime: true });
+        const reattached = await waitForBridgeConnected(reattachedClient, 3500);
+        if (reattached) {
+          return;
+        }
+        reattachedClient.dispose();
+        if (bridgeClient === reattachedClient) {
+          bridgeClient = null;
+        }
       }
-      reattachedClient.dispose();
-    }
 
-    runtimeProcess?.stop();
-    runtimeProcess = null;
-    runtimeBridgeEndpoints = null;
-    bridgeClient = await startRuntimeBridgeClient({ reuseRuntime: false });
-  } catch (error) {
-    console.error('Failed to recover runtime bridge.', error);
-    scheduleBridgeRecovery();
-  } finally {
-    bridgeRecoveryInProgress = false;
-  }
+      runtimeProcess?.stop();
+      runtimeProcess = null;
+      runtimeBridgeEndpoints = null;
+      const restartedClient = await beginBridgeClientStart({ reuseRuntime: false });
+      await waitForBridgeConnected(restartedClient, 5000);
+    } catch (error) {
+      console.error('Failed to recover runtime bridge.', error);
+      scheduleBridgeRecovery();
+    } finally {
+      bridgeRecoveryInProgress = false;
+      bridgeRecoveryPromise = null;
+    }
+  })();
+
+  return bridgeRecoveryPromise;
 }
 
 async function bootstrap(): Promise<void> {
   startupDefaultsStore = new StartupDefaultsStore(app.getPath('userData'));
   windowManager = new WindowManager(
-    (method, payload) => bridgeClient!.sendCommand(method, payload),
+    invokeRuntimeFromMain,
     startupDefaultsStore,
   );
 
   windowManager.createWindows();
-  bridgeClient = await startRuntimeBridgeClient({ reuseRuntime: false });
+  await beginBridgeClientStart({ reuseRuntime: false });
 }
 
 app.whenReady().then(() => {

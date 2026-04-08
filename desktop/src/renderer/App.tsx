@@ -31,9 +31,11 @@ import {
 import type {
   ActionUpdate,
   AuthState,
+  ExtensionSummary,
   MessageEntry,
   RendererConfirmationRequest,
   RuntimeSnapshot,
+  SessionContextSummary,
   SidecarFrame,
   StartupDefaultsSnapshot,
   WindowKind
@@ -68,6 +70,20 @@ const emptyAuth: AuthState = {
   backendUrl: '',
   hasApiKey: false,
   needsAuth: true
+};
+
+const emptySessionContext: SessionContextSummary = {
+  available: false
+};
+
+const emptyExtensionSummary: ExtensionSummary = {
+  status: 'ready',
+  pluginCount: 0,
+  mcpServerCount: 0,
+  toolCount: 0,
+  pluginIds: [],
+  mcpServerNames: [],
+  toolNames: []
 };
 
 type WindowLayout = {
@@ -139,8 +155,10 @@ function useMeasuredWindowLayout<T extends HTMLElement>(
 
     const measure = (): void => {
       const rect = element.getBoundingClientRect();
-      const width = Math.max(fallbackLayout.width, Math.ceil(rect.width || fallbackLayout.width));
-      const height = Math.max(fallbackLayout.height, Math.ceil(rect.height || fallbackLayout.height));
+      const measuredWidth = Math.max(rect.width || 0, element.scrollWidth || 0, fallbackLayout.width);
+      const measuredHeight = Math.max(rect.height || 0, element.scrollHeight || 0, fallbackLayout.height);
+      const width = Math.ceil(measuredWidth);
+      const height = Math.ceil(measuredHeight);
       setLayout((current) => {
         if (current.width === width && current.height === height) {
           return current;
@@ -245,6 +263,42 @@ function patchSnapshot(
   return {
     ...snapshot,
     ...patch
+  };
+}
+
+function parseSessionContext(payload: unknown): SessionContextSummary {
+  if (!payload || typeof payload !== 'object') {
+    return emptySessionContext;
+  }
+  const record = payload as Record<string, unknown>;
+  return {
+    available: Boolean(record.available),
+    workspaceFingerprint: typeof record.workspaceFingerprint === 'string' ? record.workspaceFingerprint : undefined,
+    sessionId: typeof record.sessionId === 'string' ? record.sessionId : undefined,
+    lastActivityAt: typeof record.lastActivityAt === 'string' ? record.lastActivityAt : undefined,
+    summaryText: typeof record.summaryText === 'string' ? record.summaryText : undefined,
+    resumePayload:
+      record.resumePayload && typeof record.resumePayload === 'object'
+        ? (record.resumePayload as Record<string, unknown>)
+        : undefined,
+    tail: Array.isArray(record.tail) ? (record.tail as Record<string, unknown>[]) : undefined,
+    logPath: typeof record.logPath === 'string' ? record.logPath : undefined
+  };
+}
+
+function parseExtensionSummary(payload: unknown): ExtensionSummary {
+  if (!payload || typeof payload !== 'object') {
+    return emptyExtensionSummary;
+  }
+  const record = payload as Record<string, unknown>;
+  return {
+    status: typeof record.status === 'string' ? record.status : 'ready',
+    pluginCount: Number(record.pluginCount || 0),
+    mcpServerCount: Number(record.mcpServerCount || 0),
+    toolCount: Number(record.toolCount || 0),
+    pluginIds: Array.isArray(record.pluginIds) ? record.pluginIds.map((value) => String(value)) : [],
+    mcpServerNames: Array.isArray(record.mcpServerNames) ? record.mcpServerNames.map((value) => String(value)) : [],
+    toolNames: Array.isArray(record.toolNames) ? record.toolNames.map((value) => String(value)) : []
   };
 }
 
@@ -1066,6 +1120,15 @@ function StatusPill({
   );
 }
 
+function isSettingsWindowKind(kind: WindowKind | null): boolean {
+  return (
+    kind === 'settings'
+    || kind === 'startup-settings'
+    || kind === 'session-settings'
+    || kind === 'extensions-settings'
+  );
+}
+
 function LoadingShell({
   windowKind,
   statusText,
@@ -1082,6 +1145,10 @@ function LoadingShell({
           ? 'w-[220px]'
           : windowKind === 'startup-settings'
             ? 'w-[320px]'
+            : windowKind === 'session-settings'
+              ? 'w-[420px]'
+              : windowKind === 'extensions-settings'
+                ? 'w-[460px]'
             : 'w-[560px]';
   useWindowLayout(
     windowKind === 'notch'
@@ -1092,6 +1159,10 @@ function LoadingShell({
           ? { width: 220, height: 124 }
           : windowKind === 'startup-settings'
             ? { width: 320, height: 164 }
+            : windowKind === 'session-settings'
+              ? { width: 420, height: 224 }
+              : windowKind === 'extensions-settings'
+                ? { width: 460, height: 224 }
             : { width: 560, height: 128 }
   );
   return (
@@ -1556,6 +1627,8 @@ function LegacyDetailsPanel({
     }
     container.scrollTop = container.scrollHeight;
   }, [visibleMessages, thinkingState.summary, thinkingState.lines.length, thinkingExpanded]);
+  const onStopRef = onStop;
+  void onStopRef;
 
   return (
     <SoftPanel className="no-drag overflow-hidden p-0">
@@ -1706,7 +1779,7 @@ function OverlayShell({
 
   const fallbackLayout = {
     width: 920,
-    height: (isBarOnly ? 88 : 114) + (effectiveSnapshot.expanded ? 388 : 0)
+    height: (isBarOnly ? 88 : 114) + (effectiveSnapshot.expanded ? 292 : 0)
   };
   useMeasuredWindowLayout(shellRef, fallbackLayout, [
     isBarOnly,
@@ -2043,6 +2116,332 @@ function OverlayShell({
   );
 }
 
+function SessionSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
+  const [localError, setLocalError] = useState('');
+  const [busyAction, setBusyAction] = useState('');
+  const [sessionContext, setSessionContext] = useState<SessionContextSummary>(
+    parseSessionContext(snapshot.latestSessionContext)
+  );
+  const shellRef = useRef<HTMLDivElement>(null);
+  const sessionDirectory = String(snapshot.sessionDirectory || '').trim();
+
+  useMeasuredWindowLayout(
+    shellRef,
+    {
+      width: 420,
+      height: localError ? 418 : 386
+    },
+    [localError, busyAction, sessionContext.available, sessionContext.summaryText, sessionContext.sessionId, sessionDirectory]
+  );
+
+  useEffect(() => {
+    setSessionContext(parseSessionContext(snapshot.latestSessionContext));
+  }, [snapshot.latestSessionContext]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadLatestContext = async (): Promise<void> => {
+      try {
+        const result = await window.pixelPilot.invokeRuntime('session.getLatestContext');
+        if (!cancelled) {
+          setSessionContext(parseSessionContext(result.session));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLocalError(error instanceof Error ? error.message : 'Unable to load the latest session context.');
+        }
+      }
+    };
+
+    void loadLatestContext();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const closeWindow = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await window.pixelPilot.closeSessionSettingsWindow();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to close sessions right now.');
+    }
+  };
+
+  const resumeLastContext = async (): Promise<void> => {
+    setBusyAction('resume');
+    setLocalError('');
+    try {
+      const result = await window.pixelPilot.invokeRuntime('session.resumeLatestContext');
+      setSessionContext(parseSessionContext(result.session));
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to resume the latest context right now.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const openSessionFolder = async (): Promise<void> => {
+    setBusyAction('open-folder');
+    setLocalError('');
+    try {
+      await window.pixelPilot.invokeRuntime('session.openFolder');
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to open the session folder right now.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  return (
+    <motion.div
+      ref={shellRef}
+      className="w-full"
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+    >
+      <div className="w-full rounded-[14px] border border-[#d3dce8] bg-[#f8fafc] p-2 shadow-[0_18px_32px_rgba(15,23,42,0.18)]">
+        <div className="flex items-center justify-between gap-3 px-3.5 py-1.5">
+          <div>
+            <div className="text-[12px] font-semibold text-slate-500">Sessions</div>
+            <div className="text-[11px] text-slate-500">Manual resume and session log access.</div>
+          </div>
+          <button
+            type="button"
+            aria-label="Close sessions window"
+            onClick={() => void closeWindow()}
+            className="no-drag flex h-7 w-7 items-center justify-center rounded-full text-slate-500 transition hover:bg-[#e2e8f0] hover:text-slate-800"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="mt-1 grid gap-2 px-1 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={() => void resumeLastContext()}
+            disabled={!sessionContext.available || busyAction !== ''}
+            className="no-drag rounded-lg bg-slate-900 px-3.5 py-2 text-[12px] font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {busyAction === 'resume' ? 'Resuming...' : 'Resume Last Context'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void openSessionFolder()}
+            disabled={!sessionDirectory || busyAction !== ''}
+            className="no-drag rounded-lg border border-[#d3dce8] bg-white px-3.5 py-2 text-[12px] font-semibold text-slate-800 transition hover:bg-[#eef2f7] disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {busyAction === 'open-folder' ? 'Opening...' : 'Open Session Logs'}
+          </button>
+        </div>
+
+        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3.5 py-3">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+            Latest Summary
+          </div>
+          <div className="mt-2 text-[13px] leading-6 text-slate-700">
+            {sessionContext.available
+              ? sessionContext.summaryText || 'A resumable session exists, but no compact summary was stored yet.'
+              : 'No resumable session context has been stored yet.'}
+          </div>
+        </div>
+
+        <div className="mt-2 grid gap-2 px-1 sm:grid-cols-2">
+          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Last activity</div>
+            <div className="mt-1 break-all text-[13px] text-slate-700">
+              {sessionContext.lastActivityAt || 'Unknown'}
+            </div>
+          </div>
+          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Session ID</div>
+            <div className="mt-1 break-all text-[13px] text-slate-700">
+              {sessionContext.sessionId || 'Unavailable'}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Session directory</div>
+          <div className="mt-1 break-all text-[13px] text-slate-700">{sessionDirectory || 'Unavailable'}</div>
+        </div>
+
+        {localError && (
+          <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-900">
+            {localError}
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+function ExtensionsSettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
+  const [localError, setLocalError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [extensionSummary, setExtensionSummary] = useState<ExtensionSummary>(
+    parseExtensionSummary(snapshot.extensions)
+  );
+  const shellRef = useRef<HTMLDivElement>(null);
+
+  useMeasuredWindowLayout(
+    shellRef,
+    {
+      width: 460,
+      height: localError ? 458 : 426
+    },
+    [
+      localError,
+      busy,
+      extensionSummary.status,
+      extensionSummary.toolCount,
+      extensionSummary.pluginCount,
+      extensionSummary.mcpServerCount,
+      extensionSummary.toolNames.length
+    ]
+  );
+
+  useEffect(() => {
+    setExtensionSummary(parseExtensionSummary(snapshot.extensions));
+  }, [snapshot.extensions]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSummary = async (): Promise<void> => {
+      try {
+        const result = await window.pixelPilot.invokeRuntime('extensions.getSummary');
+        if (!cancelled) {
+          setExtensionSummary(parseExtensionSummary(result.extensions));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLocalError(error instanceof Error ? error.message : 'Unable to load extension state right now.');
+        }
+      }
+    };
+
+    void loadSummary();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const closeWindow = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await window.pixelPilot.closeExtensionsSettingsWindow();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to close extensions right now.');
+    }
+  };
+
+  const reloadExtensions = async (): Promise<void> => {
+    setBusy(true);
+    setLocalError('');
+    try {
+      const result = await window.pixelPilot.invokeRuntime('extensions.reload');
+      setExtensionSummary(parseExtensionSummary(result.extensions));
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to reload extensions right now.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <motion.div
+      ref={shellRef}
+      className="w-full"
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+    >
+      <div className="w-full rounded-[14px] border border-[#d3dce8] bg-[#f8fafc] p-2 shadow-[0_18px_32px_rgba(15,23,42,0.18)]">
+        <div className="flex items-center justify-between gap-3 px-3.5 py-1.5">
+          <div>
+            <div className="text-[12px] font-semibold text-slate-500">Extensions</div>
+            <div className="text-[11px] text-slate-500">Plugin and MCP tool discovery.</div>
+          </div>
+          <button
+            type="button"
+            aria-label="Close extensions window"
+            onClick={() => void closeWindow()}
+            className="no-drag flex h-7 w-7 items-center justify-center rounded-full text-slate-500 transition hover:bg-[#e2e8f0] hover:text-slate-800"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="mt-1 px-1">
+          <button
+            type="button"
+            onClick={() => void reloadExtensions()}
+            disabled={busy}
+            className="no-drag w-full rounded-lg bg-slate-900 px-3.5 py-2 text-[12px] font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {busy ? 'Reloading...' : 'Reload Extensions'}
+          </button>
+        </div>
+
+        <div className="mt-2 grid gap-2 px-1 sm:grid-cols-3">
+          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Health</div>
+            <div className="mt-1 text-[13px] text-slate-700">
+              {extensionSummary.status === 'ready'
+                ? extensionSummary.toolCount > 0
+                  ? 'Ready'
+                  : 'No tools loaded'
+                : extensionSummary.status || 'Unknown'}
+            </div>
+          </div>
+          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Plugins</div>
+            <div className="mt-1 text-[13px] text-slate-700">{extensionSummary.pluginCount}</div>
+          </div>
+          <div className="rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">MCP servers</div>
+            <div className="mt-1 text-[13px] text-slate-700">{extensionSummary.mcpServerCount}</div>
+          </div>
+        </div>
+
+        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Plugin IDs</div>
+          <div className="mt-1 text-[13px] text-slate-700">
+            {extensionSummary.pluginIds && extensionSummary.pluginIds.length > 0
+              ? extensionSummary.pluginIds.join(', ')
+              : 'No plugins loaded.'}
+          </div>
+        </div>
+
+        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">MCP servers</div>
+          <div className="mt-1 text-[13px] text-slate-700">
+            {extensionSummary.mcpServerNames && extensionSummary.mcpServerNames.length > 0
+              ? extensionSummary.mcpServerNames.join(', ')
+              : 'No MCP servers configured.'}
+          </div>
+        </div>
+
+        <div className="mt-2 rounded-[12px] border border-[#e2e8f0] bg-white px-3 py-2.5">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">Tool names</div>
+          <div className="mt-1 max-h-[140px] overflow-y-auto text-[13px] leading-6 text-slate-700">
+            {extensionSummary.toolNames.length > 0
+              ? extensionSummary.toolNames.join(', ')
+              : 'No extension tools are currently loaded.'}
+          </div>
+        </div>
+
+        {localError && (
+          <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] text-rose-900">
+            {localError}
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
 function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
   const [localError, setLocalError] = useState('');
   const shellRef = useRef<HTMLDivElement>(null);
@@ -2051,7 +2450,7 @@ function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.E
     shellRef,
     {
       width: 220,
-      height: localError ? 316 : 284
+      height: localError ? 452 : 420
     },
     [localError, snapshot.operationMode, snapshot.visionMode]
   );
@@ -2073,6 +2472,26 @@ function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.E
       await window.pixelPilot.invokeRuntime(method, payload);
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : 'Unable to update settings right now.');
+    }
+  };
+
+  const openSessionSettings = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await window.pixelPilot.closeSettingsWindow();
+      await window.pixelPilot.toggleSessionSettingsWindow();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to open sessions right now.');
+    }
+  };
+
+  const openExtensionsSettings = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await window.pixelPilot.closeSettingsWindow();
+      await window.pixelPilot.toggleExtensionsSettingsWindow();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to open extensions right now.');
     }
   };
 
@@ -2114,6 +2533,20 @@ function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.E
           className="no-drag flex w-full items-center rounded-lg px-3.5 py-2 text-left text-[13px] text-slate-800 transition hover:bg-[#e2e8f0]"
         >
           Startup Defaults
+        </button>
+        <button
+          type="button"
+          onClick={() => void openSessionSettings()}
+          className="no-drag flex w-full items-center rounded-lg px-3.5 py-2 text-left text-[13px] text-slate-800 transition hover:bg-[#e2e8f0]"
+        >
+          Sessions
+        </button>
+        <button
+          type="button"
+          onClick={() => void openExtensionsSettings()}
+          className="no-drag flex w-full items-center rounded-lg px-3.5 py-2 text-left text-[13px] text-slate-800 transition hover:bg-[#e2e8f0]"
+        >
+          Extensions
         </button>
         <div className="mx-1 my-1 h-px bg-[#e2e8f0]" />
         <button
@@ -2403,6 +2836,7 @@ function usePixelPilotModel(): {
 
     const offState = window.pixelPilot.onState((nextSnapshot) => {
       startTransition(() => {
+        setRuntimeError('');
         setSnapshot(nextSnapshot);
         setMessages(nextSnapshot.recentMessages.map(normalizeEntry));
         setActionUpdates(nextSnapshot.recentActionUpdates);
@@ -2590,6 +3024,10 @@ export default function App(): React.JSX.Element {
     <SettingsShell snapshot={snapshot} />
   ) : windowKind === 'startup-settings' ? (
     <StartupDefaultsShell snapshot={snapshot} />
+  ) : windowKind === 'session-settings' ? (
+    <SessionSettingsShell snapshot={snapshot} />
+  ) : windowKind === 'extensions-settings' ? (
+    <ExtensionsSettingsShell snapshot={snapshot} />
   ) : (
     <OverlayShell
       snapshot={snapshot}
@@ -2609,12 +3047,12 @@ export default function App(): React.JSX.Element {
           ? 'flex items-start justify-center'
           : windowKind === 'sidecar'
             ? 'flex items-start justify-center p-3'
-            : windowKind === 'settings' || windowKind === 'startup-settings'
+            : isSettingsWindowKind(windowKind)
               ? 'flex items-start justify-start'
             : 'flex items-start justify-center p-3'
       ].join(' ')}
     >
-      {windowKind !== 'settings' && windowKind !== 'startup-settings' && (
+      {!isSettingsWindowKind(windowKind) && (
         <>
           <div className="pointer-events-none absolute left-[8%] top-[-18%] h-28 w-28 rounded-full bg-sky-200/18 blur-3xl" />
           <div className="pointer-events-none absolute bottom-[-20%] right-[10%] h-32 w-32 rounded-full bg-slate-300/18 blur-3xl" />

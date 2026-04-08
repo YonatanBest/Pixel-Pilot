@@ -33,6 +33,12 @@ const pixelPilot: PixelPilotApi = {
   closeSettingsWindow: () => invokeIpc<{ visible: boolean }>('pixelpilot:close-settings-window'),
   toggleStartupSettingsWindow: () => invokeIpc<{ visible: boolean }>('pixelpilot:toggle-startup-settings-window'),
   closeStartupSettingsWindow: () => invokeIpc<{ visible: boolean }>('pixelpilot:close-startup-settings-window'),
+  toggleSessionSettingsWindow: () => invokeIpc<{ visible: boolean }>('pixelpilot:toggle-session-settings-window'),
+  closeSessionSettingsWindow: () => invokeIpc<{ visible: boolean }>('pixelpilot:close-session-settings-window'),
+  toggleExtensionsSettingsWindow: () =>
+    invokeIpc<{ visible: boolean }>('pixelpilot:toggle-extensions-settings-window'),
+  closeExtensionsSettingsWindow: () =>
+    invokeIpc<{ visible: boolean }>('pixelpilot:close-extensions-settings-window'),
   setStartupDefaults: (payload) =>
     invokeIpc<StartupDefaultsSnapshot>('pixelpilot:set-startup-defaults', payload),
   updateWindowLayout: (payload) => invokeIpc<void>('pixelpilot:update-window-layout', payload),

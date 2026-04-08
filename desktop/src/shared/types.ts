@@ -25,6 +25,39 @@ export type ActionUpdate = {
   done?: boolean;
 };
 
+export type DoctorCheck = {
+  name: string;
+  status: string;
+  summary: string;
+  details: Record<string, unknown>;
+};
+
+export type DoctorReport = {
+  status: string;
+  checks: DoctorCheck[];
+};
+
+export type SessionContextSummary = {
+  available: boolean;
+  workspaceFingerprint?: string;
+  sessionId?: string;
+  lastActivityAt?: string;
+  summaryText?: string;
+  resumePayload?: Record<string, unknown>;
+  tail?: Record<string, unknown>[];
+  logPath?: string;
+};
+
+export type ExtensionSummary = {
+  status?: string;
+  pluginCount: number;
+  mcpServerCount: number;
+  toolCount: number;
+  pluginIds?: string[];
+  mcpServerNames?: string[];
+  toolNames: string[];
+};
+
 export type RuntimeSnapshot = {
   operationMode: 'GUIDANCE' | 'SAFE' | 'AUTO';
   visionMode: 'ROBO' | 'OCR';
@@ -51,6 +84,11 @@ export type RuntimeSnapshot = {
   auth: AuthState;
   recentMessages: MessageEntry[];
   recentActionUpdates: ActionUpdate[];
+  latestSessionContext: SessionContextSummary;
+  extensions: ExtensionSummary;
+  settingsSources: string[];
+  sessionDirectory: string;
+  lastDoctorReport: DoctorReport | Record<string, never>;
 };
 
 export type RuntimeEventEnvelope = {
@@ -81,7 +119,14 @@ export type SidecarFrame = {
   dataUrl: string;
 };
 
-export type WindowKind = 'overlay' | 'notch' | 'sidecar' | 'settings' | 'startup-settings';
+export type WindowKind =
+  | 'overlay'
+  | 'notch'
+  | 'sidecar'
+  | 'settings'
+  | 'startup-settings'
+  | 'session-settings'
+  | 'extensions-settings';
 
 export type RuntimeCommandPayload = Record<string, unknown>;
 
@@ -102,6 +147,10 @@ export type PixelPilotApi = {
   closeSettingsWindow: () => Promise<{ visible: boolean }>;
   toggleStartupSettingsWindow: () => Promise<{ visible: boolean }>;
   closeStartupSettingsWindow: () => Promise<{ visible: boolean }>;
+  toggleSessionSettingsWindow: () => Promise<{ visible: boolean }>;
+  closeSessionSettingsWindow: () => Promise<{ visible: boolean }>;
+  toggleExtensionsSettingsWindow: () => Promise<{ visible: boolean }>;
+  closeExtensionsSettingsWindow: () => Promise<{ visible: boolean }>;
   setStartupDefaults: (payload: {
     operationMode: 'GUIDANCE' | 'SAFE' | 'AUTO';
     visionMode: 'ROBO' | 'OCR';

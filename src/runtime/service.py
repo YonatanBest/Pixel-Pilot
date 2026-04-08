@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QTimer
@@ -44,6 +46,7 @@ class ElectronRuntimeService(QObject):
         self.message_feed_model = message_feed_model
         self.bridge_server = bridge_server
         self.shell_proxy = shell_proxy
+        self._last_doctor_report: dict[str, Any] | None = None
 
         self.bridge_server.set_snapshot_provider(self._build_snapshot)
         self.bridge_server.set_command_handler(self._handle_command)
@@ -108,6 +111,15 @@ class ElectronRuntimeService(QObject):
         agent = getattr(self.controller, "agent", None)
         return getattr(agent, "session_store", None)
 
+    def _runtime_settings_sources(self) -> list[str]:
+        agent = getattr(self.controller, "agent", None)
+        settings = getattr(agent, "runtime_settings", None)
+        return [str(path) for path in list(getattr(settings, "sources", []) or [])]
+
+    def _session_directory(self) -> str:
+        store = self._session_store()
+        return str(getattr(store, "root_dir", "") or "")
+
     def _latest_session_context(self) -> dict[str, Any]:
         store = self._session_store()
         if store is None:
@@ -133,6 +145,9 @@ class ElectronRuntimeService(QObject):
             extra={
                 "latestSessionContext": self._latest_session_context(),
                 "extensions": self._extension_summary(),
+                "settingsSources": self._runtime_settings_sources(),
+                "sessionDirectory": self._session_directory(),
+                "lastDoctorReport": dict(self._last_doctor_report or {}),
             },
         )
 
@@ -157,6 +172,8 @@ class ElectronRuntimeService(QObject):
                 controller=self.controller,
                 runtime_service=self,
             )
+            self._last_doctor_report = report.as_dict()
+            self.bridge_server.publish_state_updated()
             return {
                 "doctor": report.as_dict(),
                 "text": report.render_text(),
@@ -174,8 +191,23 @@ class ElectronRuntimeService(QObject):
                 if summary:
                     self.adapter.add_activity_message("Previous session context is available for manual resume.")
                     self.adapter.add_system_message(summary)
+            self.bridge_server.publish_state_updated()
             return {"session": payload}
+        if command == "session.openFolder":
+            directory = self._session_directory()
+            if not directory:
+                raise RuntimeError("Session log directory is unavailable.")
+            self._open_folder(directory)
+            return {"opened": True, "path": directory}
         if command == "extensions.getSummary":
+            return {"extensions": self._extension_summary()}
+        if command == "extensions.reload":
+            agent = getattr(self.controller, "agent", None)
+            manager = getattr(agent, "extension_manager", None)
+            if manager is None:
+                return {"extensions": self._extension_summary()}
+            manager.reload()
+            self.bridge_server.publish_state_updated()
             return {"extensions": self._extension_summary()}
         if command == "live.setEnabled":
             self.controller.handle_live_mode_changed(bool(body.get("enabled")))
@@ -254,6 +286,20 @@ class ElectronRuntimeService(QObject):
             QTimer.singleShot(0, self.app.quit)
             return {"shuttingDown": True}
         raise RuntimeError(f"Unsupported runtime command: {command}")
+
+    @staticmethod
+    def _open_folder(target: str) -> None:
+        path = Path(str(target or "")).expanduser().resolve()
+        if not path.exists():
+            raise RuntimeError(f"Folder does not exist: {path}")
+        try:
+            os.startfile(str(path))
+            return
+        except AttributeError:
+            pass
+        except OSError:
+            pass
+        subprocess.run(["explorer", str(path)], check=False)
 
     def _auth_login(self, payload: dict[str, Any]) -> dict[str, Any]:
         email = str(payload.get("email") or "").strip()

@@ -47,6 +47,9 @@
     "appId": "com.pixelpilot.desktop",
     "productName": "PixelPilot",
     "msiProjectCreated": "scripts/customize-msi-project.cjs",
+    "toolsets": {
+      "winCodeSign": "1.1.0"
+    },
     "files": [
       "dist/**/*",
       "!**/.env",

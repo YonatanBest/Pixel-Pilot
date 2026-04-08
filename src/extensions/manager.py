@@ -45,9 +45,12 @@ class ExtensionManager:
 
     def summary(self) -> dict[str, Any]:
         return {
+            "status": "ready",
             "pluginCount": len(self._plugins),
             "mcpServerCount": len(self._mcp_servers),
             "toolCount": len(self._tool_specs),
+            "pluginIds": [manifest.plugin_id for manifest in self._plugins],
+            "mcpServerNames": [server.name for server in self._mcp_servers],
             "toolNames": sorted(self._tool_specs),
         }
 
