@@ -18,7 +18,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, EmailStr
 
-JWT_SECRET = os.getenv("JWT_SECRET", "default_secret_change_me")
+JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24 * 7
 
@@ -98,6 +98,12 @@ class DesktopCodeIssueResponse(BaseModel):
 class DesktopCodeRedeemRequest(BaseModel):
     code: str
     state: str
+
+
+def ensure_auth_configuration() -> None:
+    secret = str(JWT_SECRET or "").strip()
+    if not secret:
+        raise RuntimeError("Missing required env var: JWT_SECRET")
 
 
 async def ensure_auth_indexes(db: AsyncIOMotorDatabase) -> None:
@@ -373,14 +379,16 @@ async def redeem_desktop_code(
     raw = await redis_client.get(key)
     if raw is None:
         return None
-    await redis_client.delete(key)
     try:
         payload = json.loads(raw)
     except Exception:
+        await redis_client.delete(key)
         return None
 
     if str(payload.get("state") or "") != str(state or ""):
         return None
+
+    await redis_client.delete(key)
 
     return TokenResponse(
         access_token=str(payload.get("access_token") or ""),

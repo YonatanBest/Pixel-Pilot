@@ -5,6 +5,7 @@ import base64
 import copy
 import logging
 import os
+import secrets
 import uuid
 from typing import Any, Optional
 
@@ -25,6 +26,9 @@ DEFAULT_LIVE_MODEL = (
     or "gemini-3.1-flash-live-preview"
 )
 LIVE_PROVIDER_ERROR_MESSAGE = "Gemini Live session failed"
+LIVE_SESSION_EXPIRED_MESSAGE = (
+    "Gemini Live session expired or lost its backend lease. Please reconnect."
+)
 
 
 class LiveSessionError(RuntimeError):
@@ -219,9 +223,11 @@ class BackendLiveSession:
             raise LiveSessionError(503, "Service temporarily unavailable")
 
         session_id = uuid.uuid4().hex
+        session_token = secrets.token_urlsafe(32)
         reservation = await rate_limiter.reserve_live_session_start(
             self.user_id,
             session_id,
+            session_token,
             self.redis_client,
         )
         if not reservation.allowed:
@@ -239,7 +245,13 @@ class BackendLiveSession:
 
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._receive_task = asyncio.create_task(self._receive_loop())
-        await self._send_json({"type": "live_started", "model": self._model})
+        await self._send_json(
+            {
+                "type": "live_started",
+                "model": self._model,
+                "live_session_token": reservation.session_token,
+            }
+        )
 
     async def send_text(self, text: str) -> None:
         payload = str(text or "")
@@ -434,12 +446,49 @@ class BackendLiveSession:
             if self._reservation is None or self.redis_client is None:
                 return
             try:
-                await rate_limiter.refresh_live_session_lease(
+                refresh_result = await rate_limiter.refresh_live_session_lease(
                     self._reservation,
                     self.redis_client,
                 )
+                if refresh_result.status == "ok":
+                    continue
+                if self._closed:
+                    return
+                if refresh_result.status == "expired":
+                    await self._send_error(
+                        LiveSessionError(
+                            429,
+                            {
+                                "message": (
+                                    f"Gemini Live daily time limit exceeded "
+                                    f"({rate_limiter.LIVE_SESSION_SECONDS_PER_DAY // 60} minutes). "
+                                    "Resets at midnight UTC."
+                                ),
+                                "window": rate_limiter.WINDOW_DAY,
+                                "limit": rate_limiter.LIVE_SESSION_SECONDS_PER_DAY,
+                                "remaining": refresh_result.remaining_seconds,
+                                "retry_after_seconds": 0,
+                                "scope": "live_time",
+                            },
+                        )
+                    )
+                else:
+                    await self._send_error(
+                        LiveSessionError(409, LIVE_SESSION_EXPIRED_MESSAGE)
+                    )
+                await self.stop(notify_client=True)
+                return
             except Exception:
                 logger.debug("Failed to refresh live lease heartbeat", exc_info=True)
+                if not self._closed:
+                    await self._send_error(
+                        LiveSessionError(
+                            503,
+                            "Gemini Live session lost backend lease connectivity. Please reconnect.",
+                        )
+                    )
+                    await self.stop(notify_client=True)
+                return
 
     async def _receive_loop(self) -> None:
         while not self._closed and self._session is not None:

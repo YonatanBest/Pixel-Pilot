@@ -84,6 +84,7 @@ class ElectronRuntimeService(QObject):
             self.state_store.liveEnabledChanged,
             self.state_store.liveVoiceActiveChanged,
             self.state_store.liveSessionStateChanged,
+            self.state_store.liveStatusChanged,
             self.state_store.wakeWordEnabledChanged,
             self.state_store.wakeWordStateChanged,
             self.state_store.expandedChanged,

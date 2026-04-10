@@ -10,6 +10,10 @@ from websockets.sync.client import connect as ws_connect
 from config import Config
 
 logger = logging.getLogger("pixelpilot.client")
+_PRIVATE_CONFIG_KEYS = {"_pixelpilot_require_live_session"}
+_PRIVATE_CONFIG_KEYS.add("_pixelpilot_live_session_token")
+_LIVE_SESSION_TOKEN_HEADER = "X-PixelPilot-Live-Session"
+_active_live_session_token: Optional[str] = None
 
 
 class RateLimitError(RuntimeError):
@@ -87,6 +91,8 @@ class DirectGeminiClient:
             processed_contents.append(types.Content(role=role, parts=real_parts))
 
         config_data = dict(config) if config else {}
+        for key in _PRIVATE_CONFIG_KEYS:
+            config_data.pop(key, None)
 
         tools_config = config_data.pop("tools", None)
         real_tools = None
@@ -176,6 +182,7 @@ class BackendClient:
         path: str,
         payload: Optional[dict] = None,
         *,
+        extra_headers: Optional[dict[str, str]] = None,
         timeout: float = 20.0,
     ) -> dict[str, Any]:
         auth = self._get_auth()
@@ -190,6 +197,8 @@ class BackendClient:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {auth.access_token}",
         }
+        if extra_headers:
+            request_headers.update(extra_headers)
         req = urlrequest.Request(
             self._http_url(path),
             data=data,
@@ -247,6 +256,12 @@ class BackendClient:
         if not auth.access_token:
             raise RuntimeError("Not signed in. Please log in to continue.")
 
+        config_payload = dict(config or {})
+        if bool(config_payload.get("_pixelpilot_require_live_session")):
+            token = get_backend_live_session_token()
+            if token:
+                config_payload["_pixelpilot_live_session_token"] = token
+
         ws_url = self._ws_url()
         try:
             with ws_connect(
@@ -271,7 +286,7 @@ class BackendClient:
                             "request": {
                                 "model": model,
                                 "contents": contents,
-                                "config": config,
+                                "config": config_payload,
                             },
                         }
                     )
@@ -327,10 +342,15 @@ class BackendClient:
             "mime_type": str(mime_type or "image/png"),
             "lang": str(lang or "en"),
         }
+        extra_headers = {}
+        token = get_backend_live_session_token()
+        if token:
+            extra_headers[_LIVE_SESSION_TOKEN_HEADER] = token
         response = self._request_json(
             "POST",
             "/v1/vision/easyocr",
             payload,
+            extra_headers=extra_headers,
             timeout=60.0,
         )
         if not isinstance(response, dict):
@@ -349,10 +369,15 @@ class BackendClient:
             "mime_type": str(mime_type or "image/png"),
             "lang": str(lang or "en"),
         }
+        extra_headers = {}
+        token = get_backend_live_session_token()
+        if token:
+            extra_headers[_LIVE_SESSION_TOKEN_HEADER] = token
         response = self._request_json(
             "POST",
             "/v1/vision/local-eye",
             payload,
+            extra_headers=extra_headers,
             timeout=60.0,
         )
         if not isinstance(response, dict):
@@ -362,6 +387,20 @@ class BackendClient:
 
 _client_instance: Optional[Any] = None
 _backend_proxy_client_instance: Optional[BackendClient] = None
+
+
+def set_backend_live_session_token(token: Optional[str]) -> None:
+    global _active_live_session_token
+    clean = str(token or "").strip()
+    _active_live_session_token = clean or None
+
+
+def clear_backend_live_session_token() -> None:
+    set_backend_live_session_token(None)
+
+
+def get_backend_live_session_token() -> Optional[str]:
+    return _active_live_session_token
 
 
 def get_client():

@@ -10,7 +10,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 import websockets
 
-from backend_client import RateLimitError
+from backend_client import (
+    RateLimitError,
+    clear_backend_live_session_token,
+    set_backend_live_session_token,
+)
 from config import Config
 
 logger = logging.getLogger("pixelpilot.live.transport")
@@ -371,6 +375,7 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
         self._base_url = (base_url or Config.BACKEND_URL).rstrip("/")
         self._ws = None
         self._connected = False
+        self._live_session_token: Optional[str] = None
 
     @classmethod
     def is_supported(cls) -> bool:
@@ -396,6 +401,8 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
         auth = self._get_auth()
         if not auth.access_token:
             raise RuntimeError("Not signed in. Please log in to continue.")
+        self._live_session_token = None
+        clear_backend_live_session_token()
 
         self._ws = await websockets.connect(
             self._ws_url(),
@@ -421,6 +428,12 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
         while True:
             response = json.loads(await self._ws.recv())
             if response.get("type") == "live_started":
+                self._live_session_token = str(
+                    response.get("live_session_token") or ""
+                ).strip() or None
+                if not self._live_session_token:
+                    raise RuntimeError("Backend live session did not return a session token.")
+                set_backend_live_session_token(self._live_session_token)
                 self._connected = True
                 return
             self._handle_backend_message(response, during_connect=True)
@@ -482,6 +495,8 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
                 continue
             if msg_type == "live_closed":
                 self._connected = False
+                self._live_session_token = None
+                clear_backend_live_session_token()
                 return
             self._handle_backend_message(message, during_connect=False)
 
@@ -494,6 +509,8 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
                 logger.debug("Failed to close backend live websocket", exc_info=True)
         self._ws = None
         self._connected = False
+        self._live_session_token = None
+        clear_backend_live_session_token()
 
     def _handle_backend_message(
         self,

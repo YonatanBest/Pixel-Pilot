@@ -158,14 +158,31 @@ class ScreenCapture:
     ) -> List[Dict]:
         """Run Eye extraction safely and return an empty list on failure."""
         try:
-            return (
+            elements = (
                 self.local_eye.get_screen_elements(
                     screenshot_path, progress_callback=progress_callback
                 )
                 or []
             )
+            vision_label = self.local_eye.current_vision_label()
+            if elements:
+                logger.info(
+                    "Eye extraction succeeded via %s with %d element(s).",
+                    vision_label,
+                    len(elements),
+                )
+            else:
+                logger.warning(
+                    "Eye extraction completed via %s but returned 0 elements.",
+                    vision_label,
+                )
+            return elements
         except Exception as e:
-            logger.error(f"Eye extraction failed: {e}")
+            logger.error(
+                "Eye extraction failed via %s: %s",
+                self.local_eye.current_vision_label(),
+                e,
+            )
             return []
 
     def _safe_get_robotics_elements(
@@ -299,7 +316,7 @@ class ScreenCapture:
         Capture a screenshot and then run detailed visual analysis:
         - Logo/icon-oriented element detection
         - Element IDs and debug overlay
-        - Edge overlay map
+        - Optional diagnostic edge map
         """
         screenshot_path = self.capture_screen(force_robotics=force_robotics)
         if not screenshot_path:

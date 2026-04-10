@@ -305,7 +305,7 @@ class LiveToolRegistry:
                 "name": "capture_and_detail",
                 "description": (
                     "Capture and run detailed visual analysis: logo/icon finding, element IDs, "
-                    "annotated debug overlay, and edge overlay."
+                    "annotated debug overlay, and optional diagnostic artifacts."
                 ),
                 "parameters": {
                     "type": "OBJECT",
@@ -1108,7 +1108,7 @@ class LiveToolRegistry:
         return self._tool_response(
             "capture_and_detail",
             success=True,
-            message="Detailed capture completed with element IDs/logo and edge overlays.",
+            message="Detailed capture completed with annotated element IDs and diagnostic artifacts.",
             result=summary,
         )
 

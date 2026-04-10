@@ -34,6 +34,7 @@ import type {
   BridgeStatus,
   DoctorReport,
   ExtensionSummary,
+  LiveStatus,
   MessageEntry,
   RendererConfirmationRequest,
   RuntimeSnapshot,
@@ -91,6 +92,13 @@ const emptyExtensionSummary: ExtensionSummary = {
 const emptyDoctorReport: DoctorReport = {
   status: 'unknown',
   checks: []
+};
+
+const emptyLiveStatus: LiveStatus = {
+  level: 'idle',
+  code: '',
+  message: '',
+  source: ''
 };
 
 type WindowLayout = {
@@ -273,6 +281,27 @@ function patchSnapshot(
     ...snapshot,
     ...patch
   };
+}
+
+function normalizeLiveStatus(payload: unknown): LiveStatus {
+  if (!payload || typeof payload !== 'object') {
+    return emptyLiveStatus;
+  }
+  const record = payload as Record<string, unknown>;
+  const level = String(record.level || 'idle').trim().toLowerCase();
+  return {
+    level:
+      level === 'info' || level === 'warning' || level === 'error'
+        ? level
+        : 'idle',
+    code: typeof record.code === 'string' ? record.code : '',
+    message: typeof record.message === 'string' ? record.message : '',
+    source: typeof record.source === 'string' ? record.source : ''
+  };
+}
+
+function currentLiveStatus(snapshot: RuntimeSnapshot): LiveStatus {
+  return normalizeLiveStatus(snapshot.liveStatus);
 }
 
 function parseSessionContext(payload: unknown): SessionContextSummary {
@@ -599,6 +628,15 @@ function buildCommandBarStatus(
     return { kind: 'busy', tone: 'status', text: bridgeText };
   }
 
+  const liveStatus = currentLiveStatus(snapshot);
+  if (liveStatus.level !== 'idle' && liveStatus.message.trim()) {
+    return {
+      kind: liveStatus.level === 'error' ? 'error' : 'status',
+      tone: liveStatus.level === 'error' ? 'error' : 'status',
+      text: liveStatus.message.trim()
+    };
+  }
+
   const errorText = String(localError || runtimeError || '').trim();
   if (errorText) {
     return { kind: 'error', tone: 'error', text: errorText };
@@ -775,6 +813,15 @@ function buildNotchProgress(
   actionUpdates: ActionUpdate[],
   runtimeError: string
 ): { text: string; busy: boolean; tone: 'idle' | 'active' | 'error' } {
+  const liveStatus = currentLiveStatus(snapshot);
+  if (liveStatus.level !== 'idle' && liveStatus.message.trim()) {
+    return {
+      text: liveStatus.message.trim(),
+      busy: liveStatus.level !== 'error',
+      tone: liveStatus.level === 'error' ? 'error' : 'active'
+    };
+  }
+
   const errorText = runtimeError.trim();
   if (errorText) {
     return { text: errorText, busy: false, tone: 'error' };
@@ -1689,6 +1736,7 @@ function LegacyDetailsPanel({
   const deferredMessages = useDeferredValue(messages);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const liveStatus = useMemo(() => currentLiveStatus(snapshot), [snapshot]);
   const visibleMessages = useMemo(
     () =>
       deferredMessages
@@ -1738,6 +1786,18 @@ function LegacyDetailsPanel({
         {!snapshot.liveAvailable && snapshot.liveUnavailableReason && (
           <div className="mb-3 rounded-2xl border border-amber-200/80 bg-amber-50/80 px-3 py-2.5 text-sm text-amber-900">
             {snapshot.liveUnavailableReason}
+          </div>
+        )}
+
+        {liveStatus.level !== 'idle' && liveStatus.message && (
+          <div
+            className={`mb-3 rounded-2xl px-3 py-2.5 text-sm ${
+              liveStatus.level === 'error'
+                ? 'border border-rose-200/80 bg-rose-50/80 text-rose-900'
+                : 'border border-sky-200/80 bg-sky-50/80 text-sky-900'
+            }`}
+          >
+            {liveStatus.message}
           </div>
         )}
 
@@ -3135,6 +3195,15 @@ function usePixelPilotModel(): {
         if (envelope.method === 'auth.changed') {
           const auth = (envelope.payload.auth as AuthState | undefined) ?? emptyAuth;
           setSnapshot((current) => patchSnapshot(current, { auth }));
+          return;
+        }
+
+        if (envelope.method === 'live.status') {
+          setSnapshot((current) =>
+            patchSnapshot(current, {
+              liveStatus: normalizeLiveStatus(envelope.payload)
+            })
+          );
           return;
         }
 

@@ -51,6 +51,7 @@ class UiStateStore(QObject):
     liveEnabledChanged = Signal()
     liveVoiceActiveChanged = Signal()
     liveSessionStateChanged = Signal()
+    liveStatusChanged = Signal()
     wakeWordEnabledChanged = Signal()
     wakeWordStateChanged = Signal()
     userAudioLevelChanged = Signal()
@@ -74,6 +75,12 @@ class UiStateStore(QObject):
         self._live_enabled = bool(self._live_available)
         self._live_voice_active = False
         self._live_session_state = "disconnected"
+        self._live_status = {
+            "level": "idle",
+            "code": "",
+            "message": "",
+            "source": "",
+        }
         self._wake_word_enabled = bool(Config.ENABLE_WAKE_WORD)
         self._wake_word_state = "starting" if self._wake_word_enabled else "disabled"
         self._wake_word_phrase = str(Config.WAKE_WORD_PHRASE or "Hey Pixie").strip() or "Hey Pixie"
@@ -183,6 +190,34 @@ class UiStateStore(QObject):
             return
         self._live_session_state = normalized
         self.liveSessionStateChanged.emit()
+
+    @Property("QVariant", notify=liveStatusChanged)
+    def liveStatus(self) -> dict[str, str]:
+        return dict(self._live_status)
+
+    def set_live_status(
+        self,
+        *,
+        level: str = "idle",
+        code: str = "",
+        message: str = "",
+        source: str = "",
+    ) -> None:
+        normalized = {
+            "level": str(level or "idle").strip().lower() or "idle",
+            "code": str(code or "").strip().lower(),
+            "message": str(message or "").strip(),
+            "source": str(source or "").strip().lower(),
+        }
+        if normalized["level"] not in {"idle", "info", "warning", "error"}:
+            normalized["level"] = "info"
+        if normalized == self._live_status:
+            return
+        self._live_status = normalized
+        self.liveStatusChanged.emit()
+
+    def clear_live_status(self) -> None:
+        self.set_live_status(level="idle", code="", message="", source="")
 
     @Property(bool, notify=wakeWordEnabledChanged)
     def wakeWordEnabled(self) -> bool:

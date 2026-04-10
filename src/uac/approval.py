@@ -18,6 +18,7 @@ from config import Config
 
 logger = logging.getLogger("pixelpilot.uac.approval")
 _client = get_client()
+_REQUIRE_LIVE_SESSION_CONFIG_KEY = "_pixelpilot_require_live_session"
 
 
 class _ModelWrapper:
@@ -178,6 +179,7 @@ def ask_uac_brain(
         response_data = model.generate_content(
             [{"role": "user", "parts": parts}],
             config={
+                _REQUIRE_LIVE_SESSION_CONFIG_KEY: True,
                 "response_mime_type": "application/json",
                 "response_json_schema": _UACApprovalDecision.model_json_schema(),
             },

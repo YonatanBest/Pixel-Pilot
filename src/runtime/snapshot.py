@@ -21,6 +21,7 @@ def build_runtime_snapshot(
         "liveEnabled": state_store.liveEnabled,
         "liveVoiceActive": state_store.liveVoiceActive,
         "liveSessionState": state_store.liveSessionState,
+        "liveStatus": state_store.liveStatus,
         "wakeWordEnabled": state_store.wakeWordEnabled,
         "wakeWordState": state_store.wakeWordState,
         "wakeWordPhrase": state_store.wakeWordPhrase,

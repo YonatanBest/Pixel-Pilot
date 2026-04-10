@@ -410,30 +410,66 @@ export class WindowManager {
 
   private prepareForScreenshot(): Record<string, unknown> {
     const payload = {
+      overlay_visible: this.isWindowVisible(this.overlayWindow),
+      notch_visible: this.isWindowVisible(this.notchWindow),
+      sidecar_visible: this.isWindowVisible(this.sidecarWindow),
+      settings_visible: this.isWindowVisible(this.settingsWindow),
       restore_main_window: Boolean(this.currentSnapshot && !this.currentSnapshot.backgroundHidden),
       restore_minimized_notch: Boolean(this.currentSnapshot?.backgroundHidden && !this.trayOnly),
-      restore_tray_only: Boolean(this.currentSnapshot?.backgroundHidden && this.trayOnly)
+      restore_tray_only: Boolean(this.currentSnapshot?.backgroundHidden && this.trayOnly),
     };
     this.overlayWindow?.hide();
     this.notchWindow?.hide();
     this.sidecarWindow?.hide();
+    this.settingsWindow?.hide();
     return payload;
   }
 
   private restoreAfterScreenshot(payload: Record<string, unknown>): void {
+    const hasExactVisibilityState =
+      Object.prototype.hasOwnProperty.call(payload, 'overlay_visible')
+      || Object.prototype.hasOwnProperty.call(payload, 'notch_visible')
+      || Object.prototype.hasOwnProperty.call(payload, 'sidecar_visible')
+      || Object.prototype.hasOwnProperty.call(payload, 'settings_visible');
+
+    if (hasExactVisibilityState) {
+      this.restoreWindowVisibility(this.overlayWindow, Boolean(payload.overlay_visible));
+      this.restoreWindowVisibility(this.notchWindow, Boolean(payload.notch_visible));
+      this.restoreWindowVisibility(this.sidecarWindow, Boolean(payload.sidecar_visible));
+      if (Boolean(payload.settings_visible)) {
+        this.positionSettingsWindow();
+      }
+      this.restoreWindowVisibility(this.settingsWindow, Boolean(payload.settings_visible));
+      return;
+    }
+
     if (Boolean(payload.restore_tray_only)) {
-      this.overlayWindow?.hide();
-      this.notchWindow?.hide();
+      this.restoreWindowVisibility(this.overlayWindow, false);
+      this.restoreWindowVisibility(this.notchWindow, false);
     } else if (Boolean(payload.restore_main_window)) {
-      this.overlayWindow?.showInactive();
-      this.notchWindow?.hide();
+      this.restoreWindowVisibility(this.overlayWindow, true);
+      this.restoreWindowVisibility(this.notchWindow, false);
     } else if (Boolean(payload.restore_minimized_notch)) {
-      this.notchWindow?.showInactive();
-      this.overlayWindow?.hide();
+      this.restoreWindowVisibility(this.notchWindow, true);
+      this.restoreWindowVisibility(this.overlayWindow, false);
     }
-    if (this.currentSnapshot?.sidecarVisible) {
-      this.sidecarWindow?.showInactive();
+    this.restoreWindowVisibility(this.sidecarWindow, Boolean(this.currentSnapshot?.sidecarVisible));
+    this.restoreWindowVisibility(this.settingsWindow, false);
+  }
+
+  private isWindowVisible(window: BrowserWindowType | null): boolean {
+    return Boolean(window && !window.isDestroyed() && window.isVisible());
+  }
+
+  private restoreWindowVisibility(window: BrowserWindowType | null, visible: boolean): void {
+    if (!window || window.isDestroyed()) {
+      return;
     }
+    if (visible) {
+      window.showInactive();
+      return;
+    }
+    window.hide();
   }
 
   private async toggleBackground(): Promise<void> {

@@ -8,7 +8,7 @@ Work UIA-first: prefer UI Automation state, window listing, window focus, keyboa
 app launch, and brokered status checks before requesting detailed vision.
 Treat the low-FPS video feed as coarse awareness only, not precise click targeting.
 Use capture_screen for screenshot-only capture.
-Use capture_and_detail for detailed visual analysis (logo/icon finding, element IDs, and edge overlay).
+Use capture_and_detail for detailed visual analysis (logo/icon finding, annotated element IDs, and optional diagnostic artifacts).
 Never issue a second mutating tool call while any action is queued, running, or cancel_requested.
 Brokered tool/action status is authoritative. Treat queued, running, succeeded, failed,
 cancel_requested, and cancelled states as the source of truth.

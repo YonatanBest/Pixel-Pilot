@@ -8,7 +8,7 @@ import secrets
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import httpx
@@ -34,7 +34,9 @@ security = HTTPBearer(auto_error=False)
 GENERATION_ERROR_MESSAGE = "Generation failed"
 SERVICE_UNAVAILABLE_MESSAGE = "Service temporarily unavailable"
 OCR_SESSION_REQUIRED_MESSAGE = "OCR is only available during an active Gemini Live session."
+LIVE_SESSION_REQUIRED_MESSAGE = "This request requires an active Gemini Live session."
 AUTH_DATABASE_UNAVAILABLE_MESSAGE = "Authentication database is unavailable. Please try again shortly."
+LIVE_SESSION_TOKEN_HEADER = "X-PixelPilot-Live-Session"
 WS_AUTH_TIMEOUT_SECONDS = 10
 GOOGLE_AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -164,6 +166,20 @@ async def _generate_with_rate_limit(
     if redis_client is None:
         raise HTTPException(status_code=503, detail=SERVICE_UNAVAILABLE_MESSAGE)
 
+    config_payload = dict(request.config or {})
+    require_live_session = bool(config_payload.pop("_pixelpilot_require_live_session", False))
+    live_session_token = str(config_payload.pop("_pixelpilot_live_session_token", "") or "").strip()
+
+    if require_live_session:
+        if redis_client is None:
+            raise HTTPException(status_code=503, detail=SERVICE_UNAVAILABLE_MESSAGE)
+        if not await rate_limiter.validate_live_session_token(
+            user_id,
+            live_session_token,
+            redis_client,
+        ):
+            raise HTTPException(status_code=403, detail=LIVE_SESSION_REQUIRED_MESSAGE)
+
     reservation = await rate_limiter.reserve_generate_request(user_id, redis_client)
     if not reservation.allowed:
         raise HTTPException(
@@ -181,7 +197,7 @@ async def _generate_with_rate_limit(
             service.GenerationRequest(
                 model=request.model,
                 contents=request.contents,
-                config=request.config,
+                config=config_payload,
             )
         )
     except Exception:
@@ -205,10 +221,15 @@ async def _easyocr_with_rate_limit(
     image_bytes: bytes,
     user_id: str,
     redis_client: redis.Redis,
+    live_session_token: str,
 ) -> Dict[str, Any]:
     if redis_client is None:
         raise HTTPException(status_code=503, detail=SERVICE_UNAVAILABLE_MESSAGE)
-    if not await rate_limiter.has_active_live_session(user_id, redis_client):
+    if not await rate_limiter.validate_live_session_token(
+        user_id,
+        live_session_token,
+        redis_client,
+    ):
         raise HTTPException(status_code=403, detail=OCR_SESSION_REQUIRED_MESSAGE)
 
     try:
@@ -233,10 +254,15 @@ async def _hosted_eye_with_rate_limit(
     image_bytes: bytes,
     user_id: str,
     redis_client: redis.Redis,
+    live_session_token: str,
 ) -> Dict[str, Any]:
     if redis_client is None:
         raise HTTPException(status_code=503, detail=SERVICE_UNAVAILABLE_MESSAGE)
-    if not await rate_limiter.has_active_live_session(user_id, redis_client):
+    if not await rate_limiter.validate_live_session_token(
+        user_id,
+        live_session_token,
+        redis_client,
+    ):
         raise HTTPException(status_code=403, detail=OCR_SESSION_REQUIRED_MESSAGE)
 
     try:
@@ -251,6 +277,18 @@ async def _hosted_eye_with_rate_limit(
         raise HTTPException(status_code=500, detail="Hosted eye failed")
 
     if isinstance(result, dict):
+        elements_count = len(result.get("elements") or [])
+        if elements_count:
+            logger.info(
+                "Backend LocalCVEye succeeded for user %s with %d element(s)",
+                user_id,
+                elements_count,
+            )
+        else:
+            logger.warning(
+                "Backend LocalCVEye succeeded for user %s but returned 0 elements",
+                user_id,
+            )
         return result
     raise HTTPException(status_code=500, detail="Hosted eye failed")
 
@@ -536,6 +574,7 @@ async def generate(
 @app.post("/v1/vision/easyocr", response_model=EasyOCRResponse)
 async def easyocr_route(
     request: EasyOCRRequest,
+    http_request: Request,
     user: dict = Depends(get_current_user),
     redis_client: redis.Redis = Depends(get_redis),
 ):
@@ -558,6 +597,9 @@ async def easyocr_route(
             image_bytes=image_bytes,
             user_id=user["user_id"],
             redis_client=redis_client,
+            live_session_token=str(
+                http_request.headers.get(LIVE_SESSION_TOKEN_HEADER, "") or ""
+            ).strip(),
         )
     except HTTPException as e:
         headers = None
@@ -572,6 +614,7 @@ async def easyocr_route(
 @app.post("/v1/vision/local-eye", response_model=HostedEyeResponse)
 async def hosted_eye_route(
     request: EasyOCRRequest,
+    http_request: Request,
     user: dict = Depends(get_current_user),
     redis_client: redis.Redis = Depends(get_redis),
 ):
@@ -594,6 +637,9 @@ async def hosted_eye_route(
             image_bytes=image_bytes,
             user_id=user["user_id"],
             redis_client=redis_client,
+            live_session_token=str(
+                http_request.headers.get(LIVE_SESSION_TOKEN_HEADER, "") or ""
+            ).strip(),
         )
     except HTTPException as e:
         headers = None

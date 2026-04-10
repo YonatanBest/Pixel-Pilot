@@ -16,6 +16,13 @@ export type MessageEntry = {
   final: boolean;
 };
 
+export type LiveStatus = {
+  level: 'idle' | 'info' | 'warning' | 'error';
+  code: string;
+  message: string;
+  source: string;
+};
+
 export type ActionUpdate = {
   action_id?: string;
   name?: string;
@@ -69,6 +76,7 @@ export type RuntimeSnapshot = {
   liveEnabled: boolean;
   liveVoiceActive: boolean;
   liveSessionState: string;
+  liveStatus?: LiveStatus;
   wakeWordEnabled: boolean;
   wakeWordState: string;
   wakeWordPhrase: string;

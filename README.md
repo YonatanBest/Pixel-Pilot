@@ -83,7 +83,7 @@ Minimal `backend/.env`:
 GEMINI_API_KEY=your_backend_key
 MONGODB_URI=your_mongodb_uri
 REDIS_URI=redis://localhost:6379
-JWT_SECRET=change_me
+JWT_SECRET=your_jwt_secret
 GOOGLE_CLIENT_ID=your_google_client_id
 GOOGLE_CLIENT_SECRET=your_google_client_secret
 GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback

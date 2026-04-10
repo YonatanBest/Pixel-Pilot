@@ -16,6 +16,8 @@ if not API_KEY:
     raise ValueError("Missing GEMINI_API_KEY in backend/.env")
 
 client = genai.Client(api_key=API_KEY)
+_PRIVATE_CONFIG_KEYS = {"_pixelpilot_require_live_session"}
+_PRIVATE_CONFIG_KEYS.add("_pixelpilot_live_session_token")
 
 
 class GenerationRequest(BaseModel):
@@ -92,7 +94,9 @@ async def generate_content(request: GenerationRequest):
     print(f"DEBUG: Processing request for model {request.model}")
     contents = _process_contents(request.contents)
 
-    config_data = request.config or {}
+    config_data = dict(request.config or {})
+    for key in _PRIVATE_CONFIG_KEYS:
+        config_data.pop(key, None)
     tools_config = config_data.pop("tools", None)
     real_tools = None
     if tools_config:

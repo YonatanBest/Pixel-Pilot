@@ -16,6 +16,7 @@ class RuntimeAdapter(QObject):
     live_audio_level_received = Signal(float)
     assistant_audio_level_received = Signal(float)
     live_availability_received = Signal(bool, str)
+    live_status_received = Signal(object)
     live_voice_active_received = Signal(bool)
     wake_word_state_received = Signal(str, str)
     wake_word_enabled_received = Signal(bool)
@@ -97,6 +98,32 @@ class RuntimeAdapter(QObject):
         if self.ui_state_store is not None:
             self.ui_state_store.set_live_availability(available, reason)
         self.live_availability_received.emit(bool(available), str(reason or ""))
+
+    def update_live_status(
+        self,
+        *,
+        level: str = "idle",
+        code: str = "",
+        message: str = "",
+        source: str = "",
+    ):
+        payload = {
+            "level": str(level or "idle"),
+            "code": str(code or ""),
+            "message": str(message or ""),
+            "source": str(source or ""),
+        }
+        if self.ui_state_store is not None:
+            self.ui_state_store.set_live_status(
+                level=payload["level"],
+                code=payload["code"],
+                message=payload["message"],
+                source=payload["source"],
+            )
+        self.live_status_received.emit(payload)
+
+    def clear_live_status(self):
+        self.update_live_status(level="idle", code="", message="", source="")
 
     def update_live_voice_active(self, active: bool):
         if self.ui_state_store is not None:

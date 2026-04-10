@@ -94,19 +94,16 @@ class ElectronShellProxy:
     def background_hidden(self) -> bool:
         return bool(self.state_store.backgroundHidden)
 
-    def prepare_for_screenshot(self) -> dict[str, bool]:
+    def prepare_for_screenshot(self) -> dict[str, object]:
         response = self.bridge_server.request_ui(
             "ui.prepareForScreenshot",
             {},
             timeout_s=10.0,
             allow_missing=True,
         )
-        return {
-            "restore_main_window": bool(response.get("restore_main_window")),
-            "restore_minimized_notch": bool(response.get("restore_minimized_notch")),
-        }
+        return dict(response or {})
 
-    def restore_after_screenshot(self, payload: dict[str, bool]) -> None:
+    def restore_after_screenshot(self, payload: dict[str, object]) -> None:
         self.bridge_server.request_ui(
             "ui.restoreAfterScreenshot",
             dict(payload or {}),

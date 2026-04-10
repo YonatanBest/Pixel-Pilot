@@ -29,6 +29,8 @@ class LocalCVEye:
         self._reader = None
         self.last_ocr_source = "local"
         self.last_ocr_device = "cpu"
+        self.last_result_count = 0
+        self.last_error = ""
 
     @property
     def reader(self):
@@ -55,12 +57,14 @@ class LocalCVEye:
         logger.info("Running local OCR...")
         self.last_ocr_source = "local"
         self.last_ocr_device = "cpu"
+        self.last_error = ""
         return self.reader.readtext(img)
 
     def _run_backend_eye(self, image_path: str):
         logger.info("Running backend eye...")
         self.last_ocr_source = "backend"
         self.last_ocr_device = "cpu"
+        self.last_error = ""
         with open(image_path, "rb") as image_file:
             image_bytes = image_file.read()
         response = get_backend_proxy_client().local_eye_elements(
@@ -98,11 +102,29 @@ class LocalCVEye:
         """
         backend_eye = self._should_use_backend_eye()
         if backend_eye:
-            if progress_callback:
-                progress_callback("Uploading screenshot for vision...")
-                progress_callback("Running backend eye...")
-                progress_callback("Applying backend eye results...")
-            return self._run_backend_eye(image_path)
+            try:
+                if progress_callback:
+                    progress_callback("Uploading screenshot to backend eye...")
+                    progress_callback("Waiting for backend eye response...")
+                backend_elements = self._run_backend_eye(image_path)
+                if progress_callback:
+                    progress_callback("Applying backend eye results...")
+                self.last_result_count = len(backend_elements)
+                if backend_elements:
+                    logger.info(
+                        "Backend eye request succeeded with %d element(s).",
+                        self.last_result_count,
+                    )
+                else:
+                    logger.warning("Backend eye request succeeded but returned 0 elements.")
+                return backend_elements
+            except Exception as exc:
+                self.last_result_count = 0
+                self.last_error = str(exc)
+                logger.error("Backend eye request failed: %s", exc)
+                if progress_callback:
+                    progress_callback("Backend eye request failed.")
+                raise RuntimeError(f"Backend eye request failed: {exc}") from exc
 
         import cv2
         img = cv2.imread(image_path)
@@ -175,6 +197,9 @@ class LocalCVEye:
                     elements.append(icon)
                     element_id += 1
 
+        self.last_result_count = len(elements)
+        self.last_error = ""
+        logger.info("Local eye pipeline produced %d element(s).", self.last_result_count)
         return elements
 
     def find_mystery_icons_sensitive(self, img, existing_text_boxes):

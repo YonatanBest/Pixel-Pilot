@@ -40,6 +40,46 @@ class MainController(QObject):
 
         self.gui_adapter.workspace_changed.connect(self.handle_workspace_changed)
 
+    @staticmethod
+    def _classify_live_status(
+        message: str,
+        *,
+        level: str,
+    ) -> dict[str, str]:
+        clean = str(message or "").strip()
+        lowered = clean.lower()
+        payload = {
+            "level": str(level or "info").strip().lower() or "info",
+            "code": "live_notice",
+            "message": clean,
+            "source": "live",
+        }
+        if not clean:
+            return {"level": "idle", "code": "", "message": "", "source": ""}
+        if "daily time limit exceeded" in lowered:
+            payload["code"] = "daily_limit_reached"
+            payload["source"] = "backend"
+        elif "expired or lost its backend lease" in lowered:
+            payload["code"] = "session_expired"
+            payload["source"] = "backend"
+        elif "lost backend lease connectivity" in lowered:
+            payload["code"] = "backend_connectivity_lost"
+            payload["source"] = "backend"
+        elif "active gemini live session" in lowered:
+            payload["code"] = "session_required"
+            payload["source"] = "backend"
+        elif "rate limit exceeded" in lowered:
+            payload["code"] = "rate_limited"
+            payload["source"] = "backend"
+        elif "uac prompt detected" in lowered:
+            payload["code"] = "uac_active"
+            payload["source"] = "uac"
+            if payload["level"] == "error":
+                payload["level"] = "info"
+        elif "increasing reasoning depth" in lowered:
+            payload["code"] = "reasoning_escalating"
+        return payload
+
     def mark_startup_phase(self, phase: str, *, status: str = "ok", detail: str = "") -> None:
         if phase in self._startup_logged_phases:
             return
@@ -794,6 +834,9 @@ class MainController(QObject):
 
     @Slot(str)
     def _handle_live_session_state(self, state: str):
+        normalized = str(state or "").strip().lower()
+        if normalized in {"connecting", "listening", "thinking", "waiting", "acting"}:
+            self.gui_adapter.clear_live_status()
         self.gui_adapter.update_live_session_state(state)
 
     @Slot(object)
@@ -809,11 +852,17 @@ class MainController(QObject):
 
     @Slot(str)
     def _handle_live_error(self, message: str):
+        self.gui_adapter.update_live_status(
+            **self._classify_live_status(message, level="error")
+        )
         self.gui_adapter.add_error_message(message)
 
     @Slot(str)
     def _handle_live_status(self, message: str):
         if str(message or "").strip():
+            self.gui_adapter.update_live_status(
+                **self._classify_live_status(message, level="info")
+            )
             self.gui_adapter.add_system_message(str(message))
 
     @Slot(float)

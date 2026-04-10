@@ -81,6 +81,18 @@ class ElectronBridgeAdapter(RuntimeAdapter):
             },
         )
 
+    def update_live_status(self, *, level: str = "idle", code: str = "", message: str = "", source: str = ""):
+        super().update_live_status(level=level, code=code, message=message, source=source)
+        self.bridge_server.publish_event(
+            "live.status",
+            {
+                "level": str(level or "idle"),
+                "code": str(code or ""),
+                "message": str(message or ""),
+                "source": str(source or ""),
+            },
+        )
+
     def update_live_voice_active(self, active: bool):
         super().update_live_voice_active(active)
         self.bridge_server.publish_event(
