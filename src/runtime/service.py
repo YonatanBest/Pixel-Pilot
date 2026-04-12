@@ -348,7 +348,7 @@ class ElectronRuntimeService(QObject):
 
     def _auth_logout(self) -> dict[str, Any]:
         auth_state = logout_all()
-        self.controller.refresh_live_runtime()
         self.bridge_server.publish_event("auth.changed", {"auth": auth_state})
         self.bridge_server.publish_state_updated()
+        QTimer.singleShot(0, self.controller.refresh_live_runtime)
         return {"auth": auth_state}
