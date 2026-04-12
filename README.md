@@ -50,22 +50,29 @@ Use the Windows installer and launch PixelPilot.
 
 ### Local desktop development
 
-Create a root `.env` from `env.example`:
+1. **Configure Environment Variables**
+   Create a root `.env` from `env.example`:
+   ```env
+   GEMINI_API_KEY=your_api_key_here
+   BACKEND_URL=http://localhost:8000
+   WEB_URL=http://localhost:5173
+   ```
 
-```env
-GEMINI_API_KEY=your_api_key_here
-BACKEND_URL=http://localhost:8000
-WEB_URL=http://localhost:5173
-```
+2. **Setup Python Runtime**
+   The desktop app requires a local Python virtual environment in the root directory:
+   ```powershell
+   python -m venv venv
+   .\venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
 
-Then run:
-
-```bash
-cd desktop
-npm install
-npm run build:runtime
-npm start
-```
+3. **Install and Build Desktop App**
+   ```powershell
+   cd desktop
+   npm install
+   npm run build
+   npm start
+   ```
 
 ### Optional backend development
 
