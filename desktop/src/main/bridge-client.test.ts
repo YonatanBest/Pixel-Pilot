@@ -36,6 +36,10 @@ describe('bridge-client transport decoding', () => {
     expect(parseControlEnvelopeData(Buffer.from(JSON.stringify(payload), 'utf-8'))).toEqual(payload);
   });
 
+  it('rejects malformed runtime envelopes', () => {
+    expect(parseControlEnvelopeData(Buffer.from(JSON.stringify({ kind: 'event' }), 'utf-8'))).toBeNull();
+  });
+
   it('converts array buffers into node buffers', () => {
     const buffer = rawDataToBuffer(Uint8Array.from([1, 2, 3, 4]).buffer);
     expect(buffer).not.toBeNull();
@@ -54,6 +58,14 @@ describe('bridge-client transport decoding', () => {
     expect(frame.height).toBe(200);
     expect(frame.timestamp).toBe(1234);
     expect(frame.dataUrl).toBe(`data:image/jpeg;base64,${jpeg.toString('base64')}`);
+  });
+
+  it('rejects malformed sidecar frames before reading metadata', () => {
+    expect(() => parseSidecarFrame(Buffer.from([1, 2, 3]))).toThrow('Sidecar frame is too small.');
+
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(1024, 0);
+    expect(() => parseSidecarFrame(header)).toThrow('Sidecar frame metadata is truncated.');
   });
 
   it('waits for the control socket to connect before sending commands', async () => {
@@ -106,6 +118,29 @@ describe('bridge-client transport decoding', () => {
 
     await expect(client.sendCommand('live.stop')).rejects.toThrow(
       'Runtime bridge disconnected while waiting for a response.'
+    );
+  });
+
+  it('rejects in-flight commands when the runtime does not answer before timeout', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    activeServers.add(server);
+    const port = (server.address() as { port: number }).port;
+    const client = new RuntimeBridgeClient(
+      `ws://127.0.0.1:${port}/control?token=test`,
+      `ws://127.0.0.1:${port}/sidecar?token=test`,
+      { commandTimeoutMs: 10 }
+    );
+    activeClients.add(client);
+
+    server.on('connection', () => {
+      // Leave the control socket open but never send a response.
+    });
+
+    client.start();
+    await once(client, 'connected');
+
+    await expect(client.sendCommand('live.stop')).rejects.toThrow(
+      "Runtime bridge command 'live.stop' timed out"
     );
   });
 

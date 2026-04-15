@@ -61,6 +61,7 @@ def run_doctor(
     checks = [
         _check_direct_mode(),
         _check_backend(),
+        _check_settings(agent=agent or getattr(controller, "agent", None)),
         _check_wakeword_assets(),
         _check_audio_devices(),
         _check_uac_tasks(),
@@ -145,6 +146,42 @@ def _check_backend() -> DoctorCheck:
             summary=f"Backend health check failed: {exc}",
             details={"url": target},
         )
+
+
+def _check_settings(*, agent: Any = None) -> DoctorCheck:
+    settings = getattr(agent, "runtime_settings", None) if agent is not None else None
+    if settings is None:
+        try:
+            from settings import RuntimeSettings
+
+            settings = RuntimeSettings.load(project_root=Config.PROJECT_ROOT)
+        except Exception as exc:
+            return DoctorCheck(
+                name="settings",
+                status="warn",
+                summary=f"Runtime settings could not be loaded: {exc}",
+            )
+    sources = [str(path) for path in list(getattr(settings, "sources", []) or [])]
+    if hasattr(settings, "validation_error_dicts"):
+        try:
+            errors = list(settings.validation_error_dicts())
+        except Exception:
+            errors = []
+    else:
+        errors = []
+    if errors:
+        return DoctorCheck(
+            name="settings",
+            status="warn",
+            summary=f"Loaded {len(sources)} settings file(s) with {len(errors)} validation warning(s).",
+            details={"sources": sources, "validationErrors": errors},
+        )
+    return DoctorCheck(
+        name="settings",
+        status="ok",
+        summary=f"Loaded {len(sources)} settings file(s) without validation errors.",
+        details={"sources": sources},
+    )
 
 
 def _check_wakeword_assets() -> DoctorCheck:

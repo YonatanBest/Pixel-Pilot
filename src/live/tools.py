@@ -10,6 +10,8 @@ import pyautogui
 
 from config import Config, OperationMode
 from live.broker import LiveActionBroker
+from live.tool_specs import ToolSpec, ToolValidationError, build_tool_specs, normalize_tool_result
+from runtime.perf import slow_operation
 from settings import PermissionRuleSet
 from tool_policy import HookOverride, PermissionMode, ToolPolicyEvaluator
 from uac.approval import resolve_uac_allow_decision
@@ -38,6 +40,12 @@ class LiveToolRegistry:
         "wait_for_action",
         "disconnect_live_session",
         "request_reasoning_escalation",
+    }
+    CONCURRENCY_SAFE_TOOL_NAMES = {
+        "uac_get_state",
+        "uac_get_progress",
+        "get_action_status",
+        "wait_for_action",
     }
     MUTATING_TOOL_NAMES = {
         "mouse_click",
@@ -97,6 +105,7 @@ class LiveToolRegistry:
             required_modes=self.REQUIRED_PERMISSION_MODES,
             mutating_tools=self.MUTATING_TOOL_NAMES,
         )
+        self._tool_specs = self._build_tool_specs()
         self._guidance_mode = False
         self.last_snapshot_summary: Optional[dict[str, Any]] = None
         self.last_capture_summary: Optional[dict[str, Any]] = None
@@ -104,6 +113,20 @@ class LiveToolRegistry:
 
     def set_guidance_mode(self, enabled: bool) -> None:
         self._guidance_mode = bool(enabled)
+
+    def refresh_runtime_settings(self) -> None:
+        self.runtime_settings = getattr(self.agent, "runtime_settings", None)
+        self.extension_manager = getattr(self.agent, "extension_manager", None)
+        rule_set = (
+            getattr(self.runtime_settings, "tool_policy", None)
+            if self.runtime_settings is not None
+            else None
+        ) or PermissionRuleSet()
+        self._policy = ToolPolicyEvaluator(
+            rule_set=rule_set,
+            required_modes=self.REQUIRED_PERMISSION_MODES,
+            mutating_tools=self.MUTATING_TOOL_NAMES,
+        )
 
     def _mode_key(self) -> str:
         mode = getattr(self.agent, "mode", None)
@@ -161,6 +184,15 @@ class LiveToolRegistry:
             "error": "user_cancelled",
             "message": "Action cancelled by user.",
         }
+
+    def _build_tool_specs(self) -> dict[str, ToolSpec]:
+        return build_tool_specs(
+            list(self.declarations),
+            required_modes=self.REQUIRED_PERMISSION_MODES,
+            read_only_tools=self.READ_ONLY_TOOL_NAMES,
+            mutating_tools=self.MUTATING_TOOL_NAMES,
+            concurrency_safe_tools=self.CONCURRENCY_SAFE_TOOL_NAMES,
+        )
 
     @property
     def declarations(self) -> list[dict[str, Any]]:
@@ -394,7 +426,7 @@ class LiveToolRegistry:
         ]
 
     def get_declarations(self, *, read_only_only: bool = False) -> list[dict[str, Any]]:
-        all_declarations = list(self.declarations)
+        all_declarations = [spec.declaration() for spec in self._tool_specs.values()]
         if self.extension_manager is not None:
             try:
                 all_declarations.extend(
@@ -446,7 +478,24 @@ class LiveToolRegistry:
             "error": error,
         }
         payload.update(extra)
-        return payload
+        return self._normalize_tool_result(tool_name, payload)
+
+    def _normalize_tool_result(self, tool_name: str, result: Any) -> dict[str, Any]:
+        spec = self._tool_specs.get(str(tool_name or "").strip())
+        max_chars = int(getattr(spec, "max_result_chars", 24_000) or 24_000)
+        return normalize_tool_result(tool_name, result, max_result_chars=max_chars)
+
+    @staticmethod
+    def _policy_payload(decision) -> dict[str, Any]:
+        return {
+            "decision": decision.decision,
+            "reason": decision.reason,
+            "matched_rule": decision.matched_rule,
+            "matched_rule_source": getattr(decision, "matched_rule_source", ""),
+            "subject": getattr(decision, "subject", ""),
+            "required_mode": getattr(decision, "required_mode", ""),
+            "active_mode": getattr(decision, "active_mode", ""),
+        }
 
     @staticmethod
     def _guidance_mode_rejection(tool_name: str) -> dict[str, Any]:
@@ -468,6 +517,7 @@ class LiveToolRegistry:
         payload = dict(args or {})
         extension_plan = None
         extension_spec = None
+        builtin_spec = None
         if self.extension_manager is not None:
             try:
                 extension_plan = self.extension_manager.prepare_tool_invocation(tool_name, payload)
@@ -479,6 +529,27 @@ class LiveToolRegistry:
                 if str(extension_plan.message or "").strip() and self.on_status_note is not None:
                     self.on_status_note(str(extension_plan.message))
 
+        if extension_spec is None:
+            builtin_spec = self._tool_specs.get(tool_name)
+            if builtin_spec is None:
+                return self._tool_response(
+                    tool_name,
+                    success=False,
+                    message=f"Unknown tool: {tool_name}",
+                    error="unknown_tool",
+                    code="unknown_tool",
+                )
+            try:
+                payload = builtin_spec.validate_args(payload)
+            except ToolValidationError as exc:
+                return self._tool_response(
+                    tool_name,
+                    success=False,
+                    message=str(exc),
+                    error="invalid_args",
+                    code="invalid_args",
+                )
+
         if extension_spec is None and self._guidance_mode and tool_name in self.MUTATING_TOOL_NAMES:
             return self._guidance_mode_rejection(tool_name)
 
@@ -488,7 +559,11 @@ class LiveToolRegistry:
                 decision=str(extension_plan.permission_decision).strip().lower(),
                 reason=str(extension_plan.permission_reason or "").strip(),
             )
-        required_mode = extension_spec.permission_mode if extension_spec is not None else None
+        required_mode = (
+            extension_spec.permission_mode
+            if extension_spec is not None
+            else builtin_spec.permission_mode if builtin_spec is not None else None
+        )
         decision, _policy_context = self._policy.authorize(
             tool_name=tool_name,
             tool_input=payload,
@@ -505,11 +580,8 @@ class LiveToolRegistry:
                 success=False,
                 message=decision.reason or f"Tool '{tool_name}' was denied.",
                 error="permission_denied",
-                policy={
-                    "decision": decision.decision,
-                    "reason": decision.reason,
-                    "matched_rule": decision.matched_rule,
-                },
+                code="permission_denied",
+                policy=self._policy_payload(decision),
             )
         if decision.requires_prompt:
             confirmation_result = self._confirm_tool_action(
@@ -518,21 +590,20 @@ class LiveToolRegistry:
                 reason=decision.reason,
             )
             if confirmation_result is not None:
-                confirmation_result["policy"] = {
-                    "decision": decision.decision,
-                    "reason": decision.reason,
-                    "matched_rule": decision.matched_rule,
-                }
-                return confirmation_result
+                confirmation_result["policy"] = self._policy_payload(decision)
+                return self._normalize_tool_result(tool_name, confirmation_result)
 
         if extension_spec is not None:
             if extension_spec.permission_mode == PermissionMode.READ_ONLY:
-                return self._handle_extension_tool(
-                    {
-                        "__tool_name__": tool_name,
-                        "__tool_args__": payload,
-                    },
-                    None,
+                return self._normalize_tool_result(
+                    tool_name,
+                    self._handle_extension_tool(
+                        {
+                            "__tool_name__": tool_name,
+                            "__tool_args__": payload,
+                        },
+                        None,
+                    ),
                 )
             return self._queue_action(
                 tool_name,
@@ -572,23 +643,24 @@ class LiveToolRegistry:
         if tool_name == "uac_get_progress":
             return self._handle_uac_get_progress()
         if tool_name == "get_action_status":
-            return self.broker.get_action_status(str(payload.get("action_id") or ""))
+            return self._normalize_tool_result(
+                tool_name,
+                self.broker.get_action_status(str(payload.get("action_id") or "")),
+            )
         if tool_name == "wait_for_action":
-            return self.broker.wait_for_action(
-                str(payload.get("action_id") or ""),
-                int(payload.get("timeout_ms") or 1000),
+            return self._normalize_tool_result(
+                tool_name,
+                self.broker.wait_for_action(
+                    str(payload.get("action_id") or ""),
+                    int(payload.get("timeout_ms") or 1000),
+                ),
             )
         if tool_name == "disconnect_live_session":
             return self._handle_disconnect_live_session(payload)
         if tool_name == "request_reasoning_escalation":
             return self._handle_request_reasoning_escalation(payload)
 
-        return self._tool_response(
-            tool_name,
-            success=False,
-            message=f"Unknown tool: {tool_name}",
-            error="unknown_tool",
-        )
+        return self._tool_response(tool_name, success=False, message=f"Unknown tool: {tool_name}", error="unknown_tool")
 
     def _handle_request_reasoning_escalation(self, args: dict[str, Any]) -> dict[str, Any]:
         target_level = str(args.get("target_level") or "").strip().lower()
@@ -623,18 +695,21 @@ class LiveToolRegistry:
         submitted = self.broker.submit(
             name=name,
             args=args,
-            handler=lambda *, cancel_event: handler(args, cancel_event),
+            handler=lambda *, cancel_event: self._normalize_tool_result(
+                name,
+                handler(args, cancel_event),
+            ),
         )
         action_id = str(submitted.get("action_id") or "").strip()
         wait_ms = int(Config.LIVE_ACTION_RESPONSE_WAIT_MS)
         if not action_id or wait_ms <= 0:
-            return submitted
+            return self._normalize_tool_result(name, submitted)
 
         settled = self.broker.wait_for_action(action_id, wait_ms)
         settled_status = str(settled.get("status") or "").strip().lower()
         if bool(settled.get("done")) or settled_status != "queued":
-            return settled
-        return submitted
+            return self._normalize_tool_result(name, settled)
+        return self._normalize_tool_result(name, submitted)
 
     def _handle_extension_tool(self, args: dict[str, Any], cancel_event) -> dict[str, Any]:
         if cancel_event is not None and cancel_event.is_set():
@@ -953,12 +1028,13 @@ class LiveToolRegistry:
 
     def _handle_get_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
         goal_terms = [str(term).strip() for term in (args.get("goal_terms") or []) if str(term).strip()]
-        snapshot = ui_automation.get_snapshot(
-            self.agent.active_workspace,
-            self._desktop_manager,
-            max(Config.UIA_MAX_ELEMENTS * 3, 240),
-            goal_terms or self.agent._goal_terms(),
-        )
+        with slow_operation("live.ui_get_snapshot", threshold_ms=400, workspace=self.agent.active_workspace):
+            snapshot = ui_automation.get_snapshot(
+                self.agent.active_workspace,
+                self._desktop_manager,
+                max(Config.UIA_MAX_ELEMENTS * 3, 240),
+                goal_terms or self.agent._goal_terms(),
+            )
         summary = self._summarize_snapshot(snapshot)
         self.agent.current_blind_snapshot = snapshot
         self.last_snapshot_summary = summary
@@ -970,14 +1046,15 @@ class LiveToolRegistry:
         )
 
     def _handle_list_windows(self, args: dict[str, Any]) -> dict[str, Any]:
-        result = ui_automation.list_windows(
-            self.agent.active_workspace,
-            self._desktop_manager,
-            title_contains=str(args.get("title_contains") or ""),
-            process_name=str(args.get("process_name") or ""),
-            visible_only=bool(args.get("visible_only", False)),
-            max_windows=int(args.get("max_windows") or Config.UIA_MAX_WINDOWS),
-        )
+        with slow_operation("live.ui_list_windows", threshold_ms=400, workspace=self.agent.active_workspace):
+            result = ui_automation.list_windows(
+                self.agent.active_workspace,
+                self._desktop_manager,
+                title_contains=str(args.get("title_contains") or ""),
+                process_name=str(args.get("process_name") or ""),
+                visible_only=bool(args.get("visible_only", False)),
+                max_windows=int(args.get("max_windows") or Config.UIA_MAX_WINDOWS),
+            )
         ok = result.get("status") == "ok"
         return self._tool_response(
             "ui_list_windows",
@@ -991,19 +1068,20 @@ class LiveToolRegistry:
         )
 
     def _handle_read_text(self, args: dict[str, Any]) -> dict[str, Any]:
-        result = ui_automation.read_text(
-            self.agent.active_workspace,
-            self._desktop_manager,
-            target=str(args.get("target") or "auto"),
-            ui_element_id=str(args.get("ui_element_id") or "").strip() or None,
-            max_chars=int(args.get("max_chars") or Config.UIA_TEXT_MAX_CHARS),
-            use_ocr_fallback=bool(args.get("use_ocr_fallback", Config.UIA_TEXT_USE_OCR_FALLBACK_DEFAULT)),
-            force_ocr=bool(args.get("force_ocr", False)),
-            ocr_min_chars=int(args.get("ocr_min_chars") or Config.UIA_TEXT_OCR_MIN_CHARS),
-            ocr_max_noise_ratio=float(
-                args.get("ocr_max_noise_ratio") or Config.UIA_TEXT_OCR_MAX_NOISE_RATIO
-            ),
-        )
+        with slow_operation("live.ui_read_text", threshold_ms=400, workspace=self.agent.active_workspace):
+            result = ui_automation.read_text(
+                self.agent.active_workspace,
+                self._desktop_manager,
+                target=str(args.get("target") or "auto"),
+                ui_element_id=str(args.get("ui_element_id") or "").strip() or None,
+                max_chars=int(args.get("max_chars") or Config.UIA_TEXT_MAX_CHARS),
+                use_ocr_fallback=bool(args.get("use_ocr_fallback", Config.UIA_TEXT_USE_OCR_FALLBACK_DEFAULT)),
+                force_ocr=bool(args.get("force_ocr", False)),
+                ocr_min_chars=int(args.get("ocr_min_chars") or Config.UIA_TEXT_OCR_MIN_CHARS),
+                ocr_max_noise_ratio=float(
+                    args.get("ocr_max_noise_ratio") or Config.UIA_TEXT_OCR_MAX_NOISE_RATIO
+                ),
+            )
         ok = result.get("status") == "ok"
         return self._tool_response(
             "ui_read_text",
@@ -1022,7 +1100,8 @@ class LiveToolRegistry:
                 active_action=self.broker.current_action_payload(),
             )
 
-        screenshot_path = self.agent.capture_screen()
+        with slow_operation("live.capture_screen", threshold_ms=500, workspace=self.agent.active_workspace):
+            screenshot_path = self.agent.capture_screen()
         if not screenshot_path:
             return self._tool_response(
                 "capture_screen",
@@ -1067,7 +1146,8 @@ class LiveToolRegistry:
                 active_action=self.broker.current_action_payload(),
             )
 
-        elements, _ref_sheet = self.agent.capture_and_detail()
+        with slow_operation("live.capture_and_detail", threshold_ms=500, workspace=self.agent.active_workspace):
+            elements, _ref_sheet = self.agent.capture_and_detail()
         screenshot_path = Config.SCREENSHOT_PATH if os.path.exists(Config.SCREENSHOT_PATH) else None
         debug_path = Config.DEBUG_PATH if os.path.exists(Config.DEBUG_PATH) else None
         ref_path = Config.REF_PATH if os.path.exists(Config.REF_PATH) else None

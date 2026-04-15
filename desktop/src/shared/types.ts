@@ -104,6 +104,7 @@ export type RuntimeSnapshot = {
   latestSessionContext: SessionContextSummary;
   extensions: ExtensionSummary;
   settingsSources: string[];
+  settingsValidationErrors?: Record<string, string>[];
   sessionDirectory: string;
   lastDoctorReport: DoctorReport | Record<string, never>;
   bridgeStatus: BridgeStatus;

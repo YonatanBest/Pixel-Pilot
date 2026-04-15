@@ -9,6 +9,7 @@ from uuid import uuid4
 
 BRIDGE_PROTOCOL_VERSION = 1
 SIDE_CAR_HEADER_STRUCT = struct.Struct("!I")
+SIDE_CAR_MAX_HEADER_BYTES = 256 * 1024
 VALID_ENVELOPE_KINDS = {"command", "event", "request", "response", "error"}
 
 
@@ -101,6 +102,8 @@ def unpack_sidecar_frame(packet: bytes) -> tuple[dict[str, Any], bytes]:
         raise ValueError("Sidecar frame packet is too small.")
 
     (header_size,) = SIDE_CAR_HEADER_STRUCT.unpack(blob[: SIDE_CAR_HEADER_STRUCT.size])
+    if int(header_size) > SIDE_CAR_MAX_HEADER_BYTES:
+        raise ValueError("Sidecar frame header is too large.")
     meta_start = SIDE_CAR_HEADER_STRUCT.size
     meta_end = meta_start + int(header_size)
     if len(blob) < meta_end:

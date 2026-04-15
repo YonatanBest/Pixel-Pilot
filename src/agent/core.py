@@ -81,6 +81,25 @@ class AgentOrchestrator:
         os.makedirs(Config.MEDIA_DIR, exist_ok=True)
         self.log(f"AI agent initialized in {self.mode.value.upper()} mode")
 
+    def reload_runtime_settings(self) -> RuntimeSettings:
+        self.runtime_settings = RuntimeSettings.load(project_root=Config.PROJECT_ROOT)
+        if self.runtime_settings.session.enabled:
+            if self.session_store is None:
+                self.session_store = SessionStore(
+                    workspace_root=Config.PROJECT_ROOT,
+                    settings=self.runtime_settings.session,
+                )
+            else:
+                self.session_store.settings = self.runtime_settings.session
+        else:
+            self.session_store = None
+
+        self.extension_manager = ExtensionManager(
+            settings=self.runtime_settings.extensions,
+            project_root=Config.PROJECT_ROOT,
+        )
+        return self.runtime_settings
+
     @property
     def action_executor(self):
         if self._action_executor is None:

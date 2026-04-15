@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from config import Config
 from tool_policy import PermissionMode, permission_mode_from_label
+from runtime.perf import slow_operation
 
 from .types import (
     ExtensionInvocationPlan,
@@ -16,6 +19,11 @@ from .types import (
     PluginManifest,
     PluginToolDefinition,
 )
+
+
+EXTENSION_STDOUT_MAX_CHARS = 24_000
+EXTENSION_STDERR_MAX_CHARS = 8_000
+MCP_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 class ExtensionManager:
@@ -34,9 +42,11 @@ class ExtensionManager:
         self._tool_specs: dict[str, ExtensionToolSpec] = {}
         self._plugins: list[PluginManifest] = []
         self._mcp_servers: list[McpServerConfig] = []
+        self._validation_errors: list[str] = []
         self.reload()
 
     def reload(self) -> None:
+        self._validation_errors = []
         self._tool_specs = {}
         self._plugins = self._load_plugins()
         self._mcp_servers = self._load_mcp_servers()
@@ -45,13 +55,14 @@ class ExtensionManager:
 
     def summary(self) -> dict[str, Any]:
         return {
-            "status": "ready",
+            "status": "warn" if self._validation_errors else "ready",
             "pluginCount": len(self._plugins),
             "mcpServerCount": len(self._mcp_servers),
             "toolCount": len(self._tool_specs),
             "pluginIds": [manifest.plugin_id for manifest in self._plugins],
             "mcpServerNames": [server.name for server in self._mcp_servers],
             "toolNames": sorted(self._tool_specs),
+            "validationErrors": list(self._validation_errors),
         }
 
     def get_tool_spec(self, qualified_name: str) -> ExtensionToolSpec | None:
@@ -160,32 +171,62 @@ class ExtensionManager:
     def _load_plugins(self) -> list[PluginManifest]:
         manifests: list[PluginManifest] = []
         directories = self.settings.get("pluginDirectories") or []
+        if isinstance(directories, str):
+            directories = [directories]
+        if not isinstance(directories, list):
+            self._validation_errors.append("extensions.pluginDirectories must be an array or string.")
+            directories = []
         for raw in directories:
             base = _resolve_path(raw, self.project_root)
             if not base.exists():
+                self._validation_errors.append(f"Plugin directory does not exist: {base}")
                 continue
             candidates = [base] if _manifest_path_for(base) else [item for item in base.iterdir() if item.is_dir()]
             for candidate in candidates:
                 manifest_path = _manifest_path_for(candidate)
                 if manifest_path is None:
                     continue
-                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                try:
+                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    self._validation_errors.append(f"Invalid plugin manifest {manifest_path}: {exc}")
+                    continue
+                if not isinstance(payload, dict):
+                    self._validation_errors.append(f"Plugin manifest must be an object: {manifest_path}")
+                    continue
                 hooks = _normalize_hooks(payload.get("hooks") or {})
                 tools = []
                 for tool_payload in list(payload.get("tools") or []):
+                    if not isinstance(tool_payload, dict):
+                        self._validation_errors.append(f"Skipping non-object tool in {manifest_path}")
+                        continue
                     command = _normalize_command(tool_payload.get("command"))
                     if not command:
+                        self._validation_errors.append(
+                            f"Skipping plugin tool without a command in {manifest_path}"
+                        )
                         continue
-                    tool = PluginToolDefinition.from_payload(
-                        {
-                            **dict(tool_payload or {}),
-                            "command": command,
-                            "parameters": _normalize_schema(tool_payload.get("parameters") or {}),
-                        }
-                    )
+                    try:
+                        tool = PluginToolDefinition.from_payload(
+                            {
+                                **dict(tool_payload or {}),
+                                "command": command,
+                                "parameters": _normalize_schema(tool_payload.get("parameters") or {}),
+                            }
+                        )
+                    except Exception as exc:
+                        self._validation_errors.append(
+                            f"Skipping invalid plugin tool in {manifest_path}: {exc}"
+                        )
+                        continue
                     if tool.name:
                         tools.append(tool)
+                    else:
+                        self._validation_errors.append(
+                            f"Skipping plugin tool without a name in {manifest_path}"
+                        )
                 if not tools:
+                    self._validation_errors.append(f"Plugin manifest has no runnable tools: {manifest_path}")
                     continue
                 manifests.append(
                     PluginManifest(
@@ -199,15 +240,27 @@ class ExtensionManager:
 
     def _load_mcp_servers(self) -> list[McpServerConfig]:
         servers: list[McpServerConfig] = []
-        raw_servers = dict(self.settings.get("mcpServers") or {})
+        configured_servers = self.settings.get("mcpServers") or {}
+        if not isinstance(configured_servers, dict):
+            self._validation_errors.append("extensions.mcpServers must be an object.")
+            configured_servers = {}
+        raw_servers = dict(configured_servers)
         for name, payload in raw_servers.items():
+            if not isinstance(payload, dict):
+                self._validation_errors.append(f"MCP server '{name}' configuration must be an object.")
+                continue
             body = dict(payload or {})
             command = _normalize_command(body.get("command"))
             if not command:
+                self._validation_errors.append(f"MCP server '{name}' is missing a command.")
                 continue
+            raw_tool_modes = body.get("toolPermissionModes") or {}
+            if not isinstance(raw_tool_modes, dict):
+                self._validation_errors.append(f"MCP server '{name}' toolPermissionModes must be an object.")
+                raw_tool_modes = {}
             tool_modes = {
                 str(tool_name): permission_mode_from_label(mode)
-                for tool_name, mode in dict(body.get("toolPermissionModes") or {}).items()
+                for tool_name, mode in dict(raw_tool_modes).items()
             }
             servers.append(
                 McpServerConfig(
@@ -243,7 +296,12 @@ class ExtensionManager:
 
     def _register_mcp_tools(self) -> None:
         for server in self._mcp_servers:
-            for tool in self._mcp_list_tools(server):
+            try:
+                tools = self._mcp_list_tools(server)
+            except Exception as exc:
+                self._validation_errors.append(f"MCP server '{server.name}' discovery failed: {exc}")
+                continue
+            for tool in tools:
                 tool_name = str(tool.get("name") or "").strip()
                 if not tool_name:
                     continue
@@ -270,28 +328,29 @@ class ExtensionManager:
         manifest = spec.plugin_manifest
         if tool is None or manifest is None:
             raise RuntimeError("Plugin tool metadata is incomplete.")
-        cwd = _resolve_path(tool.cwd, manifest.root_dir) if tool.cwd else manifest.root_dir
+        cwd = _resolve_path_within(tool.cwd, manifest.root_dir, "plugin tool cwd") if tool.cwd else manifest.root_dir
         env = dict(os.environ)
         env.update(tool.env)
-        completed = subprocess.run(
-            tool.command,
-            input=json.dumps(
-                {
-                    "toolName": spec.qualified_name,
-                    "input": dict(args or {}),
-                },
-                ensure_ascii=True,
-            ),
-            text=True,
-            capture_output=True,
-            cwd=str(cwd),
-            env=env,
-            timeout=max(1.0, tool.timeout_ms / 1000.0),
-            check=False,
-        )
+        with slow_operation("extension.plugin_tool", threshold_ms=500, tool=spec.qualified_name):
+            completed = subprocess.run(
+                tool.command,
+                input=json.dumps(
+                    {
+                        "toolName": spec.qualified_name,
+                        "input": dict(args or {}),
+                    },
+                    ensure_ascii=True,
+                ),
+                text=True,
+                capture_output=True,
+                cwd=str(cwd),
+                env=env,
+                timeout=max(1.0, tool.timeout_ms / 1000.0),
+                check=False,
+            )
         if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.strip() or f"exit {completed.returncode}")
-        parsed = _maybe_parse_json(completed.stdout)
+            raise RuntimeError(_limit_text(completed.stderr, EXTENSION_STDERR_MAX_CHARS).strip() or f"exit {completed.returncode}")
+        parsed = _maybe_parse_json(_limit_text(completed.stdout, EXTENSION_STDOUT_MAX_CHARS))
         if isinstance(parsed, dict):
             parsed.setdefault("tool_name", spec.qualified_name)
             parsed.setdefault("ok", bool(parsed.get("success", True)))
@@ -353,15 +412,16 @@ class ExtensionManager:
         commands = list(manifest.hooks.get(hook_name) or [])
         merged: dict[str, Any] = {}
         for command in commands:
-            completed = subprocess.run(
-                command,
-                input=json.dumps(payload, ensure_ascii=True),
-                text=True,
-                capture_output=True,
-                cwd=str(manifest.root_dir),
-                timeout=10.0,
-                check=False,
-            )
+            with slow_operation("extension.hook", threshold_ms=500, hook=hook_name):
+                completed = subprocess.run(
+                    command,
+                    input=json.dumps(payload, ensure_ascii=True),
+                    text=True,
+                    capture_output=True,
+                    cwd=str(manifest.root_dir),
+                    timeout=10.0,
+                    check=False,
+                )
             if completed.returncode != 0:
                 continue
             parsed = _maybe_parse_json(completed.stdout)
@@ -373,6 +433,16 @@ class ExtensionManager:
 def _resolve_path(raw: Any, root: Path) -> Path:
     path = Path(str(raw or "").strip()).expanduser()
     return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def _resolve_path_within(raw: Any, root: Path, label: str) -> Path:
+    base = root.resolve()
+    resolved = _resolve_path(raw, base)
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise RuntimeError(f"{label} must stay inside {base}: {resolved}") from exc
+    return resolved
 
 
 def _manifest_path_for(path: Path) -> Path | None:
@@ -443,7 +513,7 @@ def _maybe_parse_json(text: str) -> Any:
 def _mcp_request(server: McpServerConfig, *, method: str, params: dict[str, Any]) -> dict[str, Any]:
     env = dict(os.environ)
     env.update(server.env)
-    cwd = _resolve_path(server.cwd, Path(Config.PROJECT_ROOT)) if server.cwd else None
+    cwd = _resolve_path_within(server.cwd, Path(Config.PROJECT_ROOT), "MCP server cwd") if server.cwd else None
     process = subprocess.Popen(
         server.command,
         stdin=subprocess.PIPE,
@@ -454,30 +524,31 @@ def _mcp_request(server: McpServerConfig, *, method: str, params: dict[str, Any]
         env=env,
     )
     try:
-        _mcp_send(
-            process,
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "pixelpilot", "version": "0.1"},
+        with slow_operation("extension.mcp_request", threshold_ms=500, server=server.name, method=method):
+            _mcp_send(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "pixelpilot", "version": "0.1"},
+                    },
                 },
-            },
-        )
-        _mcp_read(process)
-        _mcp_send(
-            process,
-            {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": method,
-                "params": dict(params),
-            },
-        )
-        response = _mcp_read(process)
+            )
+            _mcp_read_with_timeout(process, MCP_REQUEST_TIMEOUT_SECONDS)
+            _mcp_send(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": method,
+                    "params": dict(params),
+                },
+            )
+            response = _mcp_read_with_timeout(process, MCP_REQUEST_TIMEOUT_SECONDS)
         if "error" in response:
             raise RuntimeError(str(response.get("error")))
         result = response.get("result")
@@ -532,3 +603,35 @@ def _mcp_read(process: subprocess.Popen[bytes]) -> dict[str, Any]:
     payload = process.stdout.read(content_length)
     parsed = json.loads(payload.decode("utf-8"))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _mcp_read_with_timeout(process: subprocess.Popen[bytes], timeout_seconds: float) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    error: list[BaseException] = []
+
+    def _reader() -> None:
+        nonlocal result
+        try:
+            result = _mcp_read(process)
+        except BaseException as exc:  # noqa: BLE001
+            error.append(exc)
+
+    thread = threading.Thread(target=_reader, name="PixelPilotMcpRead", daemon=True)
+    thread.start()
+    thread.join(max(0.1, float(timeout_seconds or MCP_REQUEST_TIMEOUT_SECONDS)))
+    if thread.is_alive():
+        try:
+            process.kill()
+        except Exception:
+            pass
+        raise TimeoutError("MCP server response timed out.")
+    if error:
+        raise error[0]
+    return result
+
+
+def _limit_text(value: str, max_chars: int) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 32)].rstrip() + f"... [truncated {len(text) - max_chars + 32} chars]"

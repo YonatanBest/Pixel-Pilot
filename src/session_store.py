@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -9,6 +10,15 @@ from pathlib import Path
 from typing import Any
 
 from settings import SessionSettings, pixelpilot_home
+
+try:
+    from runtime.perf import slow_operation
+except Exception:  # pragma: no cover - fallback for unusual import paths
+    from contextlib import contextmanager
+
+    @contextmanager
+    def slow_operation(*_args, **_kwargs):
+        yield
 
 
 def workspace_fingerprint(workspace_root: Path | str) -> str:
@@ -122,15 +132,17 @@ class SessionStore:
     def append(self, kind: str, payload: dict[str, Any] | None = None) -> SessionRecord | None:
         if not self.enabled:
             return None
+        clean_payload = sanitize_session_payload(dict(payload or {}))
         record = SessionRecord(
             session_id=self.session_id,
             workspace_fingerprint=self.workspace_fingerprint,
             kind=str(kind or "event").strip() or "event",
             created_at=_timestamp(),
-            payload=dict(payload or {}),
+            payload=clean_payload,
         )
-        with self.log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record.as_dict(), ensure_ascii=True) + "\n")
+        with slow_operation("session.append", threshold_ms=100, kind=record.kind):
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record.as_dict(), ensure_ascii=True) + "\n")
         self._record_count += 1
         if record.kind != "compaction_summary":
             self._records_since_compaction += 1
@@ -322,14 +334,55 @@ class SessionStore:
             "compactionCount": self._compaction_count,
             "sources": sorted(self._latest_sources),
         }
-        self.latest_path.write_text(
-            json.dumps(payload, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
+        with slow_operation("session.write_latest", threshold_ms=100):
+            self.latest_path.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
 
 
 def _timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+_SECRET_KEY_PATTERN = re.compile(
+    r"(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|bridge[_-]?token|password|secret|cookie)",
+    re.IGNORECASE,
+)
+
+
+def sanitize_session_payload(value: Any, *, max_string_chars: int = 8_000, max_items: int = 120) -> Any:
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for key, item in list(value.items())[:max_items]:
+            key_text = str(key)
+            if _SECRET_KEY_PATTERN.search(key_text):
+                clean[key_text] = "[REDACTED]"
+                continue
+            clean[key_text] = sanitize_session_payload(
+                item,
+                max_string_chars=max_string_chars,
+                max_items=max_items,
+            )
+        if len(value) > max_items:
+            clean["_truncated_items"] = len(value) - max_items
+        return clean
+
+    if isinstance(value, list):
+        items = [
+            sanitize_session_payload(item, max_string_chars=max_string_chars, max_items=max_items)
+            for item in value[:max_items]
+        ]
+        if len(value) > max_items:
+            items.append({"_truncated_items": len(value) - max_items})
+        return items
+
+    if isinstance(value, str):
+        if len(value) <= max_string_chars:
+            return value
+        return value[: max_string_chars - 32].rstrip() + f"... [truncated {len(value) - max_string_chars + 32} chars]"
+
+    return value
 
 
 def _summarize_record(record: SessionRecord) -> str:

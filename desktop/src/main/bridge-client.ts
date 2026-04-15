@@ -1,10 +1,12 @@
 import { EventEmitter } from 'node:events';
 import WebSocket, { type RawData } from 'ws';
 import type { RuntimeEventEnvelope, RuntimeSnapshot, SidecarFrame } from '../shared/types.js';
+import { isRecord, isRuntimeSnapshot, parseRuntimeEventEnvelope } from '../shared/runtime-guards.js';
 
 type PendingCommand = {
   resolve: (payload: Record<string, unknown>) => void;
   reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 };
 
 type ControlWaiter = {
@@ -14,6 +16,8 @@ type ControlWaiter = {
 };
 
 const CONTROL_CONNECT_TIMEOUT_MS = 30000;
+const COMMAND_RESPONSE_TIMEOUT_MS = 45000;
+const SIDECAR_MAX_HEADER_BYTES = 256 * 1024;
 const RECONNECT_DELAY_MS = 1000;
 
 export function rawDataToBuffer(packet: RawData): Buffer | null {
@@ -30,14 +34,17 @@ export function rawDataToBuffer(packet: RawData): Buffer | null {
 }
 
 export function parseControlEnvelopeData(packet: RawData): RuntimeEventEnvelope | null {
+  let parsed: unknown;
   if (typeof packet === 'string') {
-    return JSON.parse(packet) as RuntimeEventEnvelope;
+    parsed = JSON.parse(packet) as unknown;
+  } else {
+    const buffer = rawDataToBuffer(packet);
+    if (!buffer) {
+      return null;
+    }
+    parsed = JSON.parse(buffer.toString('utf-8')) as unknown;
   }
-  const buffer = rawDataToBuffer(packet);
-  if (!buffer) {
-    return null;
-  }
-  return JSON.parse(buffer.toString('utf-8')) as RuntimeEventEnvelope;
+  return parseRuntimeEventEnvelope(parsed);
 }
 
 export function parseSidecarFrame(packet: RawData): SidecarFrame {
@@ -45,19 +52,39 @@ export function parseSidecarFrame(packet: RawData): SidecarFrame {
   if (!buffer) {
     throw new Error('Expected a binary sidecar frame.');
   }
+  if (buffer.length < 4) {
+    throw new Error('Sidecar frame is too small.');
+  }
   const headerSize = buffer.readUInt32BE(0);
+  if (headerSize > SIDECAR_MAX_HEADER_BYTES) {
+    throw new Error('Sidecar frame metadata is too large.');
+  }
   const headerEnd = 4 + headerSize;
-  const metadata = JSON.parse(buffer.subarray(4, headerEnd).toString('utf-8')) as {
-    width: number;
-    height: number;
-    timestamp: number;
-  };
+  if (buffer.length < headerEnd) {
+    throw new Error('Sidecar frame metadata is truncated.');
+  }
+  const metadata = JSON.parse(buffer.subarray(4, headerEnd).toString('utf-8')) as unknown;
+  if (!isRecord(metadata)) {
+    throw new Error('Sidecar frame metadata must be an object.');
+  }
+  const width = Number(metadata.width);
+  const height = Number(metadata.height);
+  const timestamp = Number(metadata.timestamp);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(timestamp)) {
+    throw new Error('Sidecar frame metadata is missing numeric dimensions or timestamp.');
+  }
   const jpeg = buffer.subarray(headerEnd);
   return {
-    ...metadata,
+    width,
+    height,
+    timestamp,
     dataUrl: `data:image/jpeg;base64,${jpeg.toString('base64')}`
   };
 }
+
+type RuntimeBridgeClientOptions = {
+  commandTimeoutMs?: number;
+};
 
 export class RuntimeBridgeClient extends EventEmitter {
   private readonly controlUrl: string;
@@ -68,6 +95,7 @@ export class RuntimeBridgeClient extends EventEmitter {
   private pending = new Map<string, PendingCommand>();
   private controlWaiters = new Set<ControlWaiter>();
   private stopped = false;
+  private readonly commandTimeoutMs: number;
 
   public snapshot: RuntimeSnapshot | null = null;
 
@@ -75,10 +103,11 @@ export class RuntimeBridgeClient extends EventEmitter {
     return Boolean(this.controlSocket && this.controlSocket.readyState === WebSocket.OPEN);
   }
 
-  constructor(controlUrl: string, sidecarUrl: string) {
+  constructor(controlUrl: string, sidecarUrl: string, options: RuntimeBridgeClientOptions = {}) {
     super();
     this.controlUrl = controlUrl;
     this.sidecarUrl = sidecarUrl;
+    this.commandTimeoutMs = Math.max(100, Number(options.commandTimeoutMs || COMMAND_RESPONSE_TIMEOUT_MS));
   }
 
   start(): void {
@@ -110,7 +139,15 @@ export class RuntimeBridgeClient extends EventEmitter {
       protocolVersion: 1
     };
     const response = new Promise<Record<string, unknown>>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) {
+          return;
+        }
+        this.pending.delete(id);
+        pending.reject(new Error(`Runtime bridge command '${method}' timed out after ${this.commandTimeoutMs}ms.`));
+      }, this.commandTimeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
     });
     socket.send(JSON.stringify(envelope));
     return response;
@@ -145,11 +182,16 @@ export class RuntimeBridgeClient extends EventEmitter {
     });
 
     socket.on('message', (data: RawData) => {
-      const envelope = parseControlEnvelopeData(data);
-      if (!envelope) {
-        return;
+      try {
+        const envelope = parseControlEnvelopeData(data);
+        if (!envelope) {
+          this.emit('bridge-error', new Error('Runtime bridge sent an invalid envelope.'));
+          return;
+        }
+        this.handleControlEnvelope(envelope);
+      } catch (error) {
+        this.emit('bridge-error', error instanceof Error ? error : new Error(String(error)));
       }
-      this.handleControlEnvelope(envelope);
     });
 
     socket.on('close', () => {
@@ -176,7 +218,11 @@ export class RuntimeBridgeClient extends EventEmitter {
     this.sidecarSocket = socket;
 
     socket.on('message', (data: RawData) => {
-      this.emit('sidecar-frame', parseSidecarFrame(data));
+      try {
+        this.emit('sidecar-frame', parseSidecarFrame(data));
+      } catch (error) {
+        this.emit('bridge-error', error instanceof Error ? error : new Error(String(error)));
+      }
     });
 
     socket.on('close', () => {
@@ -237,6 +283,7 @@ export class RuntimeBridgeClient extends EventEmitter {
         return;
       }
       this.pending.delete(envelope.id);
+      clearTimeout(pending.timer);
       pending.resolve(envelope.payload);
       return;
     }
@@ -245,6 +292,7 @@ export class RuntimeBridgeClient extends EventEmitter {
       const pending = this.pending.get(envelope.id);
       if (pending) {
         this.pending.delete(envelope.id);
+        clearTimeout(pending.timer);
         pending.reject(new Error(String(envelope.payload.message || 'Runtime bridge error')));
         return;
       }
@@ -258,8 +306,12 @@ export class RuntimeBridgeClient extends EventEmitter {
     }
 
     if (envelope.method === 'state.snapshot' || envelope.method === 'state.updated') {
-      this.snapshot = envelope.payload as unknown as RuntimeSnapshot;
-      this.emit('snapshot', this.snapshot);
+      if (isRuntimeSnapshot(envelope.payload)) {
+        this.snapshot = envelope.payload;
+        this.emit('snapshot', this.snapshot);
+      } else {
+        this.emit('bridge-error', new Error(`Runtime bridge sent an invalid ${envelope.method} payload.`));
+      }
     }
 
     this.emit('event', envelope);
@@ -318,6 +370,7 @@ export class RuntimeBridgeClient extends EventEmitter {
 
   private rejectPendingCommands(error: Error): void {
     for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();

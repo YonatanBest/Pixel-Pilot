@@ -29,6 +29,15 @@ type InvokeRuntime = (method: string, payload?: Record<string, unknown>) => Prom
 type WindowManagerOptions = {
   launchToTray?: boolean;
 };
+type PendingConfirmation = {
+  resolve: (payload: Record<string, unknown>) => void;
+  timer: NodeJS.Timeout;
+};
+
+const CONFIRMATION_TIMEOUT_MS = Math.max(
+  5_000,
+  Number(process.env.PIXELPILOT_CONFIRMATION_TIMEOUT_MS || 60_000)
+);
 
 function latestActionUpdate(snapshot: RuntimeSnapshot | null): RuntimeSnapshot['recentActionUpdates'][number] | null {
   const updates = snapshot?.recentActionUpdates ?? [];
@@ -176,7 +185,7 @@ export class WindowManager {
   private uiPreferences: UiPreferences;
   private bridgeStatus: BridgeStatus = 'starting';
   private bridgeStatusMessage = 'Starting runtime...';
-  private pendingConfirmations = new Map<string, (payload: Record<string, unknown>) => void>();
+  private pendingConfirmations = new Map<string, PendingConfirmation>();
   private runtimeClickThrough = false;
   private manualClickThroughOverride: boolean | null = null;
   private trayOnly = false;
@@ -238,6 +247,11 @@ export class WindowManager {
       clearTimeout(this.notchVisibilityTimer);
       this.notchVisibilityTimer = null;
     }
+    for (const pending of this.pendingConfirmations.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve({ approved: false, error: 'window_manager_disposed' });
+    }
+    this.pendingConfirmations.clear();
     screen.removeListener('display-metrics-changed', this.repositionAnchoredWindows);
     screen.removeListener('display-added', this.repositionAnchoredWindows);
     screen.removeListener('display-removed', this.repositionAnchoredWindows);
@@ -611,7 +625,8 @@ export class WindowManager {
         const resolver = this.pendingConfirmations.get(id);
         if (resolver) {
           this.pendingConfirmations.delete(id);
-          resolver(payload);
+          clearTimeout(resolver.timer);
+          resolver.resolve(payload);
           this.syncWindowVisibility();
         }
         return { ok: true };
@@ -751,7 +766,20 @@ export class WindowManager {
       return { approved: false };
     }
     return new Promise((resolve) => {
-      this.pendingConfirmations.set(request.id, resolve);
+      const timer = setTimeout(() => {
+        const pending = this.pendingConfirmations.get(request.id);
+        if (!pending) {
+          return;
+        }
+        this.pendingConfirmations.delete(request.id);
+        pending.resolve({
+          approved: false,
+          error: 'confirmation_timeout',
+          message: 'Confirmation timed out.',
+        });
+        this.syncWindowVisibility();
+      }, CONFIRMATION_TIMEOUT_MS);
+      this.pendingConfirmations.set(request.id, { resolve, timer });
       this.syncWindowVisibility();
       this.overlayWindow?.show();
       this.overlayWindow?.webContents.send('runtime:confirmation-request', request);

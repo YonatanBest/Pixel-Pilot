@@ -4,6 +4,7 @@ import logging
 import os
 import secrets
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from PySide6.QtCore import QObject, QTimer
 from auth_manager import get_auth_manager
 from config import Config
 from doctor import run_doctor
+from settings import discover_settings_paths
 from uac.detection import get_uac_state_snapshot
 from uac.flow import (
     get_external_uac_mode,
@@ -53,6 +55,12 @@ class ElectronRuntimeService(QObject):
         self.bridge_server = bridge_server
         self.shell_proxy = shell_proxy
         self._last_doctor_report: dict[str, Any] | None = None
+        self._settings_watch_signature: tuple[tuple[str, int, int], ...] | None = None
+        self._settings_watch_pending_signature: tuple[tuple[str, int, int], ...] | None = None
+        self._settings_watch_pending_since = 0.0
+        self._settings_watch_timer = QTimer(self)
+        self._settings_watch_timer.setInterval(2_000)
+        self._settings_watch_timer.timeout.connect(self._check_settings_files)
 
         self.bridge_server.set_snapshot_provider(self._build_snapshot)
         self.bridge_server.set_command_handler(self._handle_command)
@@ -73,6 +81,7 @@ class ElectronRuntimeService(QObject):
         self.bridge_server.start()
         self.bridge_server.set_runtime_ready(True)
         self.adapter.add_activity_message("Electron runtime bridge online.")
+        self._settings_watch_timer.start()
         QTimer.singleShot(0, self.controller.start_bootstrap)
 
     def _connect_state_publishers(self) -> None:
@@ -123,6 +132,22 @@ class ElectronRuntimeService(QObject):
         settings = getattr(agent, "runtime_settings", None)
         return [str(path) for path in list(getattr(settings, "sources", []) or [])]
 
+    def _runtime_settings_validation_errors(self) -> list[dict[str, Any]]:
+        agent = getattr(self.controller, "agent", None)
+        settings = getattr(agent, "runtime_settings", None)
+        if settings is None:
+            return []
+        if hasattr(settings, "validation_error_dicts"):
+            try:
+                return list(settings.validation_error_dicts())
+            except Exception:
+                logger.debug("Failed to read settings validation errors", exc_info=True)
+        return [
+            item.as_dict() if hasattr(item, "as_dict") else dict(item)
+            for item in list(getattr(settings, "validation_errors", []) or [])
+            if isinstance(item, dict) or hasattr(item, "as_dict")
+        ]
+
     def _session_directory(self) -> str:
         store = self._session_store()
         return str(getattr(store, "root_dir", "") or "")
@@ -144,6 +169,64 @@ class ElectronRuntimeService(QObject):
         except Exception:
             return {"pluginCount": 0, "mcpServerCount": 0, "toolCount": 0, "toolNames": []}
 
+    def _settings_signature(self) -> tuple[tuple[str, int, int], ...]:
+        signature: list[tuple[str, int, int]] = []
+        for path in discover_settings_paths(Config.PROJECT_ROOT):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                signature.append((str(path), -1, -1))
+                continue
+            except Exception:
+                signature.append((str(path), -2, -2))
+                continue
+            signature.append((str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+        return tuple(signature)
+
+    def _check_settings_files(self) -> None:
+        agent = getattr(self.controller, "agent", None)
+        if agent is None:
+            return
+        signature = self._settings_signature()
+        if self._settings_watch_signature is None:
+            self._settings_watch_signature = signature
+            return
+        if signature == self._settings_watch_signature:
+            self._settings_watch_pending_signature = None
+            self._settings_watch_pending_since = 0.0
+            return
+
+        now = time.monotonic()
+        if signature != self._settings_watch_pending_signature:
+            self._settings_watch_pending_signature = signature
+            self._settings_watch_pending_since = now
+            return
+        if now - self._settings_watch_pending_since < 1.0:
+            return
+
+        self._settings_watch_signature = signature
+        self._settings_watch_pending_signature = None
+        self._settings_watch_pending_since = 0.0
+        self._reload_runtime_settings()
+
+    def _reload_runtime_settings(self) -> None:
+        agent = getattr(self.controller, "agent", None)
+        if agent is None:
+            return
+        try:
+            reload_settings = getattr(agent, "reload_runtime_settings", None)
+            if callable(reload_settings):
+                reload_settings()
+            live_session = getattr(self.controller, "live_session", None)
+            tools = getattr(live_session, "tools", None)
+            refresh_tools = getattr(tools, "refresh_runtime_settings", None)
+            if callable(refresh_tools):
+                refresh_tools()
+            self.adapter.add_activity_message("Runtime settings reloaded.")
+            self.bridge_server.publish_state_updated()
+        except Exception:
+            logger.warning("Failed to reload runtime settings after file change.", exc_info=True)
+
     def _build_snapshot(self) -> dict[str, Any]:
         return build_runtime_snapshot(
             state_store=self.state_store,
@@ -153,6 +236,7 @@ class ElectronRuntimeService(QObject):
                 "latestSessionContext": self._latest_session_context(),
                 "extensions": self._extension_summary(),
                 "settingsSources": self._runtime_settings_sources(),
+                "settingsValidationErrors": self._runtime_settings_validation_errors(),
                 "sessionDirectory": self._session_directory(),
                 "lastDoctorReport": dict(self._last_doctor_report or {}),
             },

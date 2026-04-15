@@ -45,6 +45,9 @@ def main() -> int:
     )
 
     try:
+        from runtime.perf import flush_startup_profile, startup_checkpoint
+
+        startup_checkpoint("bootstrap.enter", frozen=bool(getattr(sys, "frozen", False)))
         from core.controller import MainController
         from core.logging_setup import attach_gui_logging, configure_logging
         from runtime.bridge_adapter import ElectronBridgeAdapter
@@ -54,12 +57,15 @@ def main() -> int:
         from runtime.state_models import MessageFeedModel, UiStateStore
 
         _bootstrap_trace("bootstrap.imports_ready")
+        startup_checkpoint("bootstrap.imports_ready")
 
         app = QCoreApplication(sys.argv)
         _bootstrap_trace("bootstrap.qcoreapplication_ready")
+        startup_checkpoint("bootstrap.qcoreapplication_ready")
 
         logger, buffered_gui, log_file_path = configure_logging(adapter=None)
         _bootstrap_trace(f"bootstrap.logging_ready log_file={log_file_path}")
+        startup_checkpoint("bootstrap.logging_ready", log_file=str(log_file_path))
         startup_logger = logging.getLogger("pixelpilot.startup")
         startup_logger.info(
             "STARTUP phase=runtime_process_start status=ok elapsed_ms=%d",
@@ -68,8 +74,10 @@ def main() -> int:
 
         state_store = UiStateStore()
         _bootstrap_trace("bootstrap.state_store_ready")
+        startup_checkpoint("bootstrap.state_store_ready")
         message_feed_model = MessageFeedModel()
         _bootstrap_trace("bootstrap.message_feed_ready")
+        startup_checkpoint("bootstrap.message_feed_ready")
 
         host, port, token = ElectronRuntimeService.resolve_bridge_settings()
         _bootstrap_trace(
@@ -77,6 +85,7 @@ def main() -> int:
         )
         bridge_server = ElectronBridgeServer(host=host, port=port, token=token)
         _bootstrap_trace("bootstrap.bridge_server_ready")
+        startup_checkpoint("bootstrap.bridge_server_ready", host=host, port=port)
         adapter = ElectronBridgeAdapter(
             bridge_server=bridge_server,
             ui_state_store=state_store,
@@ -91,6 +100,7 @@ def main() -> int:
             startup_started_at=started_at,
         )
         _bootstrap_trace("bootstrap.controller_ready")
+        startup_checkpoint("bootstrap.controller_ready")
         runtime_service = ElectronRuntimeService(
             app=app,
             controller=controller,
@@ -110,14 +120,24 @@ def main() -> int:
 
         runtime_service.start()
         _bootstrap_trace("bootstrap.runtime_service_started")
+        startup_checkpoint("bootstrap.runtime_service_started")
 
         app.aboutToQuit.connect(controller.shutdown)
         exit_code = app.exec()
         _bootstrap_trace(f"bootstrap.app_exec_returned exit_code={exit_code}")
         bridge_server.stop()
         _bootstrap_trace("bootstrap.bridge_server_stopped")
+        startup_checkpoint("bootstrap.shutdown", exit_code=exit_code)
+        flush_startup_profile(status="ok")
         return int(exit_code)
     except Exception as exc:
+        try:
+            from runtime.perf import flush_startup_profile, startup_checkpoint
+
+            startup_checkpoint("bootstrap.exception", error=f"{exc.__class__.__name__}: {exc}")
+            flush_startup_profile(status="error")
+        except Exception:
+            pass
         _bootstrap_trace(f"bootstrap.exception {exc.__class__.__name__}: {exc}")
         _bootstrap_trace(traceback.format_exc().rstrip())
         return 1

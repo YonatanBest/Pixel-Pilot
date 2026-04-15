@@ -5,6 +5,7 @@ import time
 from PySide6.QtCore import QObject, QTimer, Slot
 
 from config import Config, OperationMode
+from runtime.perf import startup_checkpoint
 
 logger = logging.getLogger("pixelpilot.controller")
 startup_logger = logging.getLogger("pixelpilot.startup")
@@ -101,6 +102,7 @@ class MainController(QObject):
                 status,
                 elapsed_ms,
             )
+        startup_checkpoint(phase, status=status, detail=clean_detail)
         self._startup_logged_phases.add(phase)
 
     def start_bootstrap(self) -> None:

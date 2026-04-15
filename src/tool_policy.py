@@ -27,6 +27,10 @@ class PermissionDecision:
     decision: str
     reason: str = ""
     matched_rule: str = ""
+    matched_rule_source: str = ""
+    subject: str = ""
+    required_mode: str = ""
+    active_mode: str = ""
 
     @property
     def allowed(self) -> bool:
@@ -45,6 +49,7 @@ class PermissionDecision:
 class ToolPolicyContext:
     tool_name: str
     tool_input: dict[str, Any]
+    subject: str
     required_mode: PermissionMode
     active_mode: PermissionMode
     operation_mode: str
@@ -101,9 +106,10 @@ class ToolPolicyEvaluator:
         required_modes: dict[str, PermissionMode],
         mutating_tools: set[str],
     ) -> None:
-        self._allow_rules = [_PermissionRule.parse(item) for item in rule_set.allow]
-        self._deny_rules = [_PermissionRule.parse(item) for item in rule_set.deny]
-        self._ask_rules = [_PermissionRule.parse(item) for item in rule_set.ask]
+        self.validation_errors: list[dict[str, str]] = []
+        self._allow_rules = self._parse_rules(rule_set.allow, "allow")
+        self._deny_rules = self._parse_rules(rule_set.deny, "deny")
+        self._ask_rules = self._parse_rules(rule_set.ask, "ask")
         self._required_modes = dict(required_modes)
         self._mutating_tools = set(mutating_tools)
 
@@ -132,41 +138,48 @@ class ToolPolicyEvaluator:
         payload = dict(tool_input or {})
         required_mode = required_mode or self.required_mode_for(clean_tool_name)
         active_mode = self.active_mode_for_operation(operation_mode)
+        subject = extract_permission_subject(payload)
         context = ToolPolicyContext(
             tool_name=clean_tool_name,
             tool_input=payload,
+            subject=subject,
             required_mode=required_mode,
             active_mode=active_mode,
             operation_mode=_operation_mode_key(operation_mode),
             workspace=str(workspace or "user").strip().lower() or "user",
         )
-        subject = extract_permission_subject(payload)
 
         matched_deny = self._find_match(self._deny_rules, clean_tool_name, subject)
         if matched_deny is not None:
             return (
-                PermissionDecision(
+                self._decision(
+                    context,
                     decision="deny",
                     reason=f"Denied by rule '{matched_deny.raw}'.",
                     matched_rule=matched_deny.raw,
+                    matched_rule_source="deny",
                 ),
                 context,
             )
 
         if hook_override and hook_override.decision == "deny":
             return (
-                PermissionDecision(
+                self._decision(
+                    context,
                     decision="deny",
                     reason=hook_override.reason or f"Tool '{clean_tool_name}' denied by hook.",
+                    matched_rule_source="hook",
                 ),
                 context,
             )
 
         if context.operation_mode == OperationMode.GUIDE.value and required_mode != PermissionMode.READ_ONLY:
             return (
-                PermissionDecision(
+                self._decision(
+                    context,
                     decision="deny",
                     reason="Guidance mode is read-only.",
+                    matched_rule_source="mode",
                 ),
                 context,
             )
@@ -176,19 +189,23 @@ class ToolPolicyEvaluator:
 
         if hook_override and hook_override.decision == "ask":
             return (
-                PermissionDecision(
+                self._decision(
+                    context,
                     decision="prompt",
                     reason=hook_override.reason or f"Tool '{clean_tool_name}' requires approval.",
+                    matched_rule_source="hook",
                 ),
                 context,
             )
 
         if matched_ask is not None:
             return (
-                PermissionDecision(
+                self._decision(
+                    context,
                     decision="prompt",
                     reason=f"Approval required by rule '{matched_ask.raw}'.",
                     matched_rule=matched_ask.raw,
+                    matched_rule_source="ask",
                 ),
                 context,
             )
@@ -196,22 +213,26 @@ class ToolPolicyEvaluator:
         if _MODE_RANK[active_mode] < _MODE_RANK[required_mode]:
             if context.operation_mode == OperationMode.SAFE.value:
                 return (
-                    PermissionDecision(
+                    self._decision(
+                        context,
                         decision="prompt",
                         reason=(
                             f"SAFE mode must approve escalation from {active_mode.value} "
                             f"to {required_mode.value}."
                         ),
+                        matched_rule_source="mode",
                     ),
                     context,
                 )
             return (
-                PermissionDecision(
+                self._decision(
+                    context,
                     decision="deny",
                     reason=(
                         f"Tool '{clean_tool_name}' requires {required_mode.value}; "
                         f"current mode is {active_mode.value}."
                     ),
+                    matched_rule_source="mode",
                 ),
                 context,
             )
@@ -221,15 +242,18 @@ class ToolPolicyEvaluator:
                 hook_override and hook_override.decision == "allow"
             ):
                 return (
-                    PermissionDecision(
+                    self._decision(
+                        context,
                         decision="prompt",
                         reason="SAFE mode requires confirmation before mutating desktop actions.",
+                        matched_rule_source="mode",
                     ),
                     context,
                 )
 
         return (
-            PermissionDecision(
+            self._decision(
+                context,
                 decision="allow",
                 reason=(
                     f"Allowed by rule '{matched_allow.raw}'."
@@ -237,8 +261,44 @@ class ToolPolicyEvaluator:
                     else ""
                 ),
                 matched_rule=matched_allow.raw if matched_allow is not None else "",
+                matched_rule_source="allow" if matched_allow is not None else "",
             ),
             context,
+        )
+
+    def _parse_rules(self, rules: list[str], source: str) -> list[_PermissionRule]:
+        parsed: list[_PermissionRule] = []
+        for item in list(rules or []):
+            error = validate_permission_rule(item)
+            if error:
+                self.validation_errors.append(
+                    {
+                        "source": source,
+                        "rule": str(item or ""),
+                        "message": error,
+                    }
+                )
+                continue
+            parsed.append(_PermissionRule.parse(item))
+        return parsed
+
+    @staticmethod
+    def _decision(
+        context: ToolPolicyContext,
+        *,
+        decision: str,
+        reason: str = "",
+        matched_rule: str = "",
+        matched_rule_source: str = "",
+    ) -> PermissionDecision:
+        return PermissionDecision(
+            decision=decision,
+            reason=reason,
+            matched_rule=matched_rule,
+            matched_rule_source=matched_rule_source,
+            subject=context.subject,
+            required_mode=context.required_mode.value,
+            active_mode=context.active_mode.value,
         )
 
     @staticmethod
@@ -296,6 +356,46 @@ def permission_mode_from_label(label: Any) -> PermissionMode:
     if clean in {"workspace_write", "workspace-write"}:
         return PermissionMode.WORKSPACE_WRITE
     return PermissionMode.DANGER_FULL_ACCESS
+
+
+def validate_permission_rule(raw: Any) -> str:
+    clean = str(raw or "").strip()
+    if not clean:
+        return "Permission rule must be a non-empty string."
+    if "(" not in clean:
+        return ""
+    if clean.count("(") != 1 or not clean.endswith(")"):
+        return "Permission rule must use Tool(subject) syntax."
+    open_index = clean.find("(")
+    tool_name = clean[:open_index].strip()
+    subject = clean[open_index + 1 : -1].strip()
+    if not tool_name:
+        return "Permission rule is missing a tool name."
+    if not subject:
+        return "Permission rule is missing a subject; use * to match any subject."
+    if ")" in subject:
+        return "Permission rule subject contains an unsupported closing parenthesis."
+    return ""
+
+
+def validate_permission_rules(rule_set: PermissionRuleSet) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    for source, rules in (
+        ("allow", rule_set.allow),
+        ("deny", rule_set.deny),
+        ("ask", rule_set.ask),
+    ):
+        for item in list(rules or []):
+            error = validate_permission_rule(item)
+            if error:
+                errors.append(
+                    {
+                        "source": source,
+                        "rule": str(item or ""),
+                        "message": error,
+                    }
+                )
+    return errors
 
 
 def _operation_mode_key(value: object) -> str:
