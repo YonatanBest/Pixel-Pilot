@@ -32,9 +32,12 @@ from .transports import (
     BaseLiveTransport,
     BackendGeminiLiveTransport,
     DirectGeminiLiveTransport,
+    LiteLLMRequestLiveTransport,
+    OpenAIRealtimeTransport,
 )
 from .tools import LiveToolRegistry
 from tools import ui_automation
+from model_providers import get_live_provider_config
 
 logger = logging.getLogger("pixelpilot.live.session")
 
@@ -86,6 +89,8 @@ class LiveSessionManager(QObject):
         self._one_shot_timeout_task: Optional[asyncio.Task] = None
         self._one_shot_finalize_task: Optional[asyncio.Task] = None
         self._go_away_reconnect_task: Optional[asyncio.Task] = None
+        self._idle_disconnect_task: Optional[asyncio.Task] = None
+        self._disconnect_after_reply_task: Optional[asyncio.Task] = None
         self._shutdown_event = threading.Event()
         self._assistant_buffer = ""
         self._user_buffer = ""
@@ -95,8 +100,16 @@ class LiveSessionManager(QObject):
         self._pending_capture_paths: deque[tuple[str, dict[str, Any]]] = deque(maxlen=4)
         self._audio_output_suppressed_until = 0.0
         self._reconnect_in_progress = False
-        self._image_input_enabled = bool(Config.LIVE_ENABLE_IMAGE_INPUT)
-        self._video_stream_enabled = bool(Config.LIVE_ENABLE_VIDEO_STREAM and self._image_input_enabled)
+        self._last_invalid_request_recovery_at = 0.0
+        provider_config = get_live_provider_config()
+        self._provider_config = provider_config
+        self._voice_supported = bool(provider_config.capabilities.audio_input and provider_config.capabilities.audio_output)
+        self._image_input_enabled = bool(Config.LIVE_ENABLE_IMAGE_INPUT and provider_config.capabilities.image_input)
+        self._video_stream_enabled = bool(
+            Config.LIVE_ENABLE_VIDEO_STREAM
+            and self._image_input_enabled
+            and provider_config.capabilities.video_input
+        )
         self._speaker_drop_logged_at = 0.0
         self._speaker_backlog_logged_at = 0.0
         self._speaker_backpressure_logged_at = 0.0
@@ -108,6 +121,7 @@ class LiveSessionManager(QObject):
         self._next_text_turn_id = 0
         self._turn_waiters: dict[int, dict[str, Any]] = {}
         self._last_typed_turn_activity_at = 0.0
+        self._last_live_activity_at = time.monotonic()
         self._typed_turn_idle_finish_timer: Optional[threading.Timer] = None
         self._typed_turn_idle_finish_generation = 0
         self._pending_text_nudge = ""
@@ -117,6 +131,7 @@ class LiveSessionManager(QObject):
         self._pending_text_command_flush_in_progress = False
         self._soft_interrupt_requested = False
         self._manual_disconnect_requested = False
+        self._pending_disconnect_status_message = ""
         self._voice_mode = "continuous"
         self._one_shot_engaged = False
         self._baseline_live_thinking_level = self._normalize_thinking_level(
@@ -415,9 +430,9 @@ class LiveSessionManager(QObject):
         clean_reason = str(reason or "").strip()
         phrase = str(Config.WAKE_WORD_PHRASE or "Hey Pixie").strip() or "Hey Pixie"
         status_message = (
-            f'Gemini Live disconnected. Say "{phrase}" to reconnect if the wake word is enabled.'
+            f'PixelPilot Live disconnected. Say "{phrase}" to reconnect if the wake word is enabled.'
             if Config.ENABLE_WAKE_WORD
-            else "Gemini Live disconnected."
+            else "PixelPilot Live disconnected."
         )
         if clean_reason:
             status_message = f"{status_message} Reason: {clean_reason}"
@@ -443,9 +458,13 @@ class LiveSessionManager(QObject):
             "ok": True,
             "success": True,
             "status": "succeeded",
-            "message": "Disconnecting Gemini Live and returning control to the wake word.",
+            "message": (
+                "Disconnect queued. Finish with one short natural acknowledgement in your own words; "
+                "the runtime will disconnect after this turn."
+            ),
             "result": {
                 "disconnect_requested": True,
+                "reply_before_disconnect": True,
                 "status_message": status_message,
                 "wake_word_phrase": phrase,
             },
@@ -453,7 +472,13 @@ class LiveSessionManager(QObject):
         }
 
     def _transport_cls(self):
-        return DirectGeminiLiveTransport if Config.USE_DIRECT_API else BackendGeminiLiveTransport
+        self._provider_config = get_live_provider_config()
+        provider_id = self._provider_config.provider_id
+        if provider_id == "openai" and self._provider_config.mode_kind == "realtime":
+            return OpenAIRealtimeTransport
+        if provider_id == "gemini" and self._provider_config.mode_kind == "realtime":
+            return DirectGeminiLiveTransport if Config.USE_DIRECT_API else BackendGeminiLiveTransport
+        return LiteLLMRequestLiveTransport
 
     def _create_transport(self) -> BaseLiveTransport:
         cls = self._transport_cls()
@@ -701,12 +726,14 @@ class LiveSessionManager(QObject):
             self._clear_manual_disconnect_request()
         if not target:
             self._cancel_go_away_reconnect_task()
+            self._cancel_idle_disconnect_task()
+            self._cancel_disconnect_after_reply_task()
             self._cancel_one_shot_tasks()
             self.stop_voice()
             self._cancel_typed_turn_idle_finish_timer()
             self._clear_pending_text_commands()
             self._clear_pending_text_nudge()
-            self._finish_text_turn(error="Gemini Live was disconnected.")
+            self._finish_text_turn(error="PixelPilot Live was disconnected.")
             self._reset_reasoning_escalation_state()
             self._submit_async(self._disconnect_session(close_client=True), ensure_loop=False)
             self.session_state_changed.emit("disconnected")
@@ -722,11 +749,13 @@ class LiveSessionManager(QObject):
             self._truncate_log_text(reason),
         )
         self._cancel_go_away_reconnect_task()
+        self._cancel_idle_disconnect_task()
+        self._cancel_disconnect_after_reply_task()
         self.stop_voice()
         self._cancel_typed_turn_idle_finish_timer()
         self._clear_pending_text_commands()
         self._clear_pending_text_nudge()
-        self._finish_text_turn(error="Gemini Live was disconnected.")
+        self._finish_text_turn(error="PixelPilot Live was disconnected.")
         self._reset_reasoning_escalation_state()
 
         submitted = self._submit_async(self._disconnect_session(close_client=True), ensure_loop=False)
@@ -738,7 +767,7 @@ class LiveSessionManager(QObject):
 
     def reconnect(self) -> bool:
         if not self.enabled:
-            self.error_received.emit("Gemini Live is unavailable.")
+            self.error_received.emit("PixelPilot Live is unavailable.")
             return False
         if not self.is_available:
             self.error_received.emit(self.unavailable_reason)
@@ -754,7 +783,7 @@ class LiveSessionManager(QObject):
             self.session_state_changed.emit("connecting")
             return True
 
-        self.error_received.emit("Failed to reconnect Gemini Live.")
+        self.error_received.emit("Failed to reconnect PixelPilot Live.")
         return False
 
     def _record_user_steering(self, text: str) -> str:
@@ -783,7 +812,7 @@ class LiveSessionManager(QObject):
         if not clean:
             return None, "Message is empty."
         if not self.enabled:
-            return None, "Gemini Live is unavailable."
+            return None, "PixelPilot Live is unavailable."
         self._clear_stale_text_turn_if_idle(reason="new_submit")
         with self._turn_state_lock:
             if self._active_text_turn_id is not None:
@@ -802,6 +831,7 @@ class LiveSessionManager(QObject):
             self._last_typed_turn_activity_at = time.monotonic()
 
         self._record_user_steering(clean)
+        self._mark_live_activity("typed_turn")
         self.session_state_changed.emit("thinking")
         return waiter, ""
 
@@ -894,6 +924,158 @@ class LiveSessionManager(QObject):
             return queue.qsize() <= 0
         except Exception:
             return True
+
+    def _has_active_text_turn(self) -> bool:
+        with self._turn_state_lock:
+            return self._active_text_turn_id is not None
+
+    def _live_session_is_busy_for_idle(self) -> bool:
+        return bool(
+            self._connect_task is not None
+            or self._reconnect_in_progress
+            or self.broker.has_pending()
+            or self._has_active_text_turn()
+            or not self._speaker_queue_is_idle()
+        )
+
+    def _cancel_idle_disconnect_task(self) -> None:
+        task = self._idle_disconnect_task
+        self._idle_disconnect_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _cancel_disconnect_after_reply_task(self, *, clear_message: bool = True) -> None:
+        task = self._disconnect_after_reply_task
+        self._disconnect_after_reply_task = None
+        current_task = None
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if task is not None and not task.done() and task is not current_task:
+            task.cancel()
+        if clear_message:
+            self._pending_disconnect_status_message = ""
+
+    def _queue_disconnect_after_assistant_turn(self, *, status_message: str = "") -> None:
+        message = str(status_message or "").strip()
+        if message:
+            self._pending_disconnect_status_message = message
+        elif not str(self._pending_disconnect_status_message or "").strip():
+            self._pending_disconnect_status_message = "PixelPilot Live disconnected."
+
+        if self._disconnect_after_reply_task is not None and not self._disconnect_after_reply_task.done():
+            return
+        self._disconnect_after_reply_task = asyncio.create_task(
+            self._disconnect_after_reply_timeout_loop()
+        )
+
+    async def _wait_for_speaker_idle_before_disconnect(self) -> None:
+        deadline = time.monotonic() + max(
+            0.5,
+            float(getattr(Config, "LIVE_DISCONNECT_AFTER_REPLY_TIMEOUT_SECONDS", 8.0) or 8.0),
+        )
+        while (
+            self.enabled
+            and self._transport is not None
+            and not self._shutdown_event.is_set()
+            and time.monotonic() < deadline
+        ):
+            audio_tail_remaining = self._audio_output_suppressed_until - time.monotonic()
+            if self._speaker_queue_is_idle() and audio_tail_remaining <= 0.0:
+                return
+            await asyncio.sleep(0.05)
+
+    async def _complete_pending_disconnect_after_reply(self) -> None:
+        status_message = str(self._pending_disconnect_status_message or "").strip()
+        if not status_message:
+            return
+        self._pending_disconnect_status_message = ""
+        self._cancel_disconnect_after_reply_task(clear_message=False)
+        await self._wait_for_speaker_idle_before_disconnect()
+        await self._disconnect_after_tool_call(status_message=status_message)
+
+    async def _disconnect_after_reply_timeout_loop(self) -> None:
+        timeout_s = max(
+            0.5,
+            float(getattr(Config, "LIVE_DISCONNECT_AFTER_REPLY_TIMEOUT_SECONDS", 8.0) or 8.0),
+        )
+        try:
+            await asyncio.sleep(timeout_s)
+            if not str(self._pending_disconnect_status_message or "").strip():
+                return
+            fragments = self._drain_transcript_buffers(emit_final=True)
+            if self._has_active_text_turn():
+                assistant_text = str(fragments.get("assistant") or "").strip()
+                self._finish_text_turn(
+                    assistant_text=assistant_text,
+                    error="" if assistant_text else "PixelPilot Live disconnected by request.",
+                )
+            await self._complete_pending_disconnect_after_reply()
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._disconnect_after_reply_task is current:
+                self._disconnect_after_reply_task = None
+
+    def _mark_live_activity(self, reason: str = "") -> None:
+        self._last_live_activity_at = time.monotonic()
+        self._schedule_idle_disconnect(reason=reason)
+
+    def _schedule_idle_disconnect(self, *, reason: str = "") -> None:
+        timeout_s = max(0.0, float(getattr(Config, "LIVE_SESSION_IDLE_DISCONNECT_SECONDS", 60.0) or 0.0))
+        if timeout_s <= 0.0 or not self.enabled or self._transport is None or self._shutdown_event.is_set():
+            self._cancel_idle_disconnect_task()
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._cancel_idle_disconnect_task()
+        self._idle_disconnect_task = asyncio.create_task(self._idle_disconnect_loop(reason=reason))
+
+    async def _idle_disconnect_loop(self, *, reason: str = "") -> None:
+        del reason
+        timeout_s = max(0.0, float(getattr(Config, "LIVE_SESSION_IDLE_DISCONNECT_SECONDS", 60.0) or 0.0))
+        try:
+            while (
+                timeout_s > 0.0
+                and self.enabled
+                and self._transport is not None
+                and not self._shutdown_event.is_set()
+            ):
+                idle_for = time.monotonic() - self._last_live_activity_at
+                remaining = timeout_s - idle_for
+                if remaining > 0.0:
+                    await asyncio.sleep(min(remaining, 5.0))
+                    continue
+                if self._live_session_is_busy_for_idle():
+                    self._last_live_activity_at = time.monotonic()
+                    await asyncio.sleep(min(timeout_s, 5.0))
+                    continue
+
+                logger.info("LIVE_IDLE_DISCONNECT idle_seconds=%.2f", idle_for)
+                self.status_received.emit(
+                    "PixelPilot Live went idle after 1 minute. Type, voice, or wake word to reconnect."
+                )
+                self._manual_disconnect_requested = True
+                self._cancel_go_away_reconnect_task()
+                self._cancel_one_shot_tasks()
+                self._cancel_typed_turn_idle_finish_timer()
+                self._clear_pending_text_commands()
+                self._clear_pending_text_nudge()
+                if self._voice_enabled:
+                    self._voice_enabled = False
+                    self.voice_active_changed.emit(False)
+                await self._disconnect_session(close_client=True)
+                return
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._idle_disconnect_task is current:
+                self._idle_disconnect_task = None
 
     def _schedule_typed_turn_idle_finish(self, *, reason: str) -> None:
         delay_s = max(0.0, float(Config.LIVE_TYPED_TURN_IDLE_FINISH_SECONDS))
@@ -1157,7 +1339,7 @@ class LiveSessionManager(QObject):
                 logger.debug("Delivered live steering update into the active turn (%s).", reason)
                 return True
             self._restore_pending_text_nudge(pending_text)
-            self.error_received.emit("Failed to send the latest steering update to Gemini Live.")
+            self.error_received.emit("Failed to send the latest steering update to PixelPilot Live.")
             return False
 
         waiter, error_message = self._begin_text_turn(pending_text, wait_for_result=False)
@@ -1176,9 +1358,9 @@ class LiveSessionManager(QObject):
             logger.debug("Started a fresh live turn from the latest steering update (%s).", reason)
             return True
 
-        self._finish_text_turn(error="Failed to send the latest steering update to Gemini Live.")
+        self._finish_text_turn(error="Failed to send the latest steering update to PixelPilot Live.")
         self._restore_pending_text_nudge(pending_text)
-        self.error_received.emit("Failed to send the latest steering update to Gemini Live.")
+        self.error_received.emit("Failed to send the latest steering update to PixelPilot Live.")
         return False
 
     def _clear_pending_text_commands(self) -> None:
@@ -1254,9 +1436,9 @@ class LiveSessionManager(QObject):
             try:
                 await self._send_text(str(waiter["submitted_text"]))
             except Exception:
-                self._finish_text_turn(error="Failed to send the queued command to Gemini Live.")
+                self._finish_text_turn(error="Failed to send the queued command to PixelPilot Live.")
                 self._restore_pending_text_command(queued_text)
-                self.error_received.emit("Failed to send the queued command to Gemini Live.")
+                self.error_received.emit("Failed to send the queued command to PixelPilot Live.")
                 return False
 
             logger.debug(
@@ -1297,15 +1479,15 @@ class LiveSessionManager(QObject):
 
         if depth > 1:
             message = (
-                "Updated the queued instructions. The newest request will run first when Gemini Live is ready."
+                "Updated the queued instructions. The newest request will run first when PixelPilot Live is ready."
                 if replaced
-                else "Queued your message. The newest queued request will run first when Gemini Live is ready."
+                else "Queued your message. The newest queued request will run first when PixelPilot Live is ready."
             )
         else:
             message = (
-                "Updated the queued instruction. Gemini Live will send it as soon as the session is ready."
+                "Updated the queued instruction. PixelPilot Live will send it as soon as the session is ready."
                 if replaced
-                else "Gemini Live is still connecting. I queued your message and will send it as soon as the session is ready."
+                else "PixelPilot Live is still connecting. I queued your message and will send it as soon as the session is ready."
             )
 
         return {
@@ -1383,12 +1565,12 @@ class LiveSessionManager(QObject):
         queued_for_connect = self.is_connection_pending
         submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
         if not submitted:
-            self._finish_text_turn(error="Failed to send the command to Gemini Live.")
-            self.error_received.emit("Failed to send the command to Gemini Live.")
+            self._finish_text_turn(error="Failed to send the command to PixelPilot Live.")
+            self.error_received.emit("Failed to send the command to PixelPilot Live.")
             return {
                 "ok": False,
                 "status": "submit_failed",
-                "message": "Failed to send the command to Gemini Live.",
+                "message": "Failed to send the command to PixelPilot Live.",
             }
         if queued_for_connect:
             self.session_state_changed.emit("connecting")
@@ -1396,7 +1578,7 @@ class LiveSessionManager(QObject):
                 "ok": True,
                 "status": "queued_connecting",
                 "message": (
-                    "Gemini Live is still connecting. I queued your message and will send it as soon as the session is ready."
+                    "PixelPilot Live is still connecting. I queued your message and will send it as soon as the session is ready."
                 ),
             }
         return {
@@ -1424,22 +1606,22 @@ class LiveSessionManager(QObject):
         self._clear_manual_disconnect_request()
         submitted = self._submit_async(self._send_text(str(waiter["submitted_text"])))
         if not submitted:
-            self._finish_text_turn(error="Failed to send the command to Gemini Live.")
+            self._finish_text_turn(error="Failed to send the command to PixelPilot Live.")
             return {
                 "ok": False,
                 "error": "submit_failed",
-                "message": "Failed to send the command to Gemini Live.",
+                "message": "Failed to send the command to PixelPilot Live.",
                 "text": "",
             }
 
         timeout_value = max(1.0, float(timeout_s or 90.0))
         event = waiter.get("event")
         if event is None or not event.wait(timeout=timeout_value):
-            self._finish_text_turn(error="Timed out waiting for Gemini Live to finish the turn.")
+            self._finish_text_turn(error="Timed out waiting for PixelPilot Live to finish the turn.")
             return {
                 "ok": False,
                 "error": "timeout",
-                "message": "Timed out waiting for Gemini Live to finish the turn.",
+                "message": "Timed out waiting for PixelPilot Live to finish the turn.",
                 "text": "",
             }
 
@@ -1461,7 +1643,12 @@ class LiveSessionManager(QObject):
 
     def start_voice(self, mode: str = "continuous") -> bool:
         if not self.enabled:
-            self.error_received.emit("Gemini Live is unavailable.")
+            self.error_received.emit("PixelPilot Live is unavailable.")
+            return False
+        if not self._voice_supported:
+            self.error_received.emit(
+                f"Voice is unavailable for {self._provider_config.display_name} with the current PixelPilot audio transport. Please type your instruction."
+            )
             return False
         clear_stop = getattr(self.agent, "clear_stop_request", None)
         if callable(clear_stop):
@@ -1471,6 +1658,7 @@ class LiveSessionManager(QObject):
                 pass
         self._clear_manual_disconnect_request()
         self._configure_voice_mode(mode)
+        self._mark_live_activity("voice_start")
         if self._voice_enabled:
             return True
         submitted = self._submit_async(self._start_voice_async())
@@ -1479,7 +1667,7 @@ class LiveSessionManager(QObject):
             message = str(getattr(self, "unavailable_reason", "") or "").strip()
             if not message:
                 message = (
-                    "Gemini Live voice could not start because the background session was unavailable."
+                    "PixelPilot Live voice could not start because the background session was unavailable."
                 )
             self.error_received.emit(message)
             return False
@@ -1491,6 +1679,7 @@ class LiveSessionManager(QObject):
     def stop_voice(self) -> bool:
         was_active = bool(self._voice_enabled or (self._mic_task and not self._mic_task.done()))
         self._voice_enabled = False
+        self._mark_live_activity("voice_stop")
         self._cancel_typed_turn_idle_finish_timer()
         self._cancel_pending_text_nudge_timer()
         self._cancel_one_shot_tasks()
@@ -1532,6 +1721,7 @@ class LiveSessionManager(QObject):
         self._recent_user_steering.clear()
         self._recent_action_updates.clear()
         self._pending_capture_paths.clear()
+        self._cancel_disconnect_after_reply_task()
         self._clear_pending_text_commands()
         self._clear_speaker_queue()
         self._cancel_typed_turn_idle_finish_timer()
@@ -1571,10 +1761,12 @@ class LiveSessionManager(QObject):
     def shutdown(self) -> None:
         self._shutdown_event.set()
         self._cancel_typed_turn_idle_finish_timer()
+        self._cancel_idle_disconnect_task()
+        self._cancel_disconnect_after_reply_task()
         self._clear_pending_text_commands()
         self._clear_pending_text_nudge()
         self._cancel_one_shot_tasks()
-        self._finish_text_turn(error="Gemini Live session shut down.")
+        self._finish_text_turn(error="PixelPilot Live session shut down.")
         self._reset_reasoning_escalation_state()
         self._manual_disconnect_requested = False
         self._voice_enabled = False
@@ -1665,8 +1857,8 @@ class LiveSessionManager(QObject):
             self.error_received.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             logger.exception("Live background task failed")
-            self._finish_text_turn(error=f"Gemini Live background task failed: {exc}")
-            self.error_received.emit(f"Gemini Live background task failed: {exc}")
+            self._finish_text_turn(error=f"PixelPilot Live background task failed: {exc}")
+            self.error_received.emit(f"PixelPilot Live background task failed: {exc}")
 
     async def _send_text(self, text: str) -> None:
         await self._send_realtime_text(str(text or ""))
@@ -1697,7 +1889,7 @@ class LiveSessionManager(QObject):
                     await self._reconnect_with_resume()
                     attempt += 1
                     continue
-                raise RuntimeError("Timed out sending text to Gemini Live session.") from exc
+                raise RuntimeError("Timed out sending text to PixelPilot Live session.") from exc
             except Exception as exc:  # noqa: BLE001
                 if (
                     attempt < max_retries
@@ -1749,8 +1941,8 @@ class LiveSessionManager(QObject):
                     self._cancel_go_away_reconnect_task()
                     await self._disconnect_session(close_client=True)
                     raise RuntimeError(
-                        "Gemini Live rejected the connection request (invalid argument). "
-                        "Session disconnected to prevent reconnect loops."
+                        "PixelPilot Live rejected the connection request (invalid argument). "
+                        "Tap to reconnect."
                     ) from exc
 
                 if attempt >= retries or not self._is_recoverable_connection_error(exc):
@@ -1806,7 +1998,8 @@ class LiveSessionManager(QObject):
                 or self._one_shot_engaged
             ):
                 return
-            self.status_received.emit("Wake word timed out. Say Hey Pixie and try again.")
+            phrase = str(Config.WAKE_WORD_PHRASE or "Hey Pixie").strip() or "Hey Pixie"
+            self.status_received.emit(f'Wake word timed out. Say "{phrase}" and try again.')
             self._voice_enabled = False
             await self._stop_voice_async()
         except asyncio.CancelledError:
@@ -1848,7 +2041,7 @@ class LiveSessionManager(QObject):
         if self._connect_task is not None:
             await asyncio.shield(self._connect_task)
             if self._transport is None:
-                raise RuntimeError("Gemini Live session failed to start.")
+                raise RuntimeError("PixelPilot Live session failed to start.")
             return self._transport
 
         self._connect_task = asyncio.create_task(self._connect_session())
@@ -1857,7 +2050,7 @@ class LiveSessionManager(QObject):
         finally:
             self._connect_task = None
         if self._transport is None:
-            raise RuntimeError("Gemini Live session failed to start.")
+            raise RuntimeError("PixelPilot Live session failed to start.")
         return self._transport
 
     async def _connect_session(self):
@@ -1874,9 +2067,10 @@ class LiveSessionManager(QObject):
         transport = self._create_transport()
         try:
             config = self._build_connect_config()
-            await transport.connect(model=Config.GEMINI_LIVE_MODEL, config=config)
+            await transport.connect(model=self._provider_config.model, config=config)
             self._transport = transport
             self._session_started_at = time.monotonic()
+            self._mark_live_activity("session_connected")
             queue_maxsize = (
                 Config.LIVE_AUDIO_LOSSLESS_QUEUE_MAX_CHUNKS
                 if Config.LIVE_AUDIO_LOSSLESS_MODE
@@ -1939,6 +2133,8 @@ class LiveSessionManager(QObject):
             self._guidance_observer_task,
             self._uac_watchdog_task,
             self._go_away_reconnect_task,
+            self._idle_disconnect_task,
+            self._disconnect_after_reply_task,
             self._connect_task,
         ]
         pending: list[asyncio.Task] = []
@@ -1958,6 +2154,8 @@ class LiveSessionManager(QObject):
         self._guidance_observer_task = None
         self._uac_watchdog_task = None
         self._go_away_reconnect_task = None
+        self._idle_disconnect_task = None
+        self._disconnect_after_reply_task = None
         self._connect_task = None
         self._connect_in_progress = False
         self._speaker_queue = None
@@ -2077,12 +2275,20 @@ class LiveSessionManager(QObject):
 
                     update = response.get("session_resumption_update")
                     if isinstance(update, dict):
-                        handle = update.get("handle")
-                        if handle:
-                            self._resume_handle = str(handle)
+                        handle = str(update.get("handle") or "").strip()
+                        resumable = update.get("resumable")
+                        if handle and resumable is not False:
+                            self._resume_handle = handle
+                        elif handle:
+                            if self._resume_handle:
+                                logger.debug(
+                                    "Ignoring non-resumable Gemini Live session handle; future reconnects will start fresh."
+                                )
+                            self._resume_handle = None
 
                     tool_call = response.get("tool_call")
                     if tool_call:
+                        self._mark_live_activity("tool_call")
                         self.session_state_changed.emit("acting")
                         await self._handle_tool_call(tool_call)
 
@@ -2104,6 +2310,7 @@ class LiveSessionManager(QObject):
                     if isinstance(input_transcription, dict):
                         text = str(input_transcription.get("text") or "")
                         if text:
+                            self._mark_live_activity("user_transcript")
                             self._mark_one_shot_engaged()
                             self._user_buffer = self._merge_transcript_text(self._user_buffer, text)
                             self.transcript_received.emit("user", self._user_buffer, False)
@@ -2114,6 +2321,7 @@ class LiveSessionManager(QObject):
                         output_text = str(output_transcription.get("text") or "")
                         output_text = self._guard_assistant_output_for_uac(output_text)
                         if output_text:
+                            self._mark_live_activity("assistant_transcript")
                             self._assistant_buffer = self._merge_transcript_text(self._assistant_buffer, output_text)
                             self.transcript_received.emit("assistant", self._assistant_buffer, False)
 
@@ -2135,6 +2343,7 @@ class LiveSessionManager(QObject):
                                 and not has_output_transcription
                                 and not bool(part.get("thought"))
                             ):
+                                self._mark_live_activity("assistant_text")
                                 part_text = self._guard_assistant_output_for_uac(part_text)
                                 self._assistant_buffer = self._merge_transcript_text(
                                     self._assistant_buffer,
@@ -2157,7 +2366,7 @@ class LiveSessionManager(QObject):
 
                     if bool(server_content.get("interrupted")):
                         self.session_state_changed.emit("interrupted")
-                        self._finish_text_turn(error="Gemini Live interrupted the current turn.")
+                        self._finish_text_turn(error="PixelPilot Live interrupted the current turn.")
                         self._drain_transcript_buffers(emit_final=True)
                         self.assistant_audio_level_changed.emit(0.0)
                         self._clear_speaker_queue()
@@ -2188,6 +2397,7 @@ class LiveSessionManager(QObject):
                         self.session_state_changed.emit("listening")
 
                     for payload, sample_rate in pending_audio_chunks:
+                        self._mark_live_activity("assistant_audio")
                         self._audio_output_suppressed_until = time.monotonic() + 0.25
                         self.assistant_audio_level_changed.emit(
                             self._compute_audio_level(payload)
@@ -2196,6 +2406,9 @@ class LiveSessionManager(QObject):
 
                     if turn_completed or generation_completed:
                         self._schedule_one_shot_finalize()
+                    if should_finalize_turn and str(self._pending_disconnect_status_message or "").strip():
+                        await self._complete_pending_disconnect_after_reply()
+                        return
 
                 if self._shutdown_event.is_set():
                     break
@@ -2229,22 +2442,16 @@ class LiveSessionManager(QObject):
                     await self._reconnect_with_resume()
                 return
             if self._is_recoverable_connection_error(exc):
-                logger.warning("Live receive loop connection lost; reconnecting: %s", exc)
-                if self._should_auto_reconnect():
-                    await self._reconnect_with_resume()
+                await self._recover_from_connection_error(exc, context="receive")
                 return
             if self._is_nonrecoverable_request_error(exc):
+                if self._should_auto_reconnect() and await self._recover_from_invalid_request_error(exc):
+                    return
                 logger.error(
-                    "Live receive loop hit a non-recoverable request error; stopping auto-reconnect: %s",
+                    "Live receive loop hit an invalid request and fresh recovery failed; disconnecting: %s",
                     exc,
                 )
-                self._clear_resume_handle(reason=f"receive_error: {exc}")
-                self._manual_disconnect_requested = True
-                self._cancel_go_away_reconnect_task()
-                message = (
-                    "Gemini Live rejected the last request (invalid argument). "
-                    "Session disconnected to prevent reconnect loops."
-                )
+                message = "PixelPilot Live refreshed after an invalid request but could not reconnect. Tap to reconnect."
                 self._finish_text_turn(error=message)
                 self.error_received.emit(message)
                 if self.enabled and not self._shutdown_event.is_set():
@@ -2349,7 +2556,7 @@ class LiveSessionManager(QObject):
                 "LIVE_TOOL_CALL_DISCONNECT status_message=%s",
                 self._truncate_log_text(pending_disconnect_message),
             )
-            await self._disconnect_after_tool_call(status_message=pending_disconnect_message)
+            self._queue_disconnect_after_assistant_turn(status_message=pending_disconnect_message)
             return
 
         if (
@@ -2367,7 +2574,7 @@ class LiveSessionManager(QObject):
     async def _disconnect_after_tool_call(self, *, status_message: str = "") -> None:
         self._cancel_go_away_reconnect_task()
         self._cancel_one_shot_tasks()
-        self._clear_session_context(reason="Gemini Live disconnected by request.")
+        self._clear_session_context(reason="PixelPilot Live disconnected by request.")
         self._reset_reasoning_escalation_state()
         self._manual_disconnect_requested = True
         self._voice_enabled = False
@@ -2885,6 +3092,69 @@ class LiveSessionManager(QObject):
             self._resume_pending_assistant_buffer = ""
             self._reconnect_in_progress = False
 
+    async def _recover_from_connection_error(self, exc: Exception, *, context: str) -> bool:
+        clean_context = str(context or "live").strip() or "live"
+        logger.warning(
+            "PixelPilot Live connection dropped during %s; reconnecting: %s",
+            clean_context,
+            self._format_live_error(exc),
+        )
+        self.status_received.emit("PixelPilot Live connection dropped. Reconnecting...")
+        if not self._should_auto_reconnect():
+            return False
+        try:
+            await self._reconnect_with_resume()
+            if self._transport is not None and not self._reconnect_in_progress:
+                self.status_received.emit("PixelPilot Live reconnected.")
+                return True
+        except Exception as reconnect_exc:  # noqa: BLE001
+            logger.warning(
+                "PixelPilot Live reconnect failed after connection drop: %s",
+                self._format_live_error(reconnect_exc),
+            )
+            logger.debug("Reconnect failure details", exc_info=True)
+        message = "PixelPilot Live connection dropped and could not reconnect. Tap to reconnect."
+        self._finish_text_turn(error=message)
+        self.error_received.emit(message)
+        if self.enabled and not self._shutdown_event.is_set():
+            await self._disconnect_session(close_client=True)
+        return False
+
+    async def _recover_from_invalid_request_error(self, exc: Exception) -> bool:
+        if not self._should_auto_reconnect() or self._shutdown_event.is_set():
+            return False
+        now = time.monotonic()
+        if (now - self._last_invalid_request_recovery_at) < 30.0:
+            return False
+        self._last_invalid_request_recovery_at = now
+        if self._reconnect_in_progress:
+            return True
+
+        self._reconnect_in_progress = True
+        self._cancel_go_away_reconnect_task(keep_current=True)
+        self._clear_resume_handle(reason=f"invalid_request_recovery: {exc}")
+        fragments = self._drain_transcript_buffers(emit_final=True)
+        self._resume_pending_user_buffer = fragments["user"]
+        self._resume_pending_assistant_buffer = fragments["assistant"]
+        try:
+            logger.warning(
+                "Live receive loop hit an invalid request; refreshing the session without resumption: %s",
+                exc,
+            )
+            await self._disconnect_session(reconnecting=True)
+            if not self._should_auto_reconnect():
+                return False
+            await self._ensure_session()
+            self.status_received.emit("PixelPilot Live refreshed the connection.")
+            return bool(self._transport is not None)
+        except Exception:
+            logger.warning("Fresh recovery after invalid live request failed.", exc_info=True)
+            return False
+        finally:
+            self._resume_pending_user_buffer = ""
+            self._resume_pending_assistant_buffer = ""
+            self._reconnect_in_progress = False
+
     def _guidance_desktop_manager(self):
         if str(getattr(self.agent, "active_workspace", "user")).strip().lower() == "agent":
             return getattr(self.agent, "desktop_manager", None)
@@ -3361,11 +3631,21 @@ class LiveSessionManager(QObject):
         message = str(exc or "").lower()
         name = exc.__class__.__name__.lower()
         status = getattr(exc, "status", None)
+        status_code = getattr(exc, "status_code", None)
+        code = getattr(exc, "code", None)
+        numeric_codes = {
+            str(value).strip().lower()
+            for value in (status, status_code, code)
+            if value is not None
+        }
         return (
-            status == 1000
+            bool(numeric_codes.intersection({"1000", "1001", "1005", "1006"}))
             or "connectionclosed" in name
             or "connectionreseterror" in name
             or "timeouterror" in name
+            or ("apierror" in name and "1006" in message)
+            or "1006 none" in message
+            or "abnormal closure" in message
             or "winerror 64" in message
             or "opening handshake" in message
             or "connection reset" in message
@@ -3380,6 +3660,14 @@ class LiveSessionManager(QObject):
             or "live session is not connected" in message
             or "backend session is not connected" in message
         )
+
+    @staticmethod
+    def _format_live_error(exc: Exception) -> str:
+        message = str(exc or "").strip()
+        if not message:
+            message = exc.__class__.__name__
+        message = re.sub(r"\s+", " ", message)
+        return message[:240]
 
     @staticmethod
     def _is_nonrecoverable_request_error(exc: Exception) -> bool:
@@ -3533,7 +3821,7 @@ class LiveSessionManager(QObject):
         self._image_input_enabled = False
         self._video_stream_enabled = False
         logger.warning(
-            "Gemini Live model rejected image/video input; disabling image stream for this run."
+            "PixelPilot Live model rejected image/video input; disabling image stream for this run."
         )
         self.error_received.emit(
             "Live model rejected screen image/video input; continuing with audio and tool context only."

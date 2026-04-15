@@ -360,8 +360,9 @@ class LiveToolRegistry:
             {
                 "name": "disconnect_live_session",
                 "description": (
-                    "Disconnect Gemini Live from the current session when the user explicitly asks you "
+                    "Disconnect PixelPilot Live from the current session when the user explicitly asks you "
                     "to disconnect, go quiet, or hand control back to the wake word. "
+                    "Before calling this tool, briefly acknowledge in your own natural words; vary the wording. "
                     "If the local wake word is enabled, it will keep listening after disconnect."
                 ),
                 "parameters": {
@@ -457,7 +458,7 @@ class LiveToolRegistry:
             "status": "failed",
             "error": "guidance_mode_read_only",
             "message": (
-                f"Tool '{clean_name}' is disabled while Gemini Live is in guidance mode. "
+                f"Tool '{clean_name}' is disabled while PixelPilot Live is in guidance mode. "
                 "Guide the user with text/voice instead of taking actions."
             ),
         }
@@ -606,7 +607,7 @@ class LiveToolRegistry:
             return self._tool_response(
                 "disconnect_live_session",
                 success=False,
-                message="Gemini Live disconnect control is unavailable.",
+                message="PixelPilot Live disconnect control is unavailable.",
                 error="disconnect_unavailable",
             )
         return self.on_disconnect_requested(str(args.get("reason") or "").strip())

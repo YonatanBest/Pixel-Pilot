@@ -1,6 +1,5 @@
 import React, {
   startTransition,
-  useDeferredValue,
   useEffect,
   useId,
   useLayoutEffect,
@@ -12,20 +11,14 @@ import React, {
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Bot,
-  ChevronDown,
-  ChevronUp,
   Eye,
   GraduationCap,
-  Keyboard,
   LoaderCircle,
-  Mic,
-  Minus,
   Monitor,
   PanelTop,
-  Plus,
+  Search,
   Settings2,
   Shield,
-  Waves,
   X
 } from 'lucide-react';
 import type {
@@ -101,6 +94,11 @@ const emptyLiveStatus: LiveStatus = {
   source: ''
 };
 
+const defaultUiPreferences = {
+  cornerGlowEnabled: true,
+  statusNotchEnabled: false
+} as const;
+
 type WindowLayout = {
   width: number;
   height: number;
@@ -108,18 +106,6 @@ type WindowLayout = {
 
 type SettingsSectionId = 'general' | 'startup' | 'sessions' | 'extensions' | 'diagnostics';
 
-type LiveVisualState =
-  | 'disabled'
-  | 'off'
-  | 'ready'
-  | 'connected'
-  | 'connecting'
-  | 'thinking'
-  | 'waiting'
-  | 'acting'
-  | 'interrupted';
-
-type MicVisualState = 'disabled' | 'idle' | 'listening_user' | 'speaking_assistant';
 type CommandBarStatusKind = 'placeholder' | 'reply' | 'status' | 'busy' | 'error';
 type CommandBarStatusTone = 'placeholder' | 'status' | 'error';
 
@@ -280,6 +266,16 @@ function patchSnapshot(
   return {
     ...snapshot,
     ...patch
+  };
+}
+
+function withSnapshotDefaults(snapshot: RuntimeSnapshot): RuntimeSnapshot {
+  return {
+    ...snapshot,
+    uiPreferences: {
+      ...defaultUiPreferences,
+      ...(snapshot.uiPreferences || {})
+    }
   };
 }
 
@@ -458,14 +454,18 @@ function messageBubbleClass(entry: MessageEntry): string {
 }
 
 function actionUpdateSummary(update: ActionUpdate): string {
-  if (update.error) {
-    return String(update.error).trim();
-  }
+  const error = String(update.error || '').trim();
   const message = String(update.message || '').trim();
   const name = String(update.name || '').trim();
   const status = String(update.status || '').trim();
+  if (error && !isGenericActionError(error, status)) {
+    return error;
+  }
   if (message) {
     return message;
+  }
+  if (error) {
+    return humanizeState(error);
   }
   if (name && status) {
     return `${name} · ${humanizeState(status)}`;
@@ -509,19 +509,6 @@ function buildThinkingState(
   return { summary: '', lines: [] };
 }
 
-function workspaceIcon(workspace: RuntimeSnapshot['workspace']): React.JSX.Element {
-  return workspace === 'agent' ? <Monitor className="h-4 w-4" /> : <Keyboard className="h-4 w-4" />;
-}
-
-function workspaceBadgeLabel(snapshot: RuntimeSnapshot): string {
-  if (snapshot.workspace === 'agent') {
-    return snapshot.agentViewRequested
-      ? 'Current workspace: Agent Desktop. Click to hide the agent view'
-      : 'Current workspace: Agent Desktop. Click to show the agent view';
-  }
-  return 'Current workspace: User Desktop';
-}
-
 function isBusyLiveState(state: string): boolean {
   return ['connecting', 'thinking', 'waiting', 'acting'].includes(String(state || '').trim().toLowerCase());
 }
@@ -539,6 +526,18 @@ function isDoneStatus(status: string | undefined): boolean {
 function isErrorStatus(status: string | undefined): boolean {
   const normalized = String(status || '').trim().toLowerCase();
   return normalized.includes('error') || normalized.includes('fail') || normalized.includes('cancel');
+}
+
+function isGenericActionError(error: string | undefined, status?: string | undefined): boolean {
+  const normalized = String(error || '').trim().toLowerCase();
+  const normalizedStatus = String(status || '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return (
+    normalized === normalizedStatus ||
+    ['failed', 'error', 'cancelled', 'canceled', 'cancel_requested'].includes(normalized)
+  );
 }
 
 function humanizeState(state: string): string {
@@ -708,215 +707,6 @@ function hasOngoingLiveTurn(
   );
 }
 
-function liveButtonPresentation(
-  snapshot: RuntimeSnapshot,
-  pending = false
-): { state: LiveVisualState; label: string; disabled: boolean; description: string } {
-  if (!snapshot.liveAvailable) {
-    return {
-      state: 'disabled',
-      label: 'Reconnect live session',
-      disabled: true,
-      description: snapshot.liveUnavailableReason || 'PixelPilot Live unavailable'
-    };
-  }
-
-  const state = String(snapshot.liveSessionState || '').trim().toLowerCase();
-  if (state === 'disconnected') {
-    const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
-    let description = 'AI is disconnected. Type or start voice to reconnect.';
-    if (snapshot.wakeWordEnabled && wakeWordState === 'armed') {
-      description = `AI is disconnected. Say "${snapshot.wakeWordPhrase}" to reconnect.`;
-    } else if (snapshot.wakeWordEnabled && wakeWordState === 'starting') {
-      description = `AI is disconnected. Arming "${snapshot.wakeWordPhrase}"...`;
-    } else if (snapshot.wakeWordEnabled && wakeWordState === 'unavailable') {
-      description = snapshot.wakeWordUnavailableReason || 'AI is disconnected. Wake word unavailable.';
-    }
-    return {
-      state: pending ? 'connecting' : 'ready',
-      label: 'Reconnect live session',
-      disabled: false,
-      description: pending ? 'Reconnecting Gemini Live...' : description
-    };
-  }
-
-  if (pending || state === 'connecting') {
-    return { state: 'connecting', label: 'Disconnect live session', disabled: false, description: 'Connecting to AI...' };
-  }
-  if (state === 'thinking') {
-    return { state: 'thinking', label: 'Disconnect live session', disabled: false, description: 'AI is thinking' };
-  }
-  if (state === 'waiting') {
-    return { state: 'waiting', label: 'Disconnect live session', disabled: false, description: 'Waiting for the current action' };
-  }
-  if (state === 'acting') {
-    return { state: 'acting', label: 'Disconnect live session', disabled: false, description: 'AI is working on the task' };
-  }
-  if (state === 'interrupted') {
-    return { state: 'interrupted', label: 'Disconnect live session', disabled: false, description: 'AI was interrupted' };
-  }
-  return { state: 'connected', label: 'Disconnect live session', disabled: false, description: 'AI is connected' };
-}
-
-function micButtonPresentation(
-  snapshot: RuntimeSnapshot,
-  pending = false
-): { state: MicVisualState; label: string; disabled: boolean; description: string } {
-  if (!snapshot.liveAvailable) {
-    return {
-      state: 'disabled',
-      label: 'Enable voice input',
-      disabled: true,
-      description: snapshot.liveUnavailableReason || 'PixelPilot Live unavailable'
-    };
-  }
-
-  const disconnected = String(snapshot.liveSessionState || '').trim().toLowerCase() === 'disconnected';
-  if (disconnected && !snapshot.liveVoiceActive) {
-    return {
-      state: pending ? 'listening_user' : 'idle',
-      label: 'Reconnect and start voice',
-      disabled: false,
-      description: pending ? 'Reconnecting and starting voice...' : 'Reconnect and start voice'
-    };
-  }
-
-  const voiceArmed = snapshot.liveVoiceActive || pending;
-  if (snapshot.assistantAudioLevel > 0.02) {
-    return {
-      state: 'speaking_assistant',
-      label: voiceArmed ? 'Mute voice input' : 'Enable voice input',
-      disabled: false,
-      description: voiceArmed ? 'Assistant is speaking while voice input is active' : 'Assistant is speaking'
-    };
-  }
-
-  if (voiceArmed) {
-    return {
-      state: 'listening_user',
-      label: 'Mute voice input',
-      disabled: false,
-      description: pending ? 'Starting voice...' : 'Voice input is active'
-    };
-  }
-
-  return {
-    state: 'idle',
-    label: 'Enable voice input',
-    disabled: false,
-    description: 'Start live voice input'
-  };
-}
-
-function buildNotchProgress(
-  snapshot: RuntimeSnapshot,
-  actionUpdates: ActionUpdate[],
-  runtimeError: string
-): { text: string; busy: boolean; tone: 'idle' | 'active' | 'error' } {
-  const liveStatus = currentLiveStatus(snapshot);
-  if (liveStatus.level !== 'idle' && liveStatus.message.trim()) {
-    return {
-      text: liveStatus.message.trim(),
-      busy: liveStatus.level !== 'error',
-      tone: liveStatus.level === 'error' ? 'error' : 'active'
-    };
-  }
-
-  const errorText = runtimeError.trim();
-  if (errorText) {
-    return { text: errorText, busy: false, tone: 'error' };
-  }
-
-  const latestAction = [...actionUpdates].reverse().find((update) => {
-    return Boolean(update.error || update.message || update.name || update.status);
-  });
-
-  if (latestAction) {
-    if (latestAction.error) {
-      return { text: latestAction.error, busy: false, tone: 'error' };
-    }
-
-    const text =
-      latestAction.message ||
-      (latestAction.name
-        ? latestAction.status
-          ? `${latestAction.name} · ${humanizeState(latestAction.status)}`
-          : latestAction.name
-        : latestAction.status
-          ? humanizeState(latestAction.status)
-          : '');
-
-    if (text) {
-      const busy = latestAction.done !== true && !isDoneStatus(latestAction.status) && !isErrorStatus(latestAction.status);
-      if (isErrorStatus(latestAction.status)) {
-        return { text, busy: false, tone: 'error' };
-      }
-      if (busy) {
-        return { text, busy: true, tone: 'active' };
-      }
-    }
-  }
-
-  if (!snapshot.liveAvailable) {
-    return {
-      text: snapshot.liveUnavailableReason || 'Live is unavailable right now.',
-      busy: false,
-      tone: 'error'
-    };
-  }
-
-  if (snapshot.liveVoiceActive) {
-    return { text: 'Listening for your next instruction...', busy: false, tone: 'active' };
-  }
-
-  if (snapshot.wakeWordEnabled) {
-    const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
-    if (wakeWordState === 'armed') {
-      if (String(snapshot.liveSessionState || '').trim().toLowerCase() === 'disconnected') {
-        return {
-          text: `Gemini Live is disconnected. Wake word is listening for "${snapshot.wakeWordPhrase}".`,
-          busy: false,
-          tone: 'active'
-        };
-      }
-      return { text: `Wake word is listening for "${snapshot.wakeWordPhrase}".`, busy: false, tone: 'active' };
-    }
-    if (wakeWordState === 'starting') {
-      return { text: `Arming "${snapshot.wakeWordPhrase}"...`, busy: true, tone: 'active' };
-    }
-    if (wakeWordState === 'paused') {
-      return { text: wakeWordStatusDescription(snapshot), busy: false, tone: 'idle' };
-    }
-    if (wakeWordState === 'unavailable' && snapshot.wakeWordUnavailableReason) {
-      return { text: snapshot.wakeWordUnavailableReason, busy: false, tone: 'error' };
-    }
-  }
-
-  const stateText: Record<string, string> = {
-    connecting: 'Connecting to PixelPilot Live...',
-    thinking: 'Thinking about the current task...',
-    waiting: 'Waiting for the current action...',
-    acting: 'Working on the current task...',
-    interrupted: 'Interrupted. Waiting for your next instruction...',
-    listening: 'Ready for your next instruction.'
-  };
-
-  const liveState = String(snapshot.liveSessionState || '').trim().toLowerCase();
-  if (stateText[liveState]) {
-    return {
-      text: stateText[liveState],
-      busy: isBusyLiveState(liveState),
-      tone: isBusyLiveState(liveState) ? 'active' : 'idle'
-    };
-  }
-
-  if (liveState === 'disconnected') {
-    return { text: 'Gemini Live is disconnected. Tap to reconnect.', busy: false, tone: 'idle' };
-  }
-
-  return { text: 'PixelPilot is running in the background.', busy: false, tone: 'idle' };
-}
-
 function PixelPilotLogo({ className = '' }: { className?: string }): React.JSX.Element {
   const gradientId = useId().replace(/:/g, '');
 
@@ -951,232 +741,6 @@ function GlassPanel({
   children: React.ReactNode;
 }): React.JSX.Element {
   return <div className={`${shell} rounded-[28px] ${className}`}>{children}</div>;
-}
-
-function SoftPanel({
-  className = '',
-  children
-}: {
-  className?: string;
-  children: React.ReactNode;
-}): React.JSX.Element {
-  return <div className={`${softShell} rounded-[24px] ${className}`}>{children}</div>;
-}
-
-function IconButton({
-  label,
-  active = false,
-  disabled = false,
-  onClick,
-  compact = false,
-  children
-}: {
-  label: string;
-  active?: boolean;
-  disabled?: boolean;
-  onClick?: () => void;
-  compact?: boolean;
-  children: React.ReactNode;
-}): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-      className={[
-        'no-drag flex items-center justify-center text-slate-800 transition-all',
-        compact ? 'h-8 w-10 rounded-xl' : 'h-10 w-10 rounded-2xl',
-        active ? activeShell : softShell,
-        disabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-white/24'
-      ].join(' ')}
-    >
-      {children}
-    </button>
-  );
-}
-
-function LiveModeButton({
-  snapshot,
-  pending = false,
-  compact = false,
-  disabled = false,
-  onClick
-}: {
-  snapshot: RuntimeSnapshot;
-  pending?: boolean;
-  compact?: boolean;
-  disabled?: boolean;
-  onClick?: () => void;
-}): React.JSX.Element {
-  const presentation = liveButtonPresentation(snapshot, pending);
-  const isDisabled = presentation.disabled || disabled;
-  const toneClasses: Record<LiveVisualState, string> = {
-    disabled: 'text-slate-400',
-    off: 'text-slate-600',
-    ready: 'text-cyan-700',
-    connected: 'text-emerald-700',
-    connecting: 'text-sky-700',
-    thinking: 'text-sky-700',
-    waiting: 'text-slate-600',
-    acting: 'text-amber-700',
-    interrupted: 'text-amber-700'
-  };
-  const dotClasses: Record<LiveVisualState, string> = {
-    disabled: 'bg-slate-300',
-    off: 'bg-slate-400',
-    ready: 'bg-cyan-400',
-    connected: 'bg-emerald-400',
-    connecting: 'bg-sky-400',
-    thinking: 'bg-sky-400',
-    waiting: 'bg-slate-400',
-    acting: 'bg-amber-400',
-    interrupted: 'bg-amber-500'
-  };
-  const animated = ['connecting', 'thinking', 'waiting', 'acting'].includes(presentation.state);
-
-  return (
-    <button
-      type="button"
-      aria-label={presentation.label}
-      title={presentation.description}
-      disabled={isDisabled}
-      onClick={onClick}
-      className={[
-        'no-drag relative flex items-center justify-center text-slate-800 transition-all',
-        compact ? 'h-8 w-10 rounded-xl' : 'h-10 w-10 rounded-2xl',
-        presentation.state === 'off' || presentation.state === 'disabled' ? softShell : activeShell,
-        isDisabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-white/24'
-      ].join(' ')}
-    >
-      {animated && (
-        <motion.span
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-[7px] rounded-full border border-current/25"
-          animate={{ scale: [0.92, 1.08, 0.92], opacity: [0.25, 0.65, 0.25] }}
-          transition={{ duration: presentation.state === 'waiting' ? 1.8 : 1.2, repeat: Infinity, ease: 'easeInOut' }}
-        />
-      )}
-      <span className={`relative ${toneClasses[presentation.state]}`}>
-        <Waves className="h-4 w-4" />
-        <span className={`absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ${dotClasses[presentation.state]}`} />
-      </span>
-    </button>
-  );
-}
-
-function MicControlButton({
-  snapshot,
-  pending = false,
-  compact = false,
-  disabled = false,
-  onClick
-}: {
-  snapshot: RuntimeSnapshot;
-  pending?: boolean;
-  compact?: boolean;
-  disabled?: boolean;
-  onClick?: () => void;
-}): React.JSX.Element {
-  const presentation = micButtonPresentation(snapshot, pending);
-  const isDisabled = presentation.disabled || disabled;
-  const effectiveLevel =
-    presentation.state === 'speaking_assistant'
-      ? Math.max(0.2, clamp(snapshot.assistantAudioLevel))
-      : presentation.state === 'listening_user'
-        ? Math.max(0.1, clamp(snapshot.userAudioLevel))
-        : 0;
-  const animated = presentation.state === 'listening_user' || presentation.state === 'speaking_assistant';
-  const toneClass =
-    presentation.state === 'disabled'
-      ? 'text-slate-400'
-      : presentation.state === 'speaking_assistant'
-        ? 'text-sky-700'
-        : presentation.state === 'listening_user'
-          ? 'text-emerald-700'
-          : 'text-slate-600';
-  const ringClass =
-    presentation.state === 'speaking_assistant'
-      ? 'border-sky-400/45'
-      : presentation.state === 'listening_user'
-        ? 'border-emerald-400/45'
-        : 'border-white/0';
-  const glowClass =
-    presentation.state === 'speaking_assistant'
-      ? 'bg-sky-400/18'
-      : presentation.state === 'listening_user'
-        ? 'bg-emerald-400/18'
-        : 'bg-transparent';
-  const coreClass =
-    presentation.state === 'speaking_assistant'
-      ? 'bg-sky-50/85'
-      : presentation.state === 'listening_user'
-        ? 'bg-emerald-50/85'
-        : 'bg-transparent';
-
-  return (
-    <button
-      type="button"
-      aria-label={presentation.label}
-      title={presentation.description}
-      aria-pressed={presentation.state === 'listening_user'}
-      disabled={isDisabled}
-      onClick={onClick}
-      className={[
-        'no-drag relative flex items-center justify-center text-slate-800 transition-all',
-        compact ? 'h-8 w-10 rounded-xl' : 'h-10 w-10 rounded-2xl',
-        presentation.state === 'idle' || presentation.state === 'disabled' ? softShell : activeShell,
-        isDisabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-white/24'
-      ].join(' ')}
-    >
-      <span
-        aria-hidden="true"
-        className={`pointer-events-none absolute inset-[6px] rounded-[inherit] transition-all ${glowClass}`}
-      />
-      {animated && (
-        <motion.span
-          aria-hidden="true"
-          className={`pointer-events-none absolute inset-[7px] rounded-full border ${ringClass}`}
-          animate={{
-            scale: presentation.state === 'speaking_assistant' ? [0.92, 1.2 + effectiveLevel * 0.12, 0.92] : [0.94, 1.08 + effectiveLevel * 0.08, 0.94],
-            opacity: [0.25, 0.75, 0.25]
-          }}
-          transition={{ duration: presentation.state === 'speaking_assistant' ? 0.95 : 1.25, repeat: Infinity, ease: 'easeInOut' }}
-        />
-      )}
-      {animated && (
-        <motion.span
-          aria-hidden="true"
-          className={`pointer-events-none absolute inset-[4px] rounded-full border ${ringClass}`}
-          animate={{
-            scale: presentation.state === 'speaking_assistant' ? [0.88, 1.34 + effectiveLevel * 0.18, 0.88] : [0.9, 1.18 + effectiveLevel * 0.14, 0.9],
-            opacity: [0.18, 0.45, 0.18]
-          }}
-          transition={{
-            duration: presentation.state === 'speaking_assistant' ? 1.1 : 1.45,
-            repeat: Infinity,
-            ease: 'easeInOut',
-            delay: 0.18
-          }}
-        />
-      )}
-      <span className={`relative flex h-[70%] w-[70%] items-center justify-center rounded-[inherit] transition-all ${toneClass} ${coreClass}`}>
-        <Mic className="h-4 w-4" />
-      </span>
-      {(presentation.state === 'listening_user' || presentation.state === 'speaking_assistant') && (
-        <motion.span
-          aria-hidden="true"
-          className={[
-            'pointer-events-none absolute bottom-1.5 right-1.5 h-1.5 w-1.5 rounded-full',
-            presentation.state === 'speaking_assistant' ? 'bg-sky-500' : 'bg-emerald-500'
-          ].join(' ')}
-          animate={{ scale: [0.9, 1.45, 0.9], opacity: [0.5, 1, 0.5] }}
-          transition={{ duration: 0.8, repeat: Infinity, ease: 'easeInOut' }}
-        />
-      )}
-    </button>
-  );
 }
 
 function SegmentedButton({
@@ -1276,6 +840,8 @@ function LoadingShell({
   const widthClass =
     windowKind === 'notch'
       ? 'w-[420px]'
+      : windowKind === 'glow'
+        ? 'w-full'
       : windowKind === 'sidecar'
         ? 'w-[380px]'
         : windowKind === 'settings'
@@ -1284,6 +850,8 @@ function LoadingShell({
   useWindowLayout(
     windowKind === 'notch'
       ? { width: 420, height: 88 }
+      : windowKind === 'glow'
+        ? { width: 400, height: 300 }
       : windowKind === 'sidecar'
         ? { width: 380, height: 320 }
         : windowKind === 'settings'
@@ -1463,6 +1031,94 @@ function StartupDefaultsSection({
   );
 }
 
+type DirectApiKeyOptions = {
+  provider: string;
+  baseUrl?: string;
+};
+
+const directApiProviderOptions = [
+  {
+    id: 'gemini',
+    label: 'Google Gemini',
+    placeholder: 'Paste Gemini API key (starts with AIza...)',
+    requiresKey: true,
+    supportsBaseUrl: false,
+    baseUrlPlaceholder: ''
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    placeholder: 'Paste OpenAI API key',
+    requiresKey: true,
+    supportsBaseUrl: false,
+    baseUrlPlaceholder: ''
+  },
+  {
+    id: 'anthropic',
+    label: 'Claude',
+    placeholder: 'Paste Anthropic API key',
+    requiresKey: true,
+    supportsBaseUrl: false,
+    baseUrlPlaceholder: ''
+  },
+  {
+    id: 'xai',
+    label: 'xAI',
+    placeholder: 'Paste xAI API key',
+    requiresKey: true,
+    supportsBaseUrl: false,
+    baseUrlPlaceholder: ''
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    placeholder: 'Paste OpenRouter API key',
+    requiresKey: true,
+    supportsBaseUrl: false,
+    baseUrlPlaceholder: ''
+  },
+  {
+    id: 'vercel_ai_gateway',
+    label: 'Vercel AI Gateway',
+    placeholder: 'Paste Vercel AI Gateway key',
+    requiresKey: true,
+    supportsBaseUrl: true,
+    baseUrlPlaceholder: 'https://ai-gateway.vercel.sh/v1'
+  },
+  {
+    id: 'ollama',
+    label: 'Ollama',
+    placeholder: '',
+    requiresKey: false,
+    supportsBaseUrl: true,
+    baseUrlPlaceholder: 'http://localhost:11434'
+  },
+  {
+    id: 'openai_compatible',
+    label: 'OpenAI-compatible',
+    placeholder: 'Paste API key',
+    requiresKey: true,
+    supportsBaseUrl: true,
+    baseUrlPlaceholder: 'http://localhost:8000/v1'
+  }
+] as const;
+
+function normalizeDirectApiProviderId(value: unknown): string {
+  const raw = String(value || '').trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    claude: 'anthropic',
+    grok: 'xai',
+    'x.ai': 'xai',
+    'openai-compatible': 'openai_compatible',
+    compatible: 'openai_compatible',
+    vercel: 'vercel_ai_gateway',
+    'vercel-ai-gateway': 'vercel_ai_gateway',
+    'ai-gateway': 'vercel_ai_gateway'
+  };
+  const id = aliases[raw] || raw || 'gemini';
+  return directApiProviderOptions.some((option) => option.id === id) ? id : 'gemini';
+}
+
 function AuthGate({
   auth,
   runtimeError,
@@ -1475,12 +1131,16 @@ function AuthGate({
   runtimeError: string;
   onStartBrowserFlow: (mode: 'signin' | 'signup') => Promise<void>;
   onExchangeCode: (code: string) => Promise<void>;
-  onUseApiKey: (apiKey: string) => Promise<void>;
+  onUseApiKey: (apiKey: string, options: DirectApiKeyOptions) => Promise<void>;
   onQuit: () => Promise<void>;
 }): React.JSX.Element {
   const cardRef = useRef<HTMLDivElement | null>(null);
+  const configuredProvider = normalizeDirectApiProviderId(auth.requestProvider?.provider_id);
+  const configuredBaseUrl = String(auth.requestProvider?.base_url || '').trim();
   const [browserCode, setBrowserCode] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [selectedProvider, setSelectedProvider] = useState(configuredProvider);
+  const [baseUrl, setBaseUrl] = useState(configuredBaseUrl);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState('');
   const [statusText, setStatusText] = useState('');
@@ -1489,6 +1149,13 @@ function AuthGate({
     width: 420,
     height: 940
   });
+  useEffect(() => {
+    setSelectedProvider(configuredProvider);
+    setBaseUrl(configuredBaseUrl);
+  }, [configuredProvider, configuredBaseUrl]);
+  const directProvider = normalizeDirectApiProviderId(selectedProvider);
+  const selectedProviderOption =
+    directApiProviderOptions.find((option) => option.id === directProvider) || directApiProviderOptions[0];
 
   const startBrowser = async (mode: 'signin' | 'signup') => {
     setSubmitting(true);
@@ -1530,13 +1197,13 @@ function AuthGate({
 
   const submitApiKey = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!apiKey.trim()) {
+    if (selectedProviderOption.requiresKey && !apiKey.trim()) {
       setLocalError('');
       setStatusText('Please enter an API Key');
       setStatusIsError(true);
       return;
     }
-    if (!apiKey.trim().startsWith('AIza')) {
+    if (directProvider === 'gemini' && !apiKey.trim().startsWith('AIza')) {
       setLocalError('');
       setStatusText('Invalid API Key format (should start with AIza)');
       setStatusIsError(true);
@@ -1544,10 +1211,13 @@ function AuthGate({
     }
     setSubmitting(true);
     setLocalError('');
-    setStatusText('Verifying key...');
+    setStatusText(directProvider === 'ollama' ? 'Connecting provider...' : 'Verifying key...');
     setStatusIsError(false);
     try {
-      await onUseApiKey(apiKey);
+      await onUseApiKey(apiKey, {
+        provider: directProvider,
+        baseUrl: selectedProviderOption.supportsBaseUrl ? baseUrl : ''
+      });
       setApiKey('');
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : 'API key setup failed.');
@@ -1575,13 +1245,13 @@ function AuthGate({
     >
       <div
         ref={cardRef}
-        className="drag-region relative overflow-hidden rounded-2xl border border-[rgba(52,78,102,0.72)] bg-[rgba(18,30,44,0.96)] px-8 pb-8 pt-7 shadow-[0_24px_70px_rgba(3,10,18,0.45)]"
+        className="drag-region relative overflow-hidden rounded-2xl border border-[rgb(52_78_102_/_0.72)] bg-[rgb(18_30_44_/_0.96)] px-8 pb-8 pt-7 shadow-[0_24px_70px_rgb(3_10_18_/_0.45)]"
       >
         <button
           type="button"
           aria-label="Close login dialog"
           onClick={() => void requestQuit()}
-          className="no-drag absolute right-3 top-3 flex h-7 w-7 items-center justify-center rounded-full text-[18px] font-bold text-[rgba(207,233,255,0.4)] transition hover:bg-[rgba(255,107,107,0.2)] hover:text-[#ff6b6b]"
+          className="no-drag absolute right-3 top-3 flex h-7 w-7 items-center justify-center rounded-full text-[18px] font-bold text-[rgb(207_233_255_/_0.4)] transition hover:bg-[rgb(255_107_107_/_0.2)] hover:text-[#ff6b6b]"
         >
           <X className="h-4 w-4" />
         </button>
@@ -1594,7 +1264,7 @@ function AuthGate({
 
         <div className="mt-4 text-center">
           <h1 className="text-[22px] font-bold tracking-[0.01em] text-[#cfe9ff]">Welcome Back</h1>
-          <p className="mx-auto mt-3 max-w-[270px] text-[12px] leading-5 text-[rgba(207,233,255,0.6)]">
+          <p className="mx-auto mt-3 max-w-[270px] text-[12px] leading-5 text-[rgb(207_233_255_/_0.6)]">
             Sign in or create your account in the browser, then return here automatically.
           </p>
         </div>
@@ -1613,13 +1283,13 @@ function AuthGate({
             type="button"
             disabled={submitting}
             onClick={() => void startBrowser('signup')}
-            className="no-drag min-h-[44px] rounded-[10px] border border-[rgba(52,78,102,0.72)] bg-transparent px-4 py-3 text-[12px] font-semibold text-[#cfe9ff] transition hover:border-[#057FCA] hover:bg-[rgba(52,78,102,0.32)] disabled:opacity-45"
+            className="no-drag min-h-[44px] rounded-[10px] border border-[rgb(52_78_102_/_0.72)] bg-transparent px-4 py-3 text-[12px] font-semibold text-[#cfe9ff] transition hover:border-[#057FCA] hover:bg-[rgb(52_78_102_/_0.32)] disabled:opacity-45"
           >
             Create Account In Browser
           </button>
         </div>
 
-        <div className="mt-7 text-center text-[11px] text-[rgba(207,233,255,0.5)]">
+        <div className="mt-7 text-center text-[11px] text-[rgb(207_233_255_/_0.5)]">
           If the browser does not return here automatically, paste the one-time browser code.
         </div>
 
@@ -1629,42 +1299,78 @@ function AuthGate({
             value={browserCode}
             onChange={(event) => setBrowserCode(event.target.value)}
             placeholder="Enter browser code"
-            className="no-drag min-h-[42px] rounded-[10px] border border-[rgba(52,78,102,0.72)] bg-[rgba(20,36,54,0.78)] px-3.5 py-2.5 text-[13px] text-[#e5f3ff] outline-none transition placeholder:text-[rgba(207,233,255,0.4)] focus:border-[#057FCA]"
+            className="no-drag min-h-[42px] rounded-[10px] border border-[rgb(52_78_102_/_0.72)] bg-[rgb(20_36_54_/_0.78)] px-3.5 py-2.5 text-[13px] text-[#e5f3ff] outline-none transition placeholder:text-[rgb(207_233_255_/_0.4)] focus:border-[#057FCA]"
           />
           <button
             type="submit"
             disabled={submitting}
-            className="no-drag min-h-[44px] rounded-[10px] border border-[rgba(52,78,102,0.72)] bg-transparent px-4 py-3 text-[12px] font-semibold text-[#cfe9ff] transition hover:border-[#057FCA] hover:bg-[rgba(52,78,102,0.32)] disabled:opacity-45"
+            className="no-drag min-h-[44px] rounded-[10px] border border-[rgb(52_78_102_/_0.72)] bg-transparent px-4 py-3 text-[12px] font-semibold text-[#cfe9ff] transition hover:border-[#057FCA] hover:bg-[rgb(52_78_102_/_0.32)] disabled:opacity-45"
           >
             {submitting ? 'Completing Sign-In...' : 'Continue With Browser Code'}
           </button>
         </form>
 
-        <div className="mt-8 text-center text-[11px] text-[rgba(207,233,255,0.5)]">
-          Or use your own Gemini API key for direct mode
+        <div className="mt-8 text-center text-[11px] text-[rgb(207_233_255_/_0.5)]">
+          Or connect your own model provider for direct mode
         </div>
 
         <form className="mt-3 grid gap-3" onSubmit={(event) => void submitApiKey(event)}>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
-            placeholder="Paste Gemini API key (starts with AIza...)"
-            className="no-drag min-h-[42px] rounded-[10px] border border-[rgba(52,78,102,0.72)] bg-[rgba(20,36,54,0.78)] px-3.5 py-2.5 text-[13px] text-[#e5f3ff] outline-none transition placeholder:text-[rgba(207,233,255,0.4)] focus:border-[#057FCA]"
-          />
+          <label className="no-drag grid gap-1.5 text-[11px] font-semibold text-[rgb(207_233_255_/_0.68)]">
+            Model provider
+            <select
+              value={directProvider}
+              onChange={(event) => {
+                setSelectedProvider(event.target.value);
+                setLocalError('');
+                setStatusText('');
+              }}
+              className="no-drag min-h-[42px] rounded-lg border border-[rgb(52_78_102_/_0.72)] bg-[rgb(20_36_54_/_0.92)] px-3 py-2.5 text-[13px] font-medium text-[#e5f3ff] outline-none transition focus:border-[#057FCA]"
+            >
+              {directApiProviderOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {selectedProviderOption.requiresKey ? (
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              placeholder={selectedProviderOption.placeholder}
+              className="no-drag min-h-[42px] rounded-[10px] border border-[rgb(52_78_102_/_0.72)] bg-[rgb(20_36_54_/_0.78)] px-3.5 py-2.5 text-[13px] text-[#e5f3ff] outline-none transition placeholder:text-[rgb(207_233_255_/_0.4)] focus:border-[#057FCA]"
+            />
+          ) : (
+            <div className="no-drag rounded-lg border border-[rgb(52_78_102_/_0.48)] bg-[rgb(20_36_54_/_0.5)] px-3.5 py-2.5 text-[11px] leading-5 text-[rgb(207_233_255_/_0.68)]">
+              Ollama runs locally, so an API key is not required.
+            </div>
+          )}
+
+          {selectedProviderOption.supportsBaseUrl && (
+            <input
+              type="url"
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
+              placeholder={selectedProviderOption.baseUrlPlaceholder}
+              className="no-drag min-h-[42px] rounded-[10px] border border-[rgb(52_78_102_/_0.72)] bg-[rgb(20_36_54_/_0.78)] px-3.5 py-2.5 text-[13px] text-[#e5f3ff] outline-none transition placeholder:text-[rgb(207_233_255_/_0.4)] focus:border-[#057FCA]"
+            />
+          )}
+
           <button
             type="submit"
             disabled={submitting}
-            className="no-drag min-h-[44px] rounded-[10px] border border-[rgba(52,78,102,0.72)] bg-transparent px-4 py-3 text-[12px] font-semibold text-[#cfe9ff] transition hover:border-[#057FCA] hover:bg-[rgba(52,78,102,0.32)] disabled:opacity-45"
+            className="no-drag min-h-[44px] rounded-[10px] border border-[rgb(52_78_102_/_0.72)] bg-transparent px-4 py-3 text-[12px] font-semibold text-[#cfe9ff] transition hover:border-[#057FCA] hover:bg-[rgb(52_78_102_/_0.32)] disabled:opacity-45"
           >
-            {submitting ? 'Verifying key...' : 'Use API Key'}
+            {submitting ? 'Connecting...' : directProvider === 'ollama' ? 'Use Ollama' : 'Use API Key'}
           </button>
         </form>
 
         <div className="mt-4 min-h-[20px] text-center text-[11px]">
           <span
             className={
-              localError || runtimeError || statusIsError ? 'text-[#ff6b6b]' : 'text-[rgba(207,233,255,0.6)]'
+              localError || runtimeError || statusIsError ? 'text-[#ff6b6b]' : 'text-[rgb(207_233_255_/_0.6)]'
             }
           >
             {localError || runtimeError || statusText}
@@ -1720,156 +1426,7 @@ function ConfirmationModal({
   );
 }
 
-function LegacyDetailsPanel({
-  snapshot,
-  messages,
-  updates,
-  runtimeError,
-  onStop
-}: {
-  snapshot: RuntimeSnapshot;
-  messages: MessageEntry[];
-  updates: ActionUpdate[];
-  runtimeError: string;
-  onStop: () => Promise<void>;
-}): React.JSX.Element {
-  const deferredMessages = useDeferredValue(messages);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [thinkingExpanded, setThinkingExpanded] = useState(false);
-  const liveStatus = useMemo(() => currentLiveStatus(snapshot), [snapshot]);
-  const visibleMessages = useMemo(
-    () =>
-      deferredMessages
-        .filter((entry) => {
-          const kind = String(entry.kind || '').trim().toLowerCase();
-          const speaker = String(entry.speaker || '').trim().toLowerCase();
-          return kind === 'user' || kind === 'assistant' || speaker === 'user' || speaker === 'assistant';
-        })
-        .slice(-12),
-    [deferredMessages]
-  );
-  const thinkingState = useMemo(() => buildThinkingState(snapshot, updates), [snapshot, updates]);
-  const summaryLine = [
-    snapshot.operationMode,
-    snapshot.visionMode,
-    snapshot.workspace === 'agent' ? 'Agent desktop' : 'User desktop',
-    snapshot.liveAvailable ? humanizeState(snapshot.liveSessionState) : 'Offline',
-    snapshot.wakeWordEnabled ? 'Wake word enabled' : 'Wake word disabled'
-  ].join(' / ');
-
-  useEffect(() => {
-    if (!thinkingState.summary) {
-      setThinkingExpanded(false);
-    }
-  }, [thinkingState.summary]);
-
-  useEffect(() => {
-    const container = scrollRef.current;
-    if (!container) {
-      return;
-    }
-    container.scrollTop = container.scrollHeight;
-  }, [visibleMessages, thinkingState.summary, thinkingState.lines.length, thinkingExpanded]);
-  const onStopRef = onStop;
-  void onStopRef;
-
-  return (
-    <SoftPanel className="no-drag overflow-hidden p-0">
-      <div className="border-b border-white/26 px-4 py-3">
-        <div className="min-w-0">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Process details</div>
-          <div className="mt-1 truncate text-xs text-slate-600">{summaryLine}</div>
-        </div>
-      </div>
-
-      <div className="px-4 py-3">
-        {!snapshot.liveAvailable && snapshot.liveUnavailableReason && (
-          <div className="mb-3 rounded-2xl border border-amber-200/80 bg-amber-50/80 px-3 py-2.5 text-sm text-amber-900">
-            {snapshot.liveUnavailableReason}
-          </div>
-        )}
-
-        {liveStatus.level !== 'idle' && liveStatus.message && (
-          <div
-            className={`mb-3 rounded-2xl px-3 py-2.5 text-sm ${
-              liveStatus.level === 'error'
-                ? 'border border-rose-200/80 bg-rose-50/80 text-rose-900'
-                : 'border border-sky-200/80 bg-sky-50/80 text-sky-900'
-            }`}
-          >
-            {liveStatus.message}
-          </div>
-        )}
-
-        {runtimeError && (
-          <div className="mb-3 rounded-2xl border border-rose-200/80 bg-rose-50/80 px-3 py-2.5 text-sm text-rose-900">
-            {runtimeError}
-          </div>
-        )}
-
-        <div className="overflow-hidden rounded-[20px] border border-white/32 bg-white/18">
-          <div ref={scrollRef} className="no-drag max-h-[320px] min-h-[250px] overflow-y-auto px-3 py-3">
-            {visibleMessages.length > 0 || thinkingState.summary ? (
-              <div className="space-y-3">
-                {visibleMessages.map((entry) => (
-                  <div key={entry.id} className={messageBubbleClass(entry)}>
-                    <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-                      {speakerLabel(entry)}
-                    </div>
-                    <div>{entry.text}</div>
-                    {!entry.final && <div className="mt-0.5 text-[11px] text-slate-400">Streaming...</div>}
-                  </div>
-                ))}
-                {thinkingState.summary && (
-                  <div className="max-w-[82%] px-1 py-0.5">
-                    <button
-                      type="button"
-                      aria-expanded={thinkingExpanded}
-                      onClick={() => setThinkingExpanded((current) => !current)}
-                      className="no-drag flex w-full items-start gap-2 rounded-xl px-2 py-1.5 text-left transition hover:bg-white/18"
-                    >
-                      <span className="pt-0.5 font-mono text-[12px] text-slate-500">thinking&gt;</span>
-                      <span className="min-w-0 flex-1 text-[13px] italic leading-6 text-slate-500">
-                        {thinkingState.summary}
-                      </span>
-                      {thinkingExpanded ? (
-                        <ChevronUp className="mt-1 h-3.5 w-3.5 shrink-0 text-slate-400" />
-                      ) : (
-                        <ChevronDown className="mt-1 h-3.5 w-3.5 shrink-0 text-slate-400" />
-                      )}
-                    </button>
-                    <AnimatePresence initial={false}>
-                      {thinkingExpanded && thinkingState.lines.length > 0 && (
-                        <motion.div
-                          initial={{ opacity: 0, y: -4 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: -4 }}
-                          className="ml-4 mt-1 space-y-1 border-l border-white/24 pl-3"
-                        >
-                          {thinkingState.lines.map((line, index) => (
-                            <div key={`${line}-${index}`} className="text-[12px] leading-5 text-slate-500">
-                              {line}
-                            </div>
-                          ))}
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="flex min-h-[220px] items-end text-sm text-slate-500">
-                Open apps, send emails/WhatsApp, fix PC issues, or ask anything...
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </SoftPanel>
-  );
-}
-
-function OverlayShell({
+function CommandBarShell({
   snapshot,
   messages,
   actionUpdates,
@@ -1887,224 +1444,30 @@ function OverlayShell({
   const [commandText, setCommandText] = useState('');
   const [busyText, setBusyText] = useState('');
   const [localError, setLocalError] = useState('');
-  const [pendingLiveToggle, setPendingLiveToggle] = useState(false);
-  const [pendingVoiceToggle, setPendingVoiceToggle] = useState(false);
-  const [optimisticLiveVoiceActive, setOptimisticLiveVoiceActive] = useState<boolean | null>(null);
-  const submittingRef = useRef(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const shellRef = useRef<HTMLDivElement>(null);
-  const effectiveSnapshot = useMemo(
-    () => ({
-      ...snapshot,
-      liveVoiceActive: optimisticLiveVoiceActive ?? snapshot.liveVoiceActive
-    }),
-    [optimisticLiveVoiceActive, snapshot]
+  const submittingRef = useRef(false);
+  const bridgeBusy = isBridgeBusyStatus(snapshot.bridgeStatus);
+  const status = useMemo(
+    () => buildCommandBarStatus(snapshot, messages, actionUpdates, busyText, localError, runtimeError),
+    [snapshot, messages, actionUpdates, busyText, localError, runtimeError]
   );
-  const isBarOnly = !effectiveSnapshot.expanded;
-  const bridgeBusy = isBridgeBusyStatus(effectiveSnapshot.bridgeStatus);
-  const commandBarStatus = useMemo(
-    () =>
-      buildCommandBarStatus(
-        effectiveSnapshot,
-        messages,
-        actionUpdates,
-        busyText,
-        localError,
-        runtimeError
-      ),
-    [effectiveSnapshot, messages, actionUpdates, busyText, localError, runtimeError]
-  );
-  const showInlineStatus =
-    commandBarStatus.kind === 'busy' || commandBarStatus.kind === 'error' || commandText.length === 0;
-  const inlineStatusOverridesInput =
-    commandBarStatus.kind === 'busy' || commandBarStatus.kind === 'error';
-  const showInlineStop =
-    effectiveSnapshot.liveAvailable && hasOngoingLiveTurn(effectiveSnapshot, actionUpdates, busyText);
-  const inlineStatusToneClass =
-    commandBarStatus.tone === 'error'
-      ? 'text-rose-600'
-      : commandBarStatus.tone === 'placeholder'
-        ? 'text-slate-500'
-        : 'text-slate-600';
+  const running = hasOngoingLiveTurn(snapshot, actionUpdates, busyText);
+  const commandPlaceholder = status.tone === 'placeholder' || commandText ? inputPlaceholder(snapshot) : status.text;
+
+  useMeasuredWindowLayout(shellRef, {
+    width: 1120,
+    height: confirmationRequest ? 328 : 82
+  }, [confirmationRequest, status.text, snapshot.operationMode, running]);
 
   useEffect(() => {
-    if (optimisticLiveVoiceActive !== null && snapshot.liveVoiceActive === optimisticLiveVoiceActive) {
-      setOptimisticLiveVoiceActive(null);
-      setPendingVoiceToggle(false);
-    }
-  }, [optimisticLiveVoiceActive, snapshot.liveVoiceActive]);
+    const timer = window.setTimeout(() => {
+      inputRef.current?.focus();
+    }, 40);
+    return () => window.clearTimeout(timer);
+  }, []);
 
-  const fallbackLayout = {
-    width: 920,
-    height: (isBarOnly ? 88 : 114) + (effectiveSnapshot.expanded ? 292 : 0)
-  };
-  useMeasuredWindowLayout(shellRef, fallbackLayout, [
-    isBarOnly,
-    effectiveSnapshot.expanded,
-    effectiveSnapshot.liveVoiceActive,
-    effectiveSnapshot.liveAvailable,
-    effectiveSnapshot.operationMode,
-    effectiveSnapshot.visionMode,
-    effectiveSnapshot.workspace,
-    effectiveSnapshot.agentViewRequested,
-    effectiveSnapshot.userAudioLevel,
-    effectiveSnapshot.assistantAudioLevel,
-    messages.length,
-    actionUpdates.length
-  ]);
-
-  const invoke = async (method: string, payload?: Record<string, unknown>): Promise<void> => {
-    setLocalError('');
-    try {
-      await window.pixelPilot.invokeRuntime(method, payload);
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Action could not be completed right now.');
-    }
-  };
-
-  const submitCommand = async (): Promise<void> => {
-    const text = commandText.trim();
-    if (!text || submittingRef.current || bridgeBusy) {
-      return;
-    }
-    submittingRef.current = true;
-    setBusyText('Submitting...');
-    try {
-      await window.pixelPilot.invokeRuntime('live.submitText', { text });
-      setCommandText('');
-      setBusyText('');
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Failed to submit command.');
-      setBusyText('');
-    } finally {
-      submittingRef.current = false;
-    }
-  };
-
-  const toggleAgentViewFromBar = async (): Promise<void> => {
-    if (!effectiveSnapshot.agentViewEnabled || bridgeBusy) {
-      return;
-    }
-
-    const requested = !effectiveSnapshot.agentViewRequested;
-    setBusyText(requested ? 'Showing agent preview...' : 'Hiding agent preview...');
-    setLocalError('');
-    try {
-      await window.pixelPilot.invokeRuntime('agentView.setRequested', { requested });
-      setBusyText('');
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to update the agent preview right now.');
-      setBusyText('');
-    }
-  };
-
-  const openSettingsMenu = async (): Promise<void> => {
-    if (bridgeBusy) {
-      return;
-    }
-    setLocalError('');
-    try {
-      await window.pixelPilot.toggleSettingsWindow();
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to open settings right now.');
-    }
-  };
-
-  const toggleLiveMode = async (): Promise<void> => {
-    if (pendingLiveToggle || bridgeBusy) {
-      return;
-    }
-    if (!effectiveSnapshot.liveAvailable) {
-      setLocalError(effectiveSnapshot.liveUnavailableReason || 'PixelPilot Live is unavailable right now.');
-      return;
-    }
-
-    const liveState = String(effectiveSnapshot.liveSessionState || '').trim().toLowerCase();
-    const requestReconnect = liveState === 'disconnected';
-    setLocalError('');
-    setBusyText(requestReconnect ? 'Reconnecting AI session...' : 'Disconnecting AI session...');
-    setPendingLiveToggle(true);
-    if (!requestReconnect) {
-      setOptimisticLiveVoiceActive(false);
-    }
-
-    try {
-      await window.pixelPilot.invokeRuntime('live.setEnabled', { enabled: requestReconnect });
-      if (!requestReconnect) {
-        setOptimisticLiveVoiceActive(false);
-        setPendingVoiceToggle(false);
-      }
-      setPendingLiveToggle(false);
-      setBusyText('');
-    } catch (error) {
-      setOptimisticLiveVoiceActive(null);
-      setPendingLiveToggle(false);
-      setBusyText('');
-      setLocalError(error instanceof Error ? error.message : 'Unable to change the Live connection right now.');
-    }
-  };
-
-  const toggleVoiceInput = async (): Promise<void> => {
-    if (pendingVoiceToggle || pendingLiveToggle || bridgeBusy) {
-      return;
-    }
-    if (!effectiveSnapshot.liveAvailable) {
-      setLocalError(effectiveSnapshot.liveUnavailableReason || 'PixelPilot Live is unavailable right now.');
-      return;
-    }
-
-    const liveState = String(effectiveSnapshot.liveSessionState || '').trim().toLowerCase();
-    const startingFromDisconnected = liveState === 'disconnected' && !effectiveSnapshot.liveVoiceActive;
-    const nextVoiceState = startingFromDisconnected ? true : !effectiveSnapshot.liveVoiceActive;
-    setLocalError('');
-    setBusyText(
-      nextVoiceState
-        ? startingFromDisconnected
-          ? 'Reconnecting and starting voice...'
-          : 'Starting voice input...'
-        : 'Stopping voice input...'
-    );
-    setPendingVoiceToggle(true);
-
-    try {
-      if (startingFromDisconnected) {
-        setPendingLiveToggle(true);
-        const liveResult = await window.pixelPilot.invokeRuntime('live.setEnabled', { enabled: true });
-        setPendingLiveToggle(false);
-        const sessionState = String(liveResult.liveSessionState || '').trim().toLowerCase();
-        if (sessionState === 'disconnected') {
-          throw new Error('PixelPilot could not reconnect right now.');
-        }
-      }
-
-      setOptimisticLiveVoiceActive(nextVoiceState);
-      const payload = await window.pixelPilot.invokeRuntime('live.setVoice', { enabled: nextVoiceState });
-      if (typeof payload.liveVoiceActive === 'boolean') {
-        setOptimisticLiveVoiceActive(Boolean(payload.liveVoiceActive));
-      }
-      setPendingVoiceToggle(false);
-      setBusyText('');
-    } catch (error) {
-      setOptimisticLiveVoiceActive(null);
-      setPendingLiveToggle(false);
-      setPendingVoiceToggle(false);
-      setBusyText('');
-      setLocalError(error instanceof Error ? error.message : 'Unable to change voice input right now.');
-    }
-  };
-
-  const changeExpanded = async (expanded: boolean): Promise<void> => {
-    if (expanded === effectiveSnapshot.expanded) {
-      return;
-    }
-    setLocalError('');
-    try {
-      await window.pixelPilot.setExpanded(expanded);
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to change the panel size right now.');
-    }
-  };
-
-  const hideToNotch = async (): Promise<void> => {
+  const closeCommandBar = async (): Promise<void> => {
     setLocalError('');
     try {
       await window.pixelPilot.setBackgroundHidden(true);
@@ -2113,183 +1476,93 @@ function OverlayShell({
     }
   };
 
-  const quitPixelPilot = async (): Promise<void> => {
+  const submitCommand = async (): Promise<void> => {
+    const text = commandText.trim();
+    if (!text || submittingRef.current || bridgeBusy || !snapshot.liveAvailable) {
+      return;
+    }
+    submittingRef.current = true;
+    setBusyText('Submitting...');
     setLocalError('');
     try {
-      await window.pixelPilot.quitApp();
+      await window.pixelPilot.invokeRuntime('live.submitText', { text });
+      setCommandText('');
+      setBusyText('');
+      await window.pixelPilot.setBackgroundHidden(true);
     } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to quit PixelPilot right now.');
+      setLocalError(error instanceof Error ? error.message : 'Failed to submit command.');
+      setBusyText('');
+    } finally {
+      submittingRef.current = false;
     }
   };
-
-  const commandComposer = (
-    <SoftPanel className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2">
-      <div className="relative min-w-0 flex-1">
-        {showInlineStatus && (
-          <span
-            aria-hidden="true"
-            className={`pointer-events-none absolute inset-y-0 left-0 right-0 flex items-center overflow-hidden ${inlineStatusToneClass}`}
-          >
-            <span className="block truncate whitespace-nowrap">{commandBarStatus.text}</span>
-          </span>
-        )}
-        <input
-          value={commandText}
-          onChange={(event) => setCommandText(event.target.value)}
-          readOnly={!effectiveSnapshot.liveAvailable || bridgeBusy}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              void submitCommand();
-            }
-          }}
-          placeholder={inputPlaceholder(effectiveSnapshot)}
-          className={[
-            'no-drag relative z-10 block w-full border-0 bg-transparent text-[15px] outline-none',
-            inlineStatusOverridesInput ? 'text-transparent caret-slate-800' : 'text-slate-800',
-            showInlineStatus ? 'placeholder:text-transparent' : 'placeholder:text-slate-500'
-          ].join(' ')}
-        />
-      </div>
-      <MicControlButton
-        snapshot={effectiveSnapshot}
-        pending={pendingVoiceToggle}
-        compact
-        disabled={bridgeBusy}
-        onClick={() => void toggleVoiceInput()}
-      />
-      {showInlineStop && (
-        <button
-          type="button"
-          aria-label="Stop current turn"
-          title="Stop current turn"
-          onClick={() => void invoke('live.stop')}
-          disabled={bridgeBusy}
-          className="no-drag flex h-8 items-center justify-center rounded-xl border border-white/36 bg-white/34 px-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-700 transition hover:bg-white/48"
-        >
-          Stop
-        </button>
-      )}
-      <button
-        type="button"
-        aria-label="Send command"
-        onClick={() => void submitCommand()}
-        disabled={!effectiveSnapshot.liveAvailable || bridgeBusy || !commandText.trim()}
-        className="no-drag flex h-8 min-w-[38px] items-center justify-center rounded-xl bg-slate-900 px-2.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white transition hover:bg-slate-800 disabled:opacity-40"
-      >
-        Go
-      </button>
-    </SoftPanel>
-  );
 
   return (
     <motion.div
       ref={shellRef}
-      className="relative mx-auto w-full max-w-[940px]"
+      className="relative mx-auto w-full max-w-[1120px]"
       initial={{ opacity: 0, y: -10 }}
       animate={{ opacity: 1, y: 0 }}
     >
-      <GlassPanel className="drag-region relative overflow-hidden p-3">
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(191,219,254,0.32),transparent_40%),radial-gradient(circle_at_bottom_right,rgba(226,232,240,0.48),transparent_52%)]" />
-        <div className="relative">
-          {isBarOnly ? (
-            <div className="flex items-center gap-2">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[18px] border border-white/42 bg-white/22 shadow-[inset_0_1px_0_rgba(255,255,255,0.44)]">
-                <PixelPilotLogo className="h-5 w-5" />
-              </div>
+      <div className="drag-region relative">
+        <motion.div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 rounded-[36px]"
+          initial={{ opacity: 0.9 }}
+          animate={{ opacity: 0 }}
+          transition={{ duration: 1.8, ease: 'easeOut' }}
+          style={{
+            boxShadow:
+              '0 0 0 1px rgba(45,212,191,0.78), 0 0 30px rgba(45,212,191,0.44), inset 0 0 22px rgba(45,212,191,0.20)'
+          }}
+        />
+        <div className="relative flex h-[64px] items-center gap-3 rounded-[36px] border border-white/70 bg-white/95 px-7 text-slate-900 shadow-[0_18px_48px_rgba(15,23,42,0.18)] backdrop-blur-2xl">
+          <Search className="h-6 w-6 shrink-0 text-slate-500" />
 
-              {commandComposer}
+          <div className="min-w-0 flex-1">
+            <label className="sr-only" htmlFor="pixelpilot-command-input">
+              PixelPilot command
+            </label>
+            <input
+              id="pixelpilot-command-input"
+              ref={inputRef}
+              value={commandText}
+              onChange={(event) => setCommandText(event.target.value)}
+              readOnly={!snapshot.liveAvailable || bridgeBusy}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void submitCommand();
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  void closeCommandBar();
+                }
+              }}
+              placeholder={commandPlaceholder}
+              className="no-drag block w-full border-0 bg-transparent text-[22px] font-normal text-slate-800 outline-none placeholder:text-slate-500"
+            />
+          </div>
 
-                <IconButton
-                  compact
-                  label={workspaceBadgeLabel(effectiveSnapshot)}
-                  active={effectiveSnapshot.workspace === 'agent' && effectiveSnapshot.agentViewRequested}
-                  disabled={!effectiveSnapshot.agentViewEnabled || bridgeBusy}
-                  onClick={() => void toggleAgentViewFromBar()}
-                >
-                  {workspaceIcon(effectiveSnapshot.workspace)}
-                </IconButton>
-              <LiveModeButton
-                snapshot={effectiveSnapshot}
-                pending={pendingLiveToggle}
-                compact
-                disabled={bridgeBusy}
-                onClick={() => void toggleLiveMode()}
-              />
-              <IconButton compact label="Open settings menu" disabled={bridgeBusy} onClick={() => void openSettingsMenu()}>
-                <Settings2 className="h-4 w-4" />
-              </IconButton>
-              <IconButton compact label="Hide to notch" onClick={() => void hideToNotch()}>
-                <Minus className="h-4 w-4" />
-              </IconButton>
-              <IconButton compact label="Expand details" onClick={() => void changeExpanded(true)}>
-                <ChevronDown className="h-4 w-4" />
-              </IconButton>
-              <IconButton compact label="Quit PixelPilot" onClick={() => void quitPixelPilot()}>
-                <X className="h-4 w-4" />
-              </IconButton>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[18px] border border-white/42 bg-white/22 shadow-[inset_0_1px_0_rgba(255,255,255,0.44)]">
-                <PixelPilotLogo className="h-5 w-5" />
-              </div>
-
-              {commandComposer}
-
-                <IconButton
-                  compact
-                  label={workspaceBadgeLabel(effectiveSnapshot)}
-                  active={effectiveSnapshot.workspace === 'agent' && effectiveSnapshot.agentViewRequested}
-                  disabled={!effectiveSnapshot.agentViewEnabled || bridgeBusy}
-                  onClick={() => void toggleAgentViewFromBar()}
-                >
-                  {workspaceIcon(effectiveSnapshot.workspace)}
-                </IconButton>
-              <LiveModeButton
-                snapshot={effectiveSnapshot}
-                pending={pendingLiveToggle}
-                compact
-                disabled={bridgeBusy}
-                onClick={() => void toggleLiveMode()}
-              />
-              <IconButton compact label="Open settings menu" disabled={bridgeBusy} onClick={() => void openSettingsMenu()}>
-                <Settings2 className="h-4 w-4" />
-              </IconButton>
-              <IconButton compact label="Hide to notch" onClick={() => void hideToNotch()}>
-                <Minus className="h-4 w-4" />
-              </IconButton>
-              <IconButton compact label="Collapse details" active onClick={() => void changeExpanded(false)}>
-                <ChevronUp className="h-4 w-4" />
-              </IconButton>
-              <IconButton compact label="Quit PixelPilot" onClick={() => void quitPixelPilot()}>
-                <X className="h-4 w-4" />
-              </IconButton>
-            </div>
-          )}
-
-          <AnimatePresence initial={false}>
-            {effectiveSnapshot.expanded && (
-              <motion.div
-                className="mt-3"
-                initial={{ opacity: 0, y: -8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-              >
-                <LegacyDetailsPanel
-                  snapshot={effectiveSnapshot}
-                  messages={messages}
-                  updates={actionUpdates}
-                  runtimeError={runtimeError}
-                  onStop={() => invoke('live.stop')}
-                />
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <button
+            type="button"
+            aria-label="Run command"
+            onClick={() => void submitCommand()}
+            disabled={!snapshot.liveAvailable || bridgeBusy || !commandText.trim()}
+            className={[
+              'no-drag flex h-12 shrink-0 items-center rounded-full px-6 text-[20px] font-medium transition',
+              commandText.trim() ? 'bg-slate-100 text-slate-950 hover:bg-slate-200' : 'bg-slate-100/80 text-slate-500',
+              'disabled:opacity-60'
+            ].join(' ')}
+          >
+            Run
+          </button>
         </div>
 
-        <ConfirmationModal request={confirmationRequest} onResolve={onResolveConfirmation} />
-      </GlassPanel>
+        <div className={confirmationRequest ? 'relative mt-3 h-[230px]' : 'relative h-0 overflow-hidden'}>
+          <ConfirmationModal request={confirmationRequest} onResolve={onResolveConfirmation} />
+        </div>
+      </div>
     </motion.div>
   );
 }
@@ -2611,6 +1884,38 @@ function GeneralSettingsSection({
         </div>
       </div>
 
+      <div className="rounded-[18px] border border-white/38 bg-white/46 p-3">
+        <div className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Desktop Visibility</div>
+        <MenuItemButton
+          label="Corner glow"
+          active={(snapshot.uiPreferences || defaultUiPreferences).cornerGlowEnabled}
+          disabled={disabled}
+          onClick={() =>
+            void window.pixelPilot
+              .setUiPreferences({
+                cornerGlowEnabled: !(snapshot.uiPreferences || defaultUiPreferences).cornerGlowEnabled
+              })
+              .catch((error) => {
+                setLocalError(error instanceof Error ? error.message : 'Unable to update visibility settings right now.');
+              })
+          }
+        />
+        <MenuItemButton
+          label="Status notch"
+          active={(snapshot.uiPreferences || defaultUiPreferences).statusNotchEnabled}
+          disabled={disabled}
+          onClick={() =>
+            void window.pixelPilot
+              .setUiPreferences({
+                statusNotchEnabled: !(snapshot.uiPreferences || defaultUiPreferences).statusNotchEnabled
+              })
+              .catch((error) => {
+                setLocalError(error instanceof Error ? error.message : 'Unable to update visibility settings right now.');
+              })
+          }
+        />
+      </div>
+
       <div className="rounded-[18px] border border-white/38 bg-white/46 px-4 py-3">
         <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Settings Sources</div>
         <div className="mt-2 space-y-2 text-sm text-slate-700">
@@ -2894,6 +2199,51 @@ function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.E
 
 function NotchShell({
   snapshot,
+  messages,
+  actionUpdates,
+  runtimeError
+}: {
+  snapshot: RuntimeSnapshot;
+  messages: MessageEntry[];
+  actionUpdates: ActionUpdate[];
+  runtimeError: string;
+}): React.JSX.Element {
+  const shellRef = useRef<HTMLDivElement>(null);
+  const status = useMemo(
+    () => buildCommandBarStatus(snapshot, messages, actionUpdates, '', '', runtimeError),
+    [snapshot, messages, actionUpdates, runtimeError]
+  );
+  useMeasuredWindowLayout(shellRef, {
+    width: 260,
+    height: 54
+  }, [status.text]);
+
+  return (
+    <motion.div
+      ref={shellRef}
+      className="pointer-events-none mx-auto flex w-fit max-w-[720px] items-start justify-center px-3"
+      initial={{ opacity: 0, y: -10 }}
+      animate={{ opacity: 1, y: 0 }}
+      aria-label={`PixelPilot status: ${status.text}`}
+    >
+      <div
+        className={[
+          'relative min-h-[44px] min-w-[180px] max-w-[700px] overflow-hidden rounded-b-[24px] rounded-t-sm',
+          'border border-white/16 bg-zinc-600/42 px-8 py-3 text-white shadow-[0_14px_36px_rgba(0,0,0,0.20)] backdrop-blur-2xl'
+        ].join(' ')}
+      >
+        <div className="flex items-center justify-center">
+          <span className="block max-w-[640px] truncate text-center text-[11px] font-medium leading-none text-white/82">
+            {status.text}
+          </span>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function GlowShell({
+  snapshot,
   actionUpdates,
   runtimeError
 }: {
@@ -2901,93 +2251,154 @@ function NotchShell({
   actionUpdates: ActionUpdate[];
   runtimeError: string;
 }): React.JSX.Element {
-  const [localError, setLocalError] = useState('');
-  const progress = buildNotchProgress(snapshot, actionUpdates, localError || runtimeError);
-  useWindowLayout({ width: 420, height: 62 });
-
-  const restoreOverlay = async (): Promise<void> => {
-    setLocalError('');
-    try {
-      await window.pixelPilot.setBackgroundHidden(false);
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to restore PixelPilot right now.');
+  const status = buildCommandBarStatus(snapshot, [], actionUpdates, '', '', runtimeError);
+  const progress = {
+    text: status.text,
+    busy: status.kind === 'busy' || status.kind === 'status',
+    tone: status.tone === 'error' ? 'error' : status.tone === 'placeholder' ? 'idle' : 'active'
+  } as const;
+  const liveState = String(snapshot.liveSessionState || '').trim().toLowerCase();
+  const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
+  const speaking = snapshot.assistantAudioLevel > 0.02;
+  const hearingUser = snapshot.userAudioLevel > 0.02;
+  const wakeDetected = wakeWordState === 'paused' && snapshot.liveVoiceActive && !speaking && !hearingUser;
+  const wakeReady =
+    wakeWordState === 'armed' &&
+    !snapshot.liveVoiceActive &&
+    !['thinking', 'waiting', 'acting', 'connecting'].includes(liveState);
+  const glow = (() => {
+    if (progress.tone === 'error') {
+      return {
+        label: progress.text,
+        color: 'rgba(244,63,94,0.82)',
+        shadow: 'rgba(244,63,94,0.58)',
+        wideShadow: 'rgba(244,63,94,0.28)',
+        duration: 1.05
+      };
     }
-  };
-
-  const runInTrayOnly = async (): Promise<void> => {
-    setLocalError('');
-    try {
-      await window.pixelPilot.setTrayOnly(true);
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Unable to switch to tray-only mode right now.');
+    if (speaking) {
+      return {
+        label: 'PixelPilot is speaking',
+        color: 'rgba(96,165,250,0.82)',
+        shadow: 'rgba(96,165,250,0.58)',
+        wideShadow: 'rgba(96,165,250,0.26)',
+        duration: 1.45
+      };
     }
-  };
+    if (wakeDetected) {
+      return {
+        label: 'Wake word detected',
+        color: 'rgba(190,242,100,0.88)',
+        shadow: 'rgba(190,242,100,0.7)',
+        wideShadow: 'rgba(190,242,100,0.34)',
+        duration: 0.85
+      };
+    }
+    if (snapshot.liveVoiceActive || hearingUser) {
+      return {
+        label: 'PixelPilot is listening',
+        color: 'rgba(45,212,191,0.84)',
+        shadow: 'rgba(45,212,191,0.6)',
+        wideShadow: 'rgba(45,212,191,0.28)',
+        duration: 1.3
+      };
+    }
+    if (liveState === 'acting') {
+      return {
+        label: progress.text || 'PixelPilot is acting',
+        color: 'rgba(251,146,60,0.84)',
+        shadow: 'rgba(251,146,60,0.62)',
+        wideShadow: 'rgba(251,146,60,0.3)',
+        duration: 1.2
+      };
+    }
+    if (liveState === 'waiting') {
+      return {
+        label: progress.text || 'PixelPilot is waiting',
+        color: 'rgba(250,204,21,0.82)',
+        shadow: 'rgba(250,204,21,0.58)',
+        wideShadow: 'rgba(250,204,21,0.26)',
+        duration: 1.55
+      };
+    }
+    if (liveState === 'thinking') {
+      return {
+        label: progress.text || 'PixelPilot is thinking',
+        color: 'rgba(56,189,248,0.82)',
+        shadow: 'rgba(56,189,248,0.58)',
+        wideShadow: 'rgba(56,189,248,0.26)',
+        duration: 1.8
+      };
+    }
+    if (liveState === 'connecting') {
+      return {
+        label: 'PixelPilot is connecting',
+        color: 'rgba(59,130,246,0.82)',
+        shadow: 'rgba(59,130,246,0.58)',
+        wideShadow: 'rgba(59,130,246,0.24)',
+        duration: 1.25
+      };
+    }
+    if (wakeReady) {
+      return {
+        label: 'Wake word is ready',
+        color: 'rgba(34,197,94,0.76)',
+        shadow: 'rgba(34,197,94,0.54)',
+        wideShadow: 'rgba(34,197,94,0.22)',
+        duration: 1.7
+      };
+    }
+    return {
+      label: progress.text || 'PixelPilot opened',
+      color: 'rgba(45,212,191,0.68)',
+      shadow: 'rgba(45,212,191,0.48)',
+      wideShadow: 'rgba(45,212,191,0.22)',
+      duration: 1.25
+    };
+  })();
+  const edgeShadow = `0 0 16px ${glow.shadow}, 0 0 44px ${glow.wideShadow}`;
+  useWindowLayout({
+    width: Math.max(400, Math.round(window.screen?.width || 400)),
+    height: Math.max(300, Math.round(window.screen?.height || 300))
+  });
 
   return (
-    <motion.div
-      className="mx-auto w-[420px]"
-      initial={{ opacity: 0, y: -10 }}
-      animate={{ opacity: 1, y: 0 }}
+    <div
+      aria-label={`PixelPilot status glow: ${glow.label}`}
+      className="pointer-events-none fixed inset-0 overflow-hidden"
     >
-      <div
-        className={[
-          'drag-region no-drag rounded-b-[22px] border border-white/24 backdrop-blur-2xl',
-          'bg-[rgba(236,245,255,0.12)] px-3 py-2.5',
-          'shadow-[0_10px_34px_rgba(15,23,42,0.24)]'
-        ].join(' ')}
-      >
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            aria-label="Run in tray only"
-            title="Run in tray only"
-            onClick={() => void runInTrayOnly()}
-            className="no-drag flex h-6 w-6 items-center justify-center rounded-full border border-white/30 bg-white/12 text-slate-200 transition hover:bg-white/22"
-          >
-            <Minus className="h-3.5 w-3.5" />
-          </button>
+      <motion.div
+        className="absolute inset-0"
+        style={{
+          border: `2px solid ${glow.color}`,
+          boxShadow: `${edgeShadow}, inset ${edgeShadow}`
+        }}
+        animate={{
+          opacity: progress.tone === 'error' ? [0.62, 1, 0.62] : [0.38, 0.8, 0.38]
+        }}
+        transition={{ duration: glow.duration, repeat: Infinity, ease: 'easeInOut' }}
+      />
 
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[13px] font-medium text-slate-900">{progress.text}</div>
-          </div>
-
-          <button
-            type="button"
-            aria-label="Restore overlay"
-            title="Restore overlay"
-            onClick={() => void restoreOverlay()}
-            className="no-drag flex h-6 w-6 items-center justify-center rounded-full border border-cyan-200/70 bg-cyan-100/28 text-cyan-900 transition hover:bg-cyan-100/45"
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </button>
-        </div>
-
-        <div className="mt-2.5 h-[3px] overflow-hidden rounded-full bg-white/20">
-          {progress.busy ? (
-            <motion.div
-              className="h-full w-[34%] rounded-full bg-cyan-300/90"
-              animate={{ x: ['-120%', '260%'] }}
-              transition={{ duration: 1.5, ease: 'linear', repeat: Number.POSITIVE_INFINITY }}
-            />
-          ) : (
-            <div
-              className={[
-                'h-full rounded-full',
-                progress.tone === 'error'
-                  ? 'w-[28%] bg-rose-400/90'
-                  : progress.tone === 'active'
-                    ? 'w-[42%] bg-cyan-300/88'
-                    : 'w-[16%] bg-slate-300/80'
-              ].join(' ')}
-            />
-          )}
-        </div>
-
-        {localError && (
-          <div className="mt-2 truncate text-[11px] text-rose-200">{localError}</div>
-        )}
-      </div>
-    </motion.div>
+      {[
+        'left-0 right-0 top-0 h-[5px]',
+        'left-0 right-0 bottom-0 h-[5px]',
+        'top-0 bottom-0 left-0 w-[5px]',
+        'top-0 bottom-0 right-0 w-[5px]'
+      ].map((edge) => (
+        <motion.div
+          key={edge}
+          className={`absolute ${edge}`}
+          style={{
+            background: glow.color,
+            boxShadow: edgeShadow
+          }}
+          animate={{
+            opacity: progress.busy || wakeReady || wakeDetected ? [0.3, 0.78, 0.3] : [0.22, 0.42, 0.22]
+          }}
+          transition={{ duration: Math.max(0.75, glow.duration - 0.25), repeat: Infinity, ease: 'easeInOut' }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -3142,7 +2553,8 @@ function usePixelPilotModel(): {
           setWindowKind(kind);
           setReady(true);
           if (currentSnapshot) {
-            setSnapshot(currentSnapshot);
+            const normalizedSnapshot = withSnapshotDefaults(currentSnapshot);
+            setSnapshot(normalizedSnapshot);
             setMessages(currentSnapshot.recentMessages.map(normalizeEntry));
             setActionUpdates(currentSnapshot.recentActionUpdates);
           }
@@ -3162,10 +2574,11 @@ function usePixelPilotModel(): {
 
     const offState = window.pixelPilot.onState((nextSnapshot) => {
       startTransition(() => {
+        const normalizedSnapshot = withSnapshotDefaults(nextSnapshot);
         setRuntimeError('');
-        setSnapshot(nextSnapshot);
-        setMessages(nextSnapshot.recentMessages.map(normalizeEntry));
-        setActionUpdates(nextSnapshot.recentActionUpdates);
+        setSnapshot(normalizedSnapshot);
+        setMessages(normalizedSnapshot.recentMessages.map(normalizeEntry));
+        setActionUpdates(normalizedSnapshot.recentActionUpdates);
       });
     });
 
@@ -3349,23 +2762,30 @@ export default function App(): React.JSX.Element {
           })
           .then(() => undefined)
       }
-      onUseApiKey={(apiKey) =>
-        window.pixelPilot
-          .invokeRuntime('auth.useApiKey', {
-            apiKey
-          })
-          .then(() => undefined)
-      }
+      onUseApiKey={(apiKey, options) => {
+        const provider = String(options.provider || '').trim();
+        const baseUrl = String(options.baseUrl || '').trim();
+        const payload: Record<string, unknown> = { apiKey };
+        if (provider) {
+          payload.provider = provider;
+        }
+        if (baseUrl) {
+          payload.baseUrl = baseUrl;
+        }
+        return window.pixelPilot.invokeRuntime('auth.useApiKey', payload).then(() => undefined);
+      }}
       onQuit={() => window.pixelPilot.quitApp().then(() => undefined)}
     />
   ) : windowKind === 'notch' ? (
-    <NotchShell snapshot={snapshot} actionUpdates={actionUpdates} runtimeError={runtimeError} />
+    <NotchShell snapshot={snapshot} messages={messages} actionUpdates={actionUpdates} runtimeError={runtimeError} />
+  ) : windowKind === 'glow' ? (
+    <GlowShell snapshot={snapshot} actionUpdates={actionUpdates} runtimeError={runtimeError} />
   ) : windowKind === 'sidecar' ? (
     <SidecarShell snapshot={snapshot} frame={sidecarFrame} />
   ) : windowKind === 'settings' ? (
     <SettingsShell snapshot={snapshot} />
   ) : (
-    <OverlayShell
+    <CommandBarShell
       snapshot={snapshot}
       messages={messages}
       actionUpdates={actionUpdates}
@@ -3381,14 +2801,16 @@ export default function App(): React.JSX.Element {
         'relative w-full overflow-visible text-slate-900',
         windowKind === 'notch'
           ? 'flex items-start justify-center'
-          : windowKind === 'sidecar'
-            ? 'flex items-start justify-center p-3'
-            : isSettingsWindowKind(windowKind)
-              ? 'flex items-start justify-start'
-            : 'flex items-start justify-center p-3'
+          : windowKind === 'glow'
+            ? 'pointer-events-none fixed inset-0'
+            : windowKind === 'sidecar'
+              ? 'flex items-start justify-center p-3'
+              : isSettingsWindowKind(windowKind)
+                ? 'flex items-start justify-start'
+                : 'flex items-start justify-center p-3'
       ].join(' ')}
     >
-      {!isSettingsWindowKind(windowKind) && (
+      {!isSettingsWindowKind(windowKind) && windowKind !== 'glow' && windowKind !== 'notch' && (
         <>
           <div className="pointer-events-none absolute left-[8%] top-[-18%] h-28 w-28 rounded-full bg-sky-200/18 blur-3xl" />
           <div className="pointer-events-none absolute bottom-[-20%] right-[10%] h-32 w-32 rounded-full bg-slate-300/18 blur-3xl" />

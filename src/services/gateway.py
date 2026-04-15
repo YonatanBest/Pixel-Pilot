@@ -46,7 +46,7 @@ class GatewayServer:
             return {
                 "ok": False,
                 "error": "live_unavailable",
-                "message": "Gemini Live is unavailable.",
+                "message": "PixelPilot Live is unavailable.",
                 "text": "",
             }
         return await asyncio.to_thread(

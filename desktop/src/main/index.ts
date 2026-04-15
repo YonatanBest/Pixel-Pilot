@@ -6,6 +6,7 @@ import { findDeepLinkArg, parsePixelPilotDeepLink, PIXELPILOT_PROTOCOL, type Pix
 import { parseLaunchMode } from './launch-mode.js';
 import { RuntimeProcessManager } from './runtime-process.js';
 import { StartupDefaultsStore } from './startup-defaults.js';
+import { UiPreferencesStore } from './ui-preferences.js';
 import { WindowManager } from './window-manager.js';
 import type { BridgeStatus, RuntimeEventEnvelope } from '../shared/types.js';
 
@@ -57,6 +58,7 @@ let runtimeProcess: RuntimeProcessManager | null = null;
 let bridgeClient: RuntimeBridgeClient | null = null;
 let windowManager: WindowManager | null = null;
 let startupDefaultsStore: StartupDefaultsStore | null = null;
+let uiPreferencesStore: UiPreferencesStore | null = null;
 let bridgeRecoveryTimer: NodeJS.Timeout | null = null;
 let bridgeRecoveryInProgress = false;
 let bridgeRecoveryPromise: Promise<void> | null = null;
@@ -68,6 +70,9 @@ let bridgeStatusMessage = 'Starting runtime...';
 let hasConnectedBridge = false;
 const launchMode = parseLaunchMode(process.argv);
 let pendingDeepLink: PixelPilotDeepLinkPayload | null = parsePixelPilotDeepLink(findDeepLinkArg(process.argv) ?? '');
+let processingDeepLink = false;
+let activeDeepLinkKey = '';
+const handledDeepLinkKeys = new Set<string>();
 
 const BRIDGE_RECOVERY_GRACE_MS = 8000;
 const BRIDGE_COMMAND_TIMEOUT_MS = 10000;
@@ -401,9 +406,11 @@ async function recoverRuntimeBridge(): Promise<void> {
 async function bootstrap(): Promise<void> {
   traceMain('bootstrap.enter');
   startupDefaultsStore = new StartupDefaultsStore(app.getPath('userData'));
+  uiPreferencesStore = new UiPreferencesStore(app.getPath('userData'));
   windowManager = new WindowManager(
     invokeRuntimeFromMain,
     startupDefaultsStore,
+    uiPreferencesStore,
     { launchToTray: launchMode.backgroundStartup },
   );
   traceMain(`bootstrap.window_manager_ready launchToTray=${launchMode.backgroundStartup}`);
@@ -430,26 +437,66 @@ function surfaceDeepLinkError(message: string): void {
   });
 }
 
+function deepLinkKey(payload: PixelPilotDeepLinkPayload): string {
+  return `${payload.state}\n${payload.code}`;
+}
+
+function rememberHandledDeepLink(key: string): void {
+  handledDeepLinkKeys.add(key);
+  if (handledDeepLinkKeys.size > 20) {
+    const [oldest] = handledDeepLinkKeys;
+    handledDeepLinkKeys.delete(oldest);
+  }
+}
+
+function isTransientDeepLinkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return message.includes('still starting') || message.includes('still reconnecting');
+}
+
 async function processPendingDeepLink(): Promise<void> {
-  if (!pendingDeepLink) {
+  if (!pendingDeepLink || processingDeepLink) {
     return;
   }
 
   const payload = pendingDeepLink;
+  const key = deepLinkKey(payload);
+  processingDeepLink = true;
+  activeDeepLinkKey = key;
   try {
     await invokeRuntimeFromMain('auth.exchangeDesktopCode', payload);
-    pendingDeepLink = null;
+    if (pendingDeepLink && deepLinkKey(pendingDeepLink) === key) {
+      pendingDeepLink = null;
+    }
+    rememberHandledDeepLink(key);
     void invokeRuntimeFromMain('shell.setBackgroundHidden', { hidden: false }).catch(() => undefined);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Desktop sign-in failed.';
     console.error('Failed to redeem desktop auth deep link.', error);
+    if (!isTransientDeepLinkError(error) && pendingDeepLink && deepLinkKey(pendingDeepLink) === key) {
+      pendingDeepLink = null;
+      rememberHandledDeepLink(key);
+    }
     surfaceDeepLinkError(message);
+  } finally {
+    processingDeepLink = false;
+    activeDeepLinkKey = '';
+    if (pendingDeepLink) {
+      void processPendingDeepLink();
+    }
   }
 }
 
 function queueDeepLink(rawUrl: string | null): void {
   const parsed = parsePixelPilotDeepLink(String(rawUrl || ''));
   if (!parsed) {
+    return;
+  }
+  const key = deepLinkKey(parsed);
+  if (handledDeepLinkKeys.has(key) || activeDeepLinkKey === key) {
+    return;
+  }
+  if (pendingDeepLink && deepLinkKey(pendingDeepLink) === key) {
     return;
   }
   pendingDeepLink = parsed;

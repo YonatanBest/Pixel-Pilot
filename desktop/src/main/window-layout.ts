@@ -20,7 +20,7 @@ export type WindowSize = {
 };
 
 const EDGE_PADDING = 24;
-const OVERLAY_TOP_OFFSET = 24;
+const OVERLAY_TOP_OFFSET = 56;
 const SIDECAR_TOP_OFFSET = 96;
 
 function clamp(value: number, min: number, max: number): number {
@@ -33,8 +33,15 @@ export function normalizeWindowSize(kind: WindowKind, workArea: ScreenWorkArea, 
 
   if (kind === 'notch') {
     return {
-      width: clamp(Math.round(size.width), 260, Math.min(420, maxWidth)),
-      height: clamp(Math.round(size.height), 76, Math.min(140, maxHeight))
+      width: clamp(Math.round(size.width), 180, Math.min(760, maxWidth)),
+      height: clamp(Math.round(size.height), 48, Math.min(120, maxHeight))
+    };
+  }
+
+  if (kind === 'glow') {
+    return {
+      width: Math.max(1, Math.round(workArea.width)),
+      height: Math.max(1, Math.round(workArea.height))
     };
   }
 
@@ -74,6 +81,15 @@ export function getAnchoredWindowBounds(kind: WindowKind, workArea: ScreenWorkAr
     return {
       x: workArea.x + workArea.width - size.width - EDGE_PADDING,
       y: workArea.y + SIDECAR_TOP_OFFSET,
+      width: size.width,
+      height: size.height
+    };
+  }
+
+  if (kind === 'glow') {
+    return {
+      x: workArea.x,
+      y: workArea.y,
       width: size.width,
       height: size.height
     };

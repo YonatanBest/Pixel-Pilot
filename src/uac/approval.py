@@ -14,10 +14,10 @@ from pydantic import BaseModel, Field
 from agent.prompts import UAC_APPROVAL_PROMPT
 from backend_client import get_client
 from config import Config
+from model_providers import get_request_provider_config
 
 
 logger = logging.getLogger("pixelpilot.uac.approval")
-_client = get_client()
 _REQUIRE_LIVE_SESSION_CONFIG_KEY = "_pixelpilot_require_live_session"
 
 
@@ -26,7 +26,7 @@ class _ModelWrapper:
         self.model_name = model_name
 
     def generate_content(self, contents, config=None):
-        return _client.generate_content(
+        return get_client().generate_content(
             model=self.model_name,
             contents=contents,
             config=config,
@@ -53,7 +53,7 @@ class _UACApprovalDecision(BaseModel):
 
 
 def _get_model() -> _ModelWrapper:
-    return _ModelWrapper(Config.GEMINI_MODEL)
+    return _ModelWrapper(get_request_provider_config().model)
 
 
 def _emit_status_note(callback: Optional[Callable[[str], None]], message: str) -> None:

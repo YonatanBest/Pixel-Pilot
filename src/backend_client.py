@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 from websockets.sync.client import connect as ws_connect
 
 from config import Config
+from model_providers import get_request_provider_config, litellm_model_name
 
 logger = logging.getLogger("pixelpilot.client")
 _PRIVATE_CONFIG_KEYS = {"_pixelpilot_require_live_session"}
@@ -159,6 +160,128 @@ class DirectGeminiClient:
                     for item in value
                 ]
         return new_schema
+
+
+class DirectModelClient:
+    def __init__(self):
+        self.provider = get_request_provider_config()
+        try:
+            import litellm  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            if self.provider.provider_id == "gemini":
+                logger.warning("LiteLLM unavailable; falling back to direct Gemini client: %s", exc)
+                self._fallback = DirectGeminiClient()
+                self._litellm = None
+                return
+            raise RuntimeError("LiteLLM is required for non-Gemini direct providers.") from exc
+        self._fallback = None
+        self._litellm = litellm
+
+    def generate_content(
+        self,
+        *,
+        model: str,
+        contents: list[dict],
+        config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if self._fallback is not None:
+            return self._fallback.generate_content(model=model, contents=contents, config=config)
+
+        assert self._litellm is not None
+        provider = self.provider
+        selected_model = litellm_model_name(provider.provider_id, model or provider.model)
+        messages = [_content_to_message(item) for item in contents or []]
+        config_data = dict(config or {})
+        for key in _PRIVATE_CONFIG_KEYS:
+            config_data.pop(key, None)
+
+        kwargs: dict[str, Any] = {
+            "model": selected_model,
+            "messages": messages,
+        }
+        if provider.api_key:
+            kwargs["api_key"] = provider.api_key
+        if provider.base_url:
+            kwargs["api_base"] = provider.base_url.rstrip("/")
+
+        tools = _normalize_openai_tools(config_data.pop("tools", None))
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        if "response_json_schema" in config_data:
+            config_data.pop("response_json_schema", None)
+            config_data.setdefault("response_format", {"type": "json_object"})
+        config_data.pop("thinking_config", None)
+        kwargs.update(config_data)
+
+        try:
+            response = self._litellm.completion(**kwargs)
+            text = _extract_litellm_text(response)
+            return {"text": text}
+        except Exception as e:  # noqa: BLE001
+            error_str = str(e).lower()
+            if "429" in error_str or "rate" in error_str:
+                raise RateLimitError(f"Rate limit exceeded: {e}") from e
+            raise RuntimeError(f"{provider.display_name} API error: {e}") from e
+
+
+def _content_to_message(item: dict[str, Any]) -> dict[str, Any]:
+    role = str(item.get("role") or "user").strip() or "user"
+    parts = item.get("parts", [])
+    if isinstance(parts, dict):
+        parts = [parts]
+    if not isinstance(parts, list):
+        return {"role": role, "content": str(parts)}
+
+    content: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            text_parts.append(str(part))
+            continue
+        if "text" in part:
+            text_parts.append(str(part.get("text") or ""))
+            continue
+        if "data" in part and "mime_type" in part:
+            mime_type = str(part.get("mime_type") or "image/png")
+            data = str(part.get("data") or "")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{data}"},
+                }
+            )
+    text = "\n".join(chunk for chunk in text_parts if chunk)
+    if content:
+        if text:
+            content.insert(0, {"type": "text", "text": text})
+        return {"role": role, "content": content}
+    return {"role": role, "content": text}
+
+
+def _normalize_openai_tools(tools_config: Any) -> list[dict[str, Any]]:
+    if not tools_config:
+        return []
+    normalized = []
+    for item in tools_config if isinstance(tools_config, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function" and isinstance(item.get("function"), dict):
+            normalized.append(item)
+    return normalized
+
+
+def _extract_litellm_text(response: Any) -> str:
+    try:
+        choices = response.get("choices") if isinstance(response, dict) else response.choices
+        if choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else choices[0].message
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
+            return str(content or "")
+    except Exception:
+        pass
+    return str(response or "")
 
 
 class BackendClient:
@@ -407,12 +530,23 @@ def get_client():
     global _client_instance
     if _client_instance is None:
         if Config.USE_DIRECT_API:
-            logger.info("Using direct Gemini API (API key configured)")
-            _client_instance = DirectGeminiClient()
+            provider = get_request_provider_config()
+            logger.info(
+                "Using direct %s API (provider=%s model=%s)",
+                provider.display_name,
+                provider.provider_id,
+                provider.model,
+            )
+            _client_instance = DirectModelClient()
         else:
-            logger.info("Using backend proxy for Gemini API")
+            logger.info("Using backend proxy for model API")
             _client_instance = BackendClient()
     return _client_instance
+
+
+def reset_client() -> None:
+    global _client_instance
+    _client_instance = None
 
 
 def get_backend_proxy_client() -> BackendClient:

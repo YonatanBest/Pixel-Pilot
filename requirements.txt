@@ -6,6 +6,7 @@ SpeechRecognition==3.14.5
 opencv-python==4.12.0.88
 torchfree-ocr==1.1.0
 google-genai==1.69.0
+litellm==1.83.0
 httpx==0.28.1
 pillow==12.1.0
 keyring==25.6.0

@@ -35,9 +35,19 @@ def _validate_startup_configuration() -> tuple[str, str]:
 
     auth.ensure_auth_configuration()
 
-    gemini_api_key = str(os.getenv("GEMINI_API_KEY", "")).strip()
-    if not gemini_api_key:
-        raise RuntimeError("Missing required env var: GEMINI_API_KEY")
+    provider = str(os.getenv("PIXELPILOT_MODEL_PROVIDER") or os.getenv("AI_PROVIDER") or "gemini").strip().lower()
+    required_key = {
+        "gemini": "GEMINI_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "claude": "ANTHROPIC_API_KEY",
+        "xai": "XAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
+        "vercel_ai_gateway": "VERCEL_AI_GATEWAY_API_KEY",
+    }.get(provider)
+    if required_key and not str(os.getenv(required_key, "")).strip():
+        raise RuntimeError(f"Missing required env var: {required_key}")
 
     return mongodb_uri, redis_uri
 

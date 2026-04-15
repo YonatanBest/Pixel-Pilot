@@ -25,6 +25,29 @@ def _env_str(name: str, default: str = "") -> str:
     return value or str(default).strip()
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        return float(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return bool(default)
+    value = str(raw).strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    logger.warning("Invalid boolean value for %s=%r; use true or false.", name, raw)
+    return bool(default)
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -48,10 +71,32 @@ class Config:
         "https://pixelpilot-xk7c.onrender.com",
     )
     WEB_URL = _env_str("WEB_URL", "https://pixelpilotai.vercel.app")
-    GEMINI_MODEL = "gemini-3-flash-preview"
     GEMINI_API_KEY = _env_str("GEMINI_API_KEY")
-    USE_DIRECT_API = bool(GEMINI_API_KEY)
+    OPENAI_API_KEY = _env_str("OPENAI_API_KEY")
+    ANTHROPIC_API_KEY = _env_str("ANTHROPIC_API_KEY")
+    XAI_API_KEY = _env_str("XAI_API_KEY")
+    OPENROUTER_API_KEY = _env_str("OPENROUTER_API_KEY")
+    OPENAI_COMPATIBLE_API_KEY = _env_str("OPENAI_COMPATIBLE_API_KEY")
+    VERCEL_AI_GATEWAY_API_KEY = _env_str("VERCEL_AI_GATEWAY_API_KEY")
+    OLLAMA_BASE_URL = _env_str("OLLAMA_BASE_URL", "http://localhost:11434")
+    OPENAI_COMPATIBLE_BASE_URL = _env_str("OPENAI_COMPATIBLE_BASE_URL")
+    VERCEL_AI_GATEWAY_BASE_URL = _env_str("VERCEL_AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")
+    MODEL_PROVIDER = _env_str("PIXELPILOT_MODEL_PROVIDER", _env_str("AI_PROVIDER", "gemini")).lower()
+    LIVE_PROVIDER = _env_str("PIXELPILOT_LIVE_PROVIDER", _env_str("LIVE_PROVIDER", MODEL_PROVIDER)).lower()
+    MODEL_NAME = _env_str("PIXELPILOT_MODEL", _env_str("MODEL_NAME", "gemini-3-flash-preview"))
+    GEMINI_MODEL = MODEL_NAME
+    USE_DIRECT_API = bool(
+        GEMINI_API_KEY
+        or OPENAI_API_KEY
+        or ANTHROPIC_API_KEY
+        or XAI_API_KEY
+        or OPENROUTER_API_KEY
+        or OPENAI_COMPATIBLE_API_KEY
+        or VERCEL_AI_GATEWAY_API_KEY
+        or MODEL_PROVIDER == "ollama"
+    )
     GEMINI_LIVE_MODEL = _env_str("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
+    LIVE_MODEL = _env_str("PIXELPILOT_LIVE_MODEL", GEMINI_LIVE_MODEL)
     LIVE_ENABLE_IMAGE_INPUT = True
     LIVE_ENABLE_VIDEO_STREAM = True
     LIVE_ENABLE_CONTEXT_WINDOW_COMPRESSION = True
@@ -80,6 +125,8 @@ class Config:
     LIVE_GUIDANCE_OBSERVER_NUDGE_COOLDOWN_SECONDS = 2.5
     LIVE_TEXT_NUDGE_FLUSH_DELAY_SECONDS = 0.15
     LIVE_TYPED_TURN_IDLE_FINISH_SECONDS = 1.5
+    LIVE_DISCONNECT_AFTER_REPLY_TIMEOUT_SECONDS = _env_float("LIVE_DISCONNECT_AFTER_REPLY_TIMEOUT_SECONDS", 8.0)
+    LIVE_SESSION_IDLE_DISCONNECT_SECONDS = _env_float("LIVE_SESSION_IDLE_DISCONNECT_SECONDS", 60.0)
     LIVE_ACTION_RESPONSE_WAIT_MS = 4000
     LIVE_FORWARD_ACTION_UPDATES = False
     LIVE_AUDIO_LOSSLESS_BACKLOG_WARNING_CHUNKS = max(1, min(LIVE_AUDIO_LOSSLESS_QUEUE_MAX_CHUNKS, 144))
@@ -89,12 +136,17 @@ class Config:
     LIVE_AUDIO_RESAMPLE_LOG_COOLDOWN_SECONDS = 5.0
     LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE = 105
     ENABLE_WAKE_WORD = True
-    WAKE_WORD_PHRASE = "Hey Pixie"
-    WAKE_WORD_OPENWAKEWORD_MODEL_PATH = ""
-    WAKE_WORD_OPENWAKEWORD_THRESHOLD = 0.01
-    WAKE_WORD_OPENWAKEWORD_VAD_THRESHOLD = 0.01
-    WAKE_WORD_NO_SPEECH_TIMEOUT_SECONDS = 0.35
-    WAKE_WORD_RESUME_DELAY_SECONDS = 0.35
+    WAKE_WORD_PHRASE = _env_str("WAKE_WORD_PHRASE", "Hey Pixie")
+    WAKE_WORD_OPENWAKEWORD_MODEL_PATH = _env_str("WAKE_WORD_OPENWAKEWORD_MODEL_PATH")
+    WAKE_WORD_OPENWAKEWORD_THRESHOLD = _env_float("WAKE_WORD_OPENWAKEWORD_THRESHOLD", 0.003)
+    WAKE_WORD_OPENWAKEWORD_VAD_THRESHOLD = _env_float("WAKE_WORD_OPENWAKEWORD_VAD_THRESHOLD", 0.005)
+    WAKE_WORD_ONNX_RMS_THRESHOLD = _env_float("WAKE_WORD_ONNX_RMS_THRESHOLD", 80.0)
+    WAKE_WORD_ONNX_SCORE_SMOOTHING_CHUNKS = max(1, int(_env_float("WAKE_WORD_ONNX_SCORE_SMOOTHING_CHUNKS", 5.0)))
+    WAKE_WORD_NO_SPEECH_TIMEOUT_SECONDS = _env_float("WAKE_WORD_NO_SPEECH_TIMEOUT_SECONDS", 1.5)
+    WAKE_WORD_RESUME_DELAY_SECONDS = _env_float("WAKE_WORD_RESUME_DELAY_SECONDS", 0.25)
+    WAKE_WORD_ASR_FALLBACK_ENABLED = _env_bool("WAKE_WORD_ASR_FALLBACK_ENABLED", True)
+    WAKE_WORD_ASR_FALLBACK_MIN_SCORE = _env_float("WAKE_WORD_ASR_FALLBACK_MIN_SCORE", 0.00015)
+    WAKE_WORD_ASR_FALLBACK_COOLDOWN_SECONDS = _env_float("WAKE_WORD_ASR_FALLBACK_COOLDOWN_SECONDS", 2.0)
     ENABLE_GATEWAY = False
     GATEWAY_HOST = "localhost"
     GATEWAY_PORT = 8765
@@ -302,17 +354,35 @@ class Config:
     @classmethod
     def validate(cls):
         logger.info("Configuration validated successfully")
-        logger.debug(f"Model: {cls.GEMINI_MODEL}")
+        logger.debug(f"Model provider: {cls.MODEL_PROVIDER}")
+        logger.debug(f"Model: {cls.MODEL_NAME}")
+        logger.debug(f"Live provider: {cls.LIVE_PROVIDER}")
+        logger.debug(f"Live model: {cls.LIVE_MODEL}")
         logger.debug(f"Backend: {cls.BACKEND_URL}")
         logger.debug(f"Default Mode: {cls.DEFAULT_MODE.value}")
         logger.debug(f"Turbo Mode: {'ENABLED' if cls.TURBO_MODE else 'DISABLED'}")
 
     @classmethod
     def clear_api_key(cls):
-        """Clears the GEMINI_API_KEY from environment and .env file."""
+        """Clears direct-provider API keys from environment and .env file."""
         cls.GEMINI_API_KEY = None
+        cls.OPENAI_API_KEY = ""
+        cls.ANTHROPIC_API_KEY = ""
+        cls.XAI_API_KEY = ""
+        cls.OPENROUTER_API_KEY = ""
+        cls.OPENAI_COMPATIBLE_API_KEY = ""
+        cls.VERCEL_AI_GATEWAY_API_KEY = ""
         cls.USE_DIRECT_API = False
-        os.environ.pop("GEMINI_API_KEY", None)
+        for env_name in (
+            "GEMINI_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "XAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENAI_COMPATIBLE_API_KEY",
+            "VERCEL_AI_GATEWAY_API_KEY",
+        ):
+            os.environ.pop(env_name, None)
 
         env_path = cls.PROJECT_ROOT / ".env"
         if env_path.exists():
@@ -320,10 +390,19 @@ class Config:
                 with open(env_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
                 
-                new_lines = [l for l in lines if not l.strip().startswith("GEMINI_API_KEY=")]
+                key_prefixes = (
+                    "GEMINI_API_KEY=",
+                    "OPENAI_API_KEY=",
+                    "ANTHROPIC_API_KEY=",
+                    "XAI_API_KEY=",
+                    "OPENROUTER_API_KEY=",
+                    "OPENAI_COMPATIBLE_API_KEY=",
+                    "VERCEL_AI_GATEWAY_API_KEY=",
+                )
+                new_lines = [l for l in lines if not l.strip().startswith(key_prefixes)]
                 
                 with open(env_path, "w", encoding="utf-8") as f:
                     f.writelines(new_lines)
-                logger.info("Removed GEMINI_API_KEY from .env")
+                logger.info("Removed direct-provider API keys from .env")
             except Exception as e:
                 logger.error(f"Failed to clear API key from .env: {e}")

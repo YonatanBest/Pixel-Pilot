@@ -33,8 +33,8 @@ security = HTTPBearer(auto_error=False)
 
 GENERATION_ERROR_MESSAGE = "Generation failed"
 SERVICE_UNAVAILABLE_MESSAGE = "Service temporarily unavailable"
-OCR_SESSION_REQUIRED_MESSAGE = "OCR is only available during an active Gemini Live session."
-LIVE_SESSION_REQUIRED_MESSAGE = "This request requires an active Gemini Live session."
+OCR_SESSION_REQUIRED_MESSAGE = "OCR is only available during an active PixelPilot Live session."
+LIVE_SESSION_REQUIRED_MESSAGE = "This request requires an active PixelPilot Live session."
 AUTH_DATABASE_UNAVAILABLE_MESSAGE = "Authentication database is unavailable. Please try again shortly."
 LIVE_SESSION_TOKEN_HEADER = "X-PixelPilot-Live-Session"
 WS_AUTH_TIMEOUT_SECONDS = 10
@@ -558,7 +558,7 @@ async def generate(
     user: dict = Depends(get_current_user),
     redis_client: redis.Redis = Depends(get_redis),
 ):
-    """Generate content using Gemini API. Requires authentication."""
+    """Generate content using the configured model provider. Requires authentication."""
     try:
         return await _generate_with_rate_limit(request, user["user_id"], redis_client)
     except HTTPException as e:

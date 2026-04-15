@@ -11,6 +11,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from config import Config
+from model_providers import get_request_provider_config
 
 
 @dataclass(slots=True)
@@ -85,20 +86,21 @@ def main(argv: list[str] | None = None) -> int:
 
 def _check_direct_mode() -> DoctorCheck:
     enabled = bool(Config.USE_DIRECT_API)
-    has_key = bool(str(Config.GEMINI_API_KEY or "").strip())
-    if enabled and has_key:
+    provider = get_request_provider_config()
+    has_credentials = bool(provider.api_key or provider.is_local)
+    if enabled and has_credentials:
         return DoctorCheck(
             name="direct_mode",
             status="ok",
-            summary="Direct API mode is configured.",
-            details={"enabled": True},
+            summary=f"Direct API mode is configured for {provider.display_name}.",
+            details={"enabled": True, "provider": provider.provider_id, "model": provider.model},
         )
-    if enabled and not has_key:
+    if enabled and not has_credentials:
         return DoctorCheck(
             name="direct_mode",
             status="error",
-            summary="Direct API mode is enabled but GEMINI_API_KEY is missing.",
-            details={"enabled": True},
+            summary=f"Direct API mode is enabled but {provider.api_key_env or 'provider credentials'} is missing.",
+            details={"enabled": True, "provider": provider.provider_id, "apiKeyEnv": provider.api_key_env},
         )
     return DoctorCheck(
         name="direct_mode",

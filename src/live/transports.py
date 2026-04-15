@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -16,8 +17,23 @@ from backend_client import (
     set_backend_live_session_token,
 )
 from config import Config
+from model_providers import get_live_provider_config, litellm_model_name
+from .tool_schema import openai_realtime_tools_from_declarations, openai_tools_from_declarations
 
 logger = logging.getLogger("pixelpilot.live.transport")
+
+REQUEST_MODE_SYSTEM_APPENDIX = """
+Request-mode tool contract:
+- You are controlling the real PixelPilot desktop through the provided tools, not a simulation or virtual desktop.
+- Do not say you lack system access when tools are available; inspect with tools and act from their results.
+- Do not output private reasoning, "thought" JSON, "tool_calls" JSON, or "response" JSON as the final visible answer.
+- To act, call the provided tools. If the provider cannot emit native tool calls, output JSON only in this shape:
+  {"tool_calls":[{"function":"tool_name","args":{...}}]}
+- If one read-only lookup finds nothing, broaden your inspection before giving up.
+- For generic media requests such as pausing music, if the active player is ambiguous, use keyboard_press_key
+  with key "playpause" rather than claiming you cannot access media controls.
+- Keep final user-facing replies as plain natural language, not JSON.
+"""
 
 try:
     from google import genai
@@ -107,10 +123,11 @@ def _normalize_provider_response(response: Any) -> dict[str, Any]:
             session_resumption_update, "resumption_handle", None
         )
         if handle:
-            payload["session_resumption_update"] = {
-                "handle": str(handle),
-                "resumable": bool(getattr(session_resumption_update, "resumable", False)),
-            }
+            update_payload = {"handle": str(handle)}
+            resumable = getattr(session_resumption_update, "resumable", None)
+            if resumable is not None:
+                update_payload["resumable"] = bool(resumable)
+            payload["session_resumption_update"] = update_payload
 
     tool_call = getattr(response, "tool_call", None)
     function_calls = []
@@ -285,9 +302,9 @@ class DirectGeminiLiveTransport(BaseLiveTransport):
     @classmethod
     def unavailable_reason(cls) -> str:
         if not Config.GEMINI_API_KEY:
-            return "Gemini Live requires a local Gemini API key."
+            return "PixelPilot Live requires a local Gemini API key."
         if genai is None or types is None:
-            return f"Gemini Live dependencies unavailable: {_IMPORT_ERROR}"
+            return f"PixelPilot Live dependencies unavailable: {_IMPORT_ERROR}"
         return ""
 
     async def connect(self, *, model: str, config: dict[str, Any]) -> None:
@@ -389,9 +406,9 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
         from auth_manager import get_auth_manager
 
         if not Config.BACKEND_URL:
-            return "Gemini Live backend URL is not configured."
+            return "PixelPilot Live backend URL is not configured."
         if not get_auth_manager().access_token:
-            return "Sign in to use Gemini Live through the backend."
+            return "Sign in to use PixelPilot Live through the backend."
         return ""
 
     def _ws_url(self) -> str:
@@ -542,3 +559,608 @@ class BackendGeminiLiveTransport(BaseLiveTransport):
             return
         if during_connect:
             raise RuntimeError("Backend live authentication handshake failed")
+
+
+class OpenAIRealtimeTransport(BaseLiveTransport):
+    should_rotate_sessions = False
+
+    def __init__(self, *, api_key: Optional[str] = None, base_url: str = "wss://api.openai.com/v1/realtime") -> None:
+        self._provider = get_live_provider_config(provider_id="openai")
+        self._api_key = api_key or self._provider.api_key or Config.OPENAI_API_KEY
+        self._base_url = str(base_url or "wss://api.openai.com/v1/realtime").rstrip("/")
+        self._ws = None
+        self._connected = False
+        self._pending_audio = False
+        self._tool_name_by_call_id: dict[str, str] = {}
+
+    @classmethod
+    def is_supported(cls) -> bool:
+        return bool(Config.OPENAI_API_KEY)
+
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        if not Config.OPENAI_API_KEY:
+            return "OpenAI Realtime requires OPENAI_API_KEY."
+        return ""
+
+    async def connect(self, *, model: str, config: dict[str, Any]) -> None:
+        if not self._api_key:
+            raise RuntimeError(self.unavailable_reason())
+        url = f"{self._base_url}?model={str(model or self._provider.model).strip()}"
+        self._ws = await websockets.connect(
+            url,
+            additional_headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "OpenAI-Beta": "realtime=v1",
+            },
+            open_timeout=10,
+            close_timeout=5,
+            max_size=20_000_000,
+        )
+        tools = openai_realtime_tools_from_declarations(
+            ((config.get("tools") or [{}])[0] or {}).get("function_declarations") or []
+        )
+        session_payload = {
+            "type": "session.update",
+            "session": {
+                "instructions": str(config.get("system_instruction") or ""),
+                "modalities": ["text", "audio"],
+                "voice": str(Config.LIVE_VOICE_NAME or "alloy"),
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "tools": tools,
+                "tool_choice": "auto" if tools else "none",
+            },
+        }
+        await self._ws.send(json.dumps(session_payload))
+        self._connected = True
+
+    async def send_text(self, text: str) -> None:
+        if self._ws is None or not self._connected:
+            raise RuntimeError("OpenAI Realtime session is not connected.")
+        item_id = f"msg_{uuid.uuid4().hex}"
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "id": item_id,
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": str(text or "")}],
+                    },
+                }
+            )
+        )
+        await self._ws.send(json.dumps({"type": "response.create"}))
+
+    async def send_audio(self, data: bytes, mime_type: str) -> None:
+        del mime_type
+        if self._ws is None or not self._connected:
+            raise RuntimeError("OpenAI Realtime session is not connected.")
+        self._pending_audio = True
+        await self._ws.send(
+            json.dumps(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(data).decode("ascii"),
+                }
+            )
+        )
+
+    async def send_video(self, data: bytes, mime_type: str) -> None:
+        del data, mime_type
+        raise RuntimeError("OpenAI Realtime video input is not supported by this transport.")
+
+    async def send_audio_stream_end(self) -> None:
+        if self._ws is None or not self._connected or not self._pending_audio:
+            return
+        self._pending_audio = False
+        await self._ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        await self._ws.send(json.dumps({"type": "response.create"}))
+
+    async def send_tool_responses(self, responses: list[dict[str, Any]]) -> None:
+        if self._ws is None or not self._connected:
+            return
+        for item in responses or []:
+            call_id = str(item.get("id") or "").strip()
+            if not call_id:
+                continue
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps(item.get("response") or {}),
+                        },
+                    }
+                )
+            )
+        await self._ws.send(json.dumps({"type": "response.create"}))
+
+    async def events(self) -> AsyncIterator[dict[str, Any]]:
+        if self._ws is None:
+            return
+        while True:
+            raw = await self._ws.recv()
+            event = json.loads(raw)
+            normalized = self._normalize_event(event)
+            if normalized:
+                yield normalized
+
+    async def close(self, *, close_client: bool = False) -> None:
+        del close_client
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                logger.debug("Failed to close OpenAI Realtime websocket", exc_info=True)
+        self._ws = None
+        self._connected = False
+        self._pending_audio = False
+
+    def _normalize_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        event_type = str(event.get("type") or "")
+        if event_type in {"response.audio_transcript.delta", "response.text.delta", "response.output_text.delta"}:
+            text = str(event.get("delta") or "")
+            return {"server_content": {"output_transcription": {"text": text}}} if text else {}
+        if event_type == "conversation.item.input_audio_transcription.completed":
+            text = str(event.get("transcript") or "")
+            return {"server_content": {"input_transcription": {"text": text}}} if text else {}
+        if event_type == "response.audio.delta":
+            data = base64.b64decode(str(event.get("delta") or ""))
+            return {"server_content": {"model_turn": {"parts": [{"inline_data": {"data": data, "mime_type": "audio/pcm;rate=24000"}}]}}}
+        if event_type == "response.output_item.done":
+            item = event.get("item") or {}
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                call_id = str(item.get("call_id") or item.get("id") or "").strip()
+                name = str(item.get("name") or "").strip()
+                args = _normalize_function_call_args(item.get("arguments"))
+                if call_id and name:
+                    self._tool_name_by_call_id[call_id] = name
+                    return {"tool_call": {"function_calls": [{"id": call_id, "name": name, "args": args}]}}
+        if event_type in {"response.done", "response.audio_transcript.done", "response.text.done", "response.output_text.done"}:
+            return {"server_content": {"generation_complete": True, "turn_complete": True}}
+        if event_type == "error":
+            error = event.get("error") or {}
+            message = str(error.get("message") if isinstance(error, dict) else error)
+            raise RuntimeError(message or "OpenAI Realtime session failed.")
+        return {}
+
+
+class LiteLLMRequestLiveTransport(BaseLiveTransport):
+    should_rotate_sessions = False
+
+    def __init__(self) -> None:
+        self._provider = get_live_provider_config()
+        self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._messages: list[dict[str, Any]] = []
+        self._tools: list[dict[str, Any]] = []
+        self._model = ""
+        self._closed = False
+        self._pending_tool_future: Optional[asyncio.Future[list[dict[str, Any]]]] = None
+
+    @classmethod
+    def is_supported(cls) -> bool:
+        provider = get_live_provider_config()
+        return bool(provider.is_local or provider.api_key)
+
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        provider = get_live_provider_config()
+        if provider.is_local:
+            return ""
+        if not provider.api_key:
+            return f"{provider.display_name} request mode requires {provider.api_key_env}."
+        return ""
+
+    async def connect(self, *, model: str, config: dict[str, Any]) -> None:
+        self._provider = get_live_provider_config()
+        self._model = litellm_model_name(self._provider.provider_id, model or self._provider.model)
+        instructions = str(config.get("system_instruction") or "").strip()
+        instructions = f"{instructions}\n\n{REQUEST_MODE_SYSTEM_APPENDIX}".strip()
+        self._messages = [{"role": "system", "content": instructions}] if instructions else []
+        declarations = ((config.get("tools") or [{}])[0] or {}).get("function_declarations") or []
+        self._tools = openai_tools_from_declarations(declarations)
+        self._closed = False
+
+    async def send_text(self, text: str) -> None:
+        payload = str(text or "").strip()
+        if not payload:
+            return
+        asyncio.create_task(self._run_turn(payload))
+
+    async def send_audio(self, data: bytes, mime_type: str) -> None:
+        del data, mime_type
+        await self._events.put(
+            {
+                "server_content": {
+                    "model_turn": {
+                        "parts": [
+                            {
+                                "text": (
+                                    f"Voice is not available for {self._provider.display_name} with the current "
+                                    "PixelPilot audio transport. Please type your instruction."
+                                )
+                            }
+                        ]
+                    },
+                    "generation_complete": True,
+                    "turn_complete": True,
+                }
+            }
+        )
+
+    async def send_video(self, data: bytes, mime_type: str) -> None:
+        del data, mime_type
+
+    async def send_audio_stream_end(self) -> None:
+        return
+
+    async def send_tool_responses(self, responses: list[dict[str, Any]]) -> None:
+        if self._pending_tool_future is not None and not self._pending_tool_future.done():
+            self._pending_tool_future.set_result(list(responses or []))
+
+    async def events(self) -> AsyncIterator[dict[str, Any]]:
+        while not self._closed:
+            event = await self._events.get()
+            if event.get("type") == "__closed__":
+                return
+            yield event
+
+    async def close(self, *, close_client: bool = False) -> None:
+        del close_client
+        self._closed = True
+        if self._pending_tool_future is not None and not self._pending_tool_future.done():
+            self._pending_tool_future.cancel()
+        await self._events.put({"type": "__closed__"})
+
+    async def _run_turn(self, text: str) -> None:
+        try:
+            import litellm  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            await self._events.put({"server_content": {"model_turn": {"parts": [{"text": f"LiteLLM is unavailable: {exc}"}]}, "generation_complete": True, "turn_complete": True}})
+            return
+
+        self._messages.append({"role": "user", "content": text})
+        thought_retry_count = 0
+        while not self._closed:
+            try:
+                kwargs: dict[str, Any] = {"model": self._model, "messages": self._messages}
+                if self._provider.api_key:
+                    kwargs["api_key"] = self._provider.api_key
+                if self._provider.base_url:
+                    kwargs["api_base"] = self._provider.base_url.rstrip("/")
+                if self._tools:
+                    kwargs["tools"] = self._tools
+                    kwargs["tool_choice"] = "auto"
+                response = await litellm.acompletion(**kwargs)
+                message = _extract_choice_message(response)
+                tool_calls = _extract_openai_tool_calls(message)
+                content = _extract_openai_message_content(message)
+                if not tool_calls and content:
+                    tool_calls = _extract_text_tool_calls(content, self._tools)
+                    if tool_calls:
+                        content = ""
+                    else:
+                        if _is_text_thought_only(content):
+                            tool_calls = _fallback_tool_calls_for_user_text(text, self._tools)
+                            if tool_calls:
+                                content = ""
+                            thought_retry_count += 1
+                            if not tool_calls and thought_retry_count <= 2:
+                                self._messages.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": content,
+                                    }
+                                )
+                                self._messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "That was private reasoning JSON. Do not expose thoughts. "
+                                            "Use the available tools to continue, or answer the user in plain language. "
+                                            "Do not claim this is a simulation or that you lack access to the desktop."
+                                        ),
+                                    }
+                                )
+                                continue
+                            content = _extract_text_response(content) if not tool_calls else ""
+                            if not content and not tool_calls:
+                                content = "I could not complete that with the current local model response."
+                        else:
+                            content = _extract_text_response(content)
+                            if not content:
+                                tool_calls = _fallback_tool_calls_for_user_text(text, self._tools)
+                                if tool_calls:
+                                    content = ""
+            except Exception as exc:  # noqa: BLE001
+                await self._events.put(
+                    {
+                        "server_content": {
+                            "model_turn": {"parts": [{"text": f"Model request failed: {exc}"}]},
+                            "generation_complete": True,
+                            "turn_complete": True,
+                        }
+                    }
+                )
+                return
+            if tool_calls:
+                self._messages.append(_assistant_tool_message(message, tool_calls, content))
+                function_calls = [
+                    {"id": item["id"], "name": item["name"], "args": item["args"]}
+                    for item in tool_calls
+                ]
+                loop = asyncio.get_running_loop()
+                self._pending_tool_future = loop.create_future()
+                await self._events.put({"tool_call": {"function_calls": function_calls}})
+                try:
+                    responses = await asyncio.wait_for(self._pending_tool_future, timeout=60.0)
+                except Exception as exc:  # noqa: BLE001
+                    await self._events.put(
+                        {
+                            "server_content": {
+                                "model_turn": {"parts": [{"text": f"Tool response failed: {exc}"}]},
+                                "generation_complete": True,
+                                "turn_complete": True,
+                            }
+                        }
+                    )
+                    return
+                finally:
+                    self._pending_tool_future = None
+                for item in responses or []:
+                    self._messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": str(item.get("id") or ""),
+                            "name": str(item.get("name") or ""),
+                            "content": json.dumps(item.get("response") or {}),
+                        }
+                    )
+                continue
+
+            if content:
+                self._messages.append({"role": "assistant", "content": content})
+            await self._events.put(
+                {
+                    "server_content": {
+                        "model_turn": {"parts": [{"text": content}] if content else []},
+                        "generation_complete": True,
+                        "turn_complete": True,
+                    }
+                }
+            )
+            return
+
+
+def _extract_choice_message(response: Any) -> Any:
+    choices = response.get("choices") if isinstance(response, dict) else getattr(response, "choices", None)
+    if not choices:
+        return {}
+    choice = choices[0]
+    return choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", {})
+
+
+def _extract_openai_message_content(message: Any) -> str:
+    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
+    return str(content or "")
+
+
+def _extract_openai_tool_calls(message: Any) -> list[dict[str, Any]]:
+    raw_calls = message.get("tool_calls") if isinstance(message, dict) else getattr(message, "tool_calls", None)
+    calls: list[dict[str, Any]] = []
+    for call in raw_calls or []:
+        raw_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", "")
+        call_id = str(raw_id or "")
+        function = call.get("function") if isinstance(call, dict) else getattr(call, "function", None)
+        raw_name = function.get("name") if isinstance(function, dict) else getattr(function, "name", "")
+        name = str(raw_name or "")
+        arguments = function.get("arguments") if isinstance(function, dict) else getattr(function, "arguments", None)
+        if call_id and name:
+            calls.append({"id": call_id, "name": name, "args": _normalize_function_call_args(arguments), "arguments": arguments})
+    return calls
+
+
+def _extract_text_tool_calls(content: str, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    parsed = _parse_json_object(content)
+    if not isinstance(parsed, dict):
+        return []
+    raw_calls = parsed.get("tool_calls") or parsed.get("function_calls")
+    if not raw_calls and (
+        parsed.get("tool")
+        or parsed.get("function")
+        or parsed.get("name")
+        or parsed.get("tool_name")
+        or parsed.get("action") == "call"
+    ):
+        raw_calls = [parsed]
+    if not isinstance(raw_calls, list):
+        return []
+
+    tool_names = _tool_names(tools)
+    calls: list[dict[str, Any]] = []
+    for index, raw_call in enumerate(raw_calls):
+        if not isinstance(raw_call, dict):
+            continue
+        name, args = _text_tool_call_name_args(raw_call)
+        name = _normalize_text_tool_name(name, args=args, tool_names=tool_names)
+        if not name or name not in tool_names:
+            continue
+        call_id = str(raw_call.get("id") or f"text_tool_{uuid.uuid4().hex}_{index}")
+        calls.append(
+            {
+                "id": call_id,
+                "name": name,
+                "args": args,
+                "arguments": json.dumps(args),
+            }
+        )
+    return calls
+
+
+def _extract_text_response(content: str) -> str:
+    parsed = _parse_json_object(content)
+    if not isinstance(parsed, dict):
+        return content
+    if "thought" in parsed and not any(key in parsed for key in ("response", "text", "message")):
+        return ""
+    if _looks_like_structured_tool_attempt(parsed) and not any(key in parsed for key in ("response", "text", "message")):
+        return ""
+    response = parsed.get("response")
+    if response is None:
+        response = parsed.get("text") or parsed.get("message")
+    if isinstance(response, str):
+        return response.strip()
+    return content
+
+
+def _fallback_tool_calls_for_user_text(text: str, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tool_names = _tool_names(tools)
+    normalized = str(text or "").strip().lower()
+    if "keyboard_press_key" not in tool_names:
+        return []
+    if any(phrase in normalized for phrase in ("pause the music", "pause music", "pause the video", "pause video", "pause youtube", "pause the youtube")):
+        return [
+            {
+                "id": f"text_tool_{uuid.uuid4().hex}_fallback_media",
+                "name": "keyboard_press_key",
+                "args": {"key": "playpause"},
+                "arguments": json.dumps({"key": "playpause"}),
+            }
+        ]
+    return []
+
+
+def _looks_like_structured_tool_attempt(parsed: dict[str, Any]) -> bool:
+    return any(
+        key in parsed
+        for key in (
+            "tool_calls",
+            "function_calls",
+            "tool",
+            "function",
+            "tool_name",
+            "parameters",
+        )
+    ) or parsed.get("action") == "call"
+
+
+def _is_text_thought_only(content: str) -> bool:
+    parsed = _parse_json_object(content)
+    if not isinstance(parsed, dict):
+        return False
+    return "thought" in parsed and not any(
+        key in parsed
+        for key in (
+            "tool_calls",
+            "function_calls",
+            "tool",
+            "function",
+            "name",
+            "response",
+            "text",
+            "message",
+        )
+    )
+
+
+def _parse_json_object(content: str) -> Any:
+    payload = str(content or "").strip()
+    if not payload:
+        return None
+    if payload.startswith("```"):
+        lines = payload.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        payload = "\n".join(lines).strip()
+    try:
+        return json.loads(payload)
+    except Exception:
+        return None
+
+
+def _text_tool_call_name_args(raw_call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    function = raw_call.get("function")
+    if isinstance(function, dict):
+        name = str(function.get("name") or "").strip()
+        args = _normalize_function_call_args(function.get("arguments"))
+        if not args and isinstance(function.get("args"), dict):
+            args = dict(function.get("args") or {})
+        return name, args
+    if isinstance(function, str):
+        name = function.strip()
+    else:
+        name = str(raw_call.get("tool") or raw_call.get("tool_name") or raw_call.get("name") or "").strip()
+    args = raw_call.get("args") or raw_call.get("arguments") or raw_call.get("parameters") or {}
+    return name, _normalize_function_call_args(args)
+
+
+def _normalize_text_tool_name(name: str, *, args: dict[str, Any], tool_names: set[str]) -> str:
+    normalized = str(name or "").strip()
+    normalized_key = normalized.lower()
+    if normalized_key in {"mediacontrols", "media_controls", "media"}:
+        media_action = str(args.get("action") or args.get("command") or "").strip().lower()
+        media_key_by_action = {
+            "pause": "playpause",
+            "play": "playpause",
+            "playpause": "playpause",
+            "toggle": "playpause",
+            "stop": "stop",
+            "next": "nexttrack",
+            "previous": "prevtrack",
+            "prev": "prevtrack",
+            "mute": "volumemute",
+        }
+        media_key = media_key_by_action.get(media_action)
+        if media_key and "keyboard_press_key" in tool_names:
+            args.clear()
+            args["key"] = media_key
+            return "keyboard_press_key"
+    aliases = {
+        "click": "mouse_click",
+        "tap": "mouse_click",
+        "type": "keyboard_type_text",
+        "press_key": "keyboard_press_key",
+        "key_press": "keyboard_press_key",
+        "hotkey": "keyboard_key_combo",
+        "open_app": "app_open",
+        "open": "app_open",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized == "mouse_click" and "element_id" in args and "ui_element_id" not in args:
+        args["ui_element_id"] = args.pop("element_id")
+    return normalized if normalized in tool_names else ""
+
+
+def _tool_names(tools: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict):
+            name = str(function.get("name") or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _assistant_tool_message(message: Any, tool_calls: list[dict[str, Any]], content: str) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": content or None,
+        "tool_calls": [
+            {
+                "id": item["id"],
+                "type": "function",
+                "function": {"name": item["name"], "arguments": item.get("arguments") or json.dumps(item["args"])},
+            }
+            for item in tool_calls
+        ],
+    }

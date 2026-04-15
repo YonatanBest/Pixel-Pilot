@@ -224,9 +224,9 @@ class MainController(QObject):
         )
         if self.live_session.reconnect():
             message = (
-                "Wake word is unavailable, so Gemini Live is reconnecting automatically."
+                "Wake word is unavailable, so PixelPilot Live is reconnecting automatically."
                 if clean_trigger != "wakeword_disabled"
-                else "Wake word is disabled, so Gemini Live is reconnecting automatically."
+                else "Wake word is disabled, so PixelPilot Live is reconnecting automatically."
             )
             if clean_reason:
                 message = f"{message} {clean_reason}"
@@ -301,7 +301,7 @@ class MainController(QObject):
             return False
         if bool(getattr(self.live_session, "is_connection_pending", False)):
             self.gui_adapter.add_system_message(
-                "Wake word heard. Gemini Live is still connecting and will start listening as soon as the session is ready."
+                "Wake word heard. PixelPilot Live is still connecting and will start listening as soon as the session is ready."
             )
         return True
 
@@ -466,7 +466,7 @@ class MainController(QObject):
             self._init_gateway()
             self._sync_wake_word_controller()
         except Exception as exc:
-            logger.exception("Failed to initialize Gemini Live session")
+            logger.exception("Failed to initialize PixelPilot Live session")
             self.live_session = None
             self.live_mode_enabled = False
             self._handle_live_availability(False, str(exc))
@@ -549,20 +549,20 @@ class MainController(QObject):
             self.gui_adapter.add_error_message(self._startup_message("AI"))
             return {"ok": False, "message": self._startup_message("AI")}
         if not self.live_session:
-            self.gui_adapter.add_error_message(self._startup_message("Gemini Live"))
-            return {"ok": False, "message": self._startup_message("Gemini Live")}
+            self.gui_adapter.add_error_message(self._startup_message("PixelPilot Live"))
+            return {"ok": False, "message": self._startup_message("PixelPilot Live")}
         if not self.live_session.enabled:
             self.live_mode_enabled = bool(self.live_session.set_enabled(True))
             self.gui_adapter.set_live_enabled(self.live_mode_enabled)
             if not self.live_mode_enabled:
-                message = "Gemini Live is unavailable right now."
+                message = "PixelPilot Live is unavailable right now."
                 self.gui_adapter.add_error_message(message)
                 return {"ok": False, "message": message}
         result = self.live_session.submit_text(clean)
         if not isinstance(result, dict):
             return {"ok": False, "message": "Live runtime did not return a result."}
         if not bool(result.get("ok", False)):
-            message = str(result.get("message") or "Failed to send input to Gemini Live.").strip()
+            message = str(result.get("message") or "Failed to send input to PixelPilot Live.").strip()
             if message:
                 self.gui_adapter.add_error_message(message)
             return result
@@ -765,7 +765,7 @@ class MainController(QObject):
         if not self.live_session:
             self.live_mode_enabled = False
             self.gui_adapter.set_live_enabled(False)
-            self.gui_adapter.add_error_message(self._startup_message("Gemini Live", unavailable=True))
+            self.gui_adapter.add_error_message(self._startup_message("PixelPilot Live", unavailable=True))
             self._sync_wake_word_controller()
             return
 
@@ -776,7 +776,7 @@ class MainController(QObject):
 
         if not self.live_mode_enabled:
             self.gui_adapter.set_live_enabled(False)
-            self.gui_adapter.add_error_message(self._startup_message("Gemini Live", unavailable=True))
+            self.gui_adapter.add_error_message(self._startup_message("PixelPilot Live", unavailable=True))
             self._sync_wake_word_controller()
             return
 
@@ -784,7 +784,7 @@ class MainController(QObject):
             self.live_session.reconnect()
         else:
             self.live_session.disconnect(
-                reason="Gemini Live disconnected. Use voice, wake word, or text to reconnect."
+                reason="PixelPilot Live disconnected. Use voice, wake word, or text to reconnect."
             )
             self._live_voice_active = False
             self._live_action_passthrough_active = False
@@ -815,7 +815,7 @@ class MainController(QObject):
                 return
             if bool(getattr(self.live_session, "is_connection_pending", False)):
                 self.gui_adapter.add_system_message(
-                    "Gemini Live is still connecting. Voice will start automatically when the session is ready."
+                    "PixelPilot Live is still connecting. Voice will start automatically when the session is ready."
                 )
         else:
             self.live_session.stop_voice()

@@ -22,7 +22,13 @@ def _create_openwakeword_detector() -> WakeWordDetector:
         )
         return OnnxFeatureWakeWordDetector(
             model_path=model_path,
+            phrase=Config.WAKE_WORD_PHRASE,
             threshold=Config.WAKE_WORD_OPENWAKEWORD_THRESHOLD,
+            rms_threshold=Config.WAKE_WORD_ONNX_RMS_THRESHOLD,
+            score_smoothing_chunks=Config.WAKE_WORD_ONNX_SCORE_SMOOTHING_CHUNKS,
+            asr_fallback_enabled=Config.WAKE_WORD_ASR_FALLBACK_ENABLED,
+            asr_fallback_min_score=Config.WAKE_WORD_ASR_FALLBACK_MIN_SCORE,
+            asr_fallback_cooldown_seconds=Config.WAKE_WORD_ASR_FALLBACK_COOLDOWN_SECONDS,
             melspec_model_path=melspec_model_path,
             embedding_model_path=embedding_model_path,
         )

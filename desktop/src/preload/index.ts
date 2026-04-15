@@ -6,6 +6,7 @@ import type {
   RuntimeSnapshot,
   StartupDefaultsSnapshot,
   SidecarFrame,
+  UiPreferences,
   WindowKind
 } from '../shared/types.js';
 import { unwrapIpcResult, type IpcResult } from '../shared/ipc-result.js';
@@ -21,6 +22,8 @@ function invokeIpc<T>(channel: string, ...args: unknown[]): Promise<T> {
 const pixelPilot: PixelPilotApi = {
   getWindowKind: (): Promise<WindowKind> => ipcRenderer.invoke('pixelpilot:get-window-kind'),
   getSnapshot: (): Promise<RuntimeSnapshot | null> => ipcRenderer.invoke('pixelpilot:get-snapshot'),
+  getUiPreferences: (): Promise<UiPreferences> => invokeIpc<UiPreferences>('pixelpilot:get-ui-preferences'),
+  setUiPreferences: (payload) => invokeIpc<UiPreferences>('pixelpilot:set-ui-preferences', payload),
   getStartupDefaults: (): Promise<StartupDefaultsSnapshot> =>
     invokeIpc<StartupDefaultsSnapshot>('pixelpilot:get-startup-defaults'),
   invokeRuntime: (method: string, payload?: Record<string, unknown>) =>

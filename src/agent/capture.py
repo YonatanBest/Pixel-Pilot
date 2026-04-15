@@ -219,75 +219,82 @@ class ScreenCapture:
         """
         self.agent._ensure_workspace_active()
 
-        if self.agent.chat_window and self.agent.active_workspace == "user":
-            self.agent.chat_window.prepare_for_screenshot()
+        should_restore_window = bool(self.agent.chat_window and self.agent.active_workspace == "user")
+        screenshot_window_payload: Optional[dict] = None
 
-        self.agent._check_stop()
-        self.progress("Taking screenshot...")
+        if should_restore_window:
+            screenshot_window_payload = self.agent.chat_window.prepare_for_screenshot()
 
-        max_retries = 3
-        screenshot_path: Optional[str] = None
-
-        for attempt in range(max_retries):
+        try:
             self.agent._check_stop()
-            try:
-                if os.path.exists(Config.SCREENSHOT_PATH):
-                    try:
-                        os.remove(Config.SCREENSHOT_PATH)
-                    except Exception:
-                        pass
+            self.progress("Taking screenshot...")
 
-                time.sleep(0.1)
+            max_retries = 3
+            screenshot_path: Optional[str] = None
 
-                full_img = self._capture_raw_image()
-
+            for attempt in range(max_retries):
                 self.agent._check_stop()
+                try:
+                    if os.path.exists(Config.SCREENSHOT_PATH):
+                        try:
+                            os.remove(Config.SCREENSHOT_PATH)
+                        except Exception:
+                            pass
 
-                if self.agent.is_magnified and self.agent.zoom_center:
-                    w, h = full_img.size
+                    time.sleep(0.1)
 
-                    crop_w = int(w / self.agent.zoom_level)
-                    crop_h = int(h / self.agent.zoom_level)
+                    full_img = self._capture_raw_image()
 
-                    left = max(0, int(self.agent.zoom_center[0] - crop_w // 2))
-                    top = max(0, int(self.agent.zoom_center[1] - crop_h // 2))
-                    right = min(w, left + crop_w)
-                    bottom = min(h, top + crop_h)
+                    self.agent._check_stop()
 
-                    if right == w:
-                        left = max(0, w - crop_w)
-                    if bottom == h:
-                        top = max(0, h - crop_h)
+                    if self.agent.is_magnified and self.agent.zoom_center:
+                        w, h = full_img.size
 
-                    self.agent.zoom_offset = (left, top)
-                    zoom_crop = full_img.crop((left, top, right, bottom))
+                        crop_w = int(w / self.agent.zoom_level)
+                        crop_h = int(h / self.agent.zoom_level)
 
-                    magnified_img = zoom_crop.resize(
-                        (w, h), PIL.Image.Resampling.LANCZOS
-                    )
-                    magnified_img.save(Config.SCREENSHOT_PATH)
-                else:
-                    full_img.save(Config.SCREENSHOT_PATH)
-                    self.agent.zoom_offset = (0, 0)
+                        left = max(0, int(self.agent.zoom_center[0] - crop_w // 2))
+                        top = max(0, int(self.agent.zoom_center[1] - crop_h // 2))
+                        right = min(w, left + crop_w)
+                        bottom = min(h, top + crop_h)
 
-                self._last_hash = self._get_screen_hash(Config.SCREENSHOT_PATH)
+                        if right == w:
+                            left = max(0, w - crop_w)
+                        if bottom == h:
+                            top = max(0, h - crop_h)
 
-                time.sleep(Config.SCREENSHOT_DELAY)
+                        self.agent.zoom_offset = (left, top)
+                        zoom_crop = full_img.crop((left, top, right, bottom))
 
-                if (
-                    os.path.exists(Config.SCREENSHOT_PATH)
-                    and os.path.getsize(Config.SCREENSHOT_PATH) > 0
-                ):
-                    screenshot_path = Config.SCREENSHOT_PATH
-                    break
+                        magnified_img = zoom_crop.resize(
+                            (w, h), PIL.Image.Resampling.LANCZOS
+                        )
+                        magnified_img.save(Config.SCREENSHOT_PATH)
+                    else:
+                        full_img.save(Config.SCREENSHOT_PATH)
+                        self.agent.zoom_offset = (0, 0)
 
-            except Exception as e:
-                err_msg = str(e)
-                logger.warning(f"Screenshot attempt {attempt + 1} failed: {err_msg}")
-                time.sleep(0.1)
+                    self._last_hash = self._get_screen_hash(Config.SCREENSHOT_PATH)
 
-        if self.agent.chat_window and self.agent.active_workspace == "user":
-            self.agent.chat_window.restore_after_screenshot()
+                    time.sleep(Config.SCREENSHOT_DELAY)
+
+                    if (
+                        os.path.exists(Config.SCREENSHOT_PATH)
+                        and os.path.getsize(Config.SCREENSHOT_PATH) > 0
+                    ):
+                        screenshot_path = Config.SCREENSHOT_PATH
+                        break
+
+                except Exception as e:
+                    err_msg = str(e)
+                    logger.warning(f"Screenshot attempt {attempt + 1} failed: {err_msg}")
+                    time.sleep(0.1)
+        finally:
+            if should_restore_window:
+                try:
+                    self.agent.chat_window.restore_after_screenshot(screenshot_window_payload)
+                except Exception:
+                    logger.debug("Failed to restore PixelPilot window after screenshot.", exc_info=True)
 
         if not screenshot_path or not os.path.exists(screenshot_path):
             logger.error("Could not capture screen after multiple attempts.")

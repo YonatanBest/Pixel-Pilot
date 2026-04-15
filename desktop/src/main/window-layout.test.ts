@@ -25,9 +25,20 @@ describe('window-layout', () => {
 
     expect(bounds).toEqual({
       x: 500,
-      y: 24,
+      y: 56,
       width: 920,
       height: 220
+    });
+  });
+
+  it('anchors the glow window across the whole work area', () => {
+    const bounds = getAnchoredWindowBounds('glow', workArea, { width: 400, height: 300 });
+
+    expect(bounds).toEqual({
+      x: 0,
+      y: 0,
+      width: 1920,
+      height: 1080
     });
   });
 

@@ -6,6 +6,8 @@ export type AuthState = {
   backendUrl: string;
   hasApiKey: boolean;
   needsAuth: boolean;
+  requestProvider?: Record<string, unknown>;
+  liveProvider?: Record<string, unknown>;
 };
 
 export type MessageEntry = {
@@ -67,6 +69,11 @@ export type ExtensionSummary = {
 
 export type BridgeStatus = 'starting' | 'connected' | 'recovering' | 'failed';
 
+export type UiPreferences = {
+  cornerGlowEnabled: boolean;
+  statusNotchEnabled: boolean;
+};
+
 export type RuntimeSnapshot = {
   operationMode: 'GUIDANCE' | 'SAFE' | 'AUTO';
   visionMode: 'ROBO' | 'OCR';
@@ -101,6 +108,7 @@ export type RuntimeSnapshot = {
   lastDoctorReport: DoctorReport | Record<string, never>;
   bridgeStatus: BridgeStatus;
   bridgeStatusMessage: string;
+  uiPreferences: UiPreferences;
 };
 
 export type RuntimeEventEnvelope = {
@@ -134,6 +142,7 @@ export type SidecarFrame = {
 export type WindowKind =
   | 'overlay'
   | 'notch'
+  | 'glow'
   | 'sidecar'
   | 'settings';
 
@@ -147,6 +156,8 @@ export type WindowLayoutPayload = {
 export type PixelPilotApi = {
   getWindowKind: () => Promise<WindowKind>;
   getSnapshot: () => Promise<RuntimeSnapshot | null>;
+  getUiPreferences: () => Promise<UiPreferences>;
+  setUiPreferences: (payload: Partial<UiPreferences>) => Promise<UiPreferences>;
   getStartupDefaults: () => Promise<StartupDefaultsSnapshot>;
   invokeRuntime: (method: string, payload?: RuntimeCommandPayload) => Promise<Record<string, unknown>>;
   openExternal: (url: string) => Promise<void>;

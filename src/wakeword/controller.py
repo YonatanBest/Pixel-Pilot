@@ -126,7 +126,7 @@ class WakeWordController(QObject):
         self._publish_state("paused", "")
         if callable(self._add_activity_message):
             self._add_activity_message(
-                f'Wake word detected. Gemini Live is listening after "{self._phrase}".'
+                f'Wake word detected. PixelPilot Live is listening after "{self._phrase}".'
             )
         if not self._start_one_shot_voice():
             self.reconcile()

@@ -6,6 +6,7 @@ import copy
 import logging
 import os
 import secrets
+import time
 import uuid
 from typing import Any, Optional
 
@@ -203,6 +204,7 @@ class BackendLiveSession:
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._reservation: Optional[rate_limiter.LiveSessionReservation] = None
         self._resume_handle: Optional[str] = None
+        self._last_invalid_request_recovery_at = 0.0
         self._connect_config: dict[str, Any] = {}
         self._model = DEFAULT_LIVE_MODEL
         self._closed = False
@@ -535,12 +537,13 @@ class BackendLiveSession:
                         await self._send_error(self._translate_provider_exception(reconnect_exc))
                         break
                 elif not self._closed and self._is_nonrecoverable_request_error(exc):
-                    self._clear_resume_handle(reason=f"receive_error: {exc}")
+                    if await self._recover_from_invalid_request_error(exc):
+                        continue
                     await self._send_error(
                         LiveSessionError(
                             400,
-                            "Gemini Live rejected the request (invalid argument). "
-                            "Session disconnected to prevent reconnect loops.",
+                            "PixelPilot Live refreshed after an invalid request but could not reconnect. "
+                            "Tap to reconnect.",
                         )
                     )
                     break
@@ -557,6 +560,29 @@ class BackendLiveSession:
         if not self._closed:
             await self._ensure_session_with_retry()
 
+    async def _recover_from_invalid_request_error(self, exc: Exception) -> bool:
+        if self._closed:
+            return False
+        now = time.monotonic()
+        if (now - self._last_invalid_request_recovery_at) < 30.0:
+            return False
+        self._last_invalid_request_recovery_at = now
+        self._clear_resume_handle(reason=f"receive_error: {exc}")
+        try:
+            logger.warning(
+                "Backend live hit an invalid request; refreshing provider session without resumption: %s",
+                exc,
+            )
+            await self._disconnect_provider()
+            await asyncio.sleep(0.05)
+            if self._closed:
+                return False
+            await self._ensure_session_with_retry()
+            return self._session is not None
+        except Exception:
+            logger.warning("Backend live invalid-request recovery failed.", exc_info=True)
+            return False
+
     async def _send_json(self, payload: dict[str, Any]) -> None:
         async with self._send_lock:
             await self.websocket.send_json(payload)
@@ -568,6 +594,11 @@ class BackendLiveSession:
         message = str(exc or "").lower()
         if "429" in message or "rate" in message or "quota" in message:
             return LiveSessionError(429, _build_provider_rate_limit_detail(exc))
+        if self._is_nonrecoverable_request_error(exc):
+            return LiveSessionError(
+                400,
+                "PixelPilot Live rejected the request (invalid argument). Tap to reconnect.",
+            )
         return LiveSessionError(500, LIVE_PROVIDER_ERROR_MESSAGE)
 
     @staticmethod

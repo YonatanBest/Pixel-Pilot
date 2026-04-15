@@ -1,23 +1,13 @@
-import os
-import io
-import json
 import base64
-from typing import List, Optional, Any, Dict
-from PIL import Image
+import os
+from typing import Any, Dict, List, Optional
+
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 from pydantic import BaseModel
 
 load_dotenv()
 
-API_KEY = os.getenv("GEMINI_API_KEY")
-if not API_KEY:
-    raise ValueError("Missing GEMINI_API_KEY in backend/.env")
-
-client = genai.Client(api_key=API_KEY)
-_PRIVATE_CONFIG_KEYS = {"_pixelpilot_require_live_session"}
-_PRIVATE_CONFIG_KEYS.add("_pixelpilot_live_session_token")
+_PRIVATE_CONFIG_KEYS = {"_pixelpilot_require_live_session", "_pixelpilot_live_session_token"}
 
 
 class GenerationRequest(BaseModel):
@@ -26,103 +16,128 @@ class GenerationRequest(BaseModel):
     config: Optional[Dict[str, Any]] = None
 
 
-def _decode_image(data_b64: str) -> Image.Image:
-    return Image.open(io.BytesIO(base64.b64decode(data_b64)))
+def _provider() -> str:
+    return str(os.getenv("PIXELPILOT_MODEL_PROVIDER") or os.getenv("AI_PROVIDER") or "gemini").strip().lower()
 
 
-def _process_part(part: Dict[str, Any]) -> types.Part:
-    """
-    Convert a dict part (from JSON) back to a types.Part.
-    """
-    if "text" in part:
-        return types.Part(text=part["text"])
-    elif "data" in part and "mime_type" in part:
-        return types.Part.from_bytes(
-            data=base64.b64decode(part["data"]), mime_type=part["mime_type"]
-        )
-    return types.Part(text=str(part))
+def _api_key_for(provider: str) -> str:
+    env_name = {
+        "gemini": "GEMINI_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "claude": "ANTHROPIC_API_KEY",
+        "xai": "XAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
+        "vercel_ai_gateway": "VERCEL_AI_GATEWAY_API_KEY",
+    }.get(provider, "")
+    return str(os.getenv(env_name, "")).strip() if env_name else ""
 
 
-def _process_contents(contents_data: List[Dict[str, Any]]) -> List[types.Content]:
-    """
-    Convert list of dicts (roles/parts) to list of types.Content.
-    """
-    contents = []
-    for c in contents_data:
-        role = c.get("role", "user")
-        parts_data = c.get("parts", [])
-
-        real_parts = []
-        if isinstance(parts_data, list):
-            for p in parts_data:
-                real_parts.append(_process_part(p))
-        elif isinstance(parts_data, dict):
-            real_parts.append(_process_part(parts_data))
-        else:
-            real_parts.append(types.Part(text=str(parts_data)))
-
-        contents.append(types.Content(role=role, parts=real_parts))
-    return contents
+def _base_url_for(provider: str) -> str:
+    if provider == "ollama":
+        return str(os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).strip()
+    if provider == "openai_compatible":
+        return str(os.getenv("OPENAI_COMPATIBLE_BASE_URL", "")).strip()
+    if provider == "vercel_ai_gateway":
+        return str(os.getenv("VERCEL_AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")).strip()
+    return ""
 
 
-def _sanitize_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Remove 'additionalProperties' fields from schema as they are not supported by Gemini API.
-    Recursive function to handle nested objects.
-    """
-    if not isinstance(schema, dict):
-        return schema
+def _litellm_model_name(provider: str, model: str) -> str:
+    clean = str(model or "").strip()
+    if "/" in clean:
+        return clean
+    if provider == "gemini":
+        return f"gemini/{clean}"
+    if provider in {"anthropic", "claude"}:
+        return f"anthropic/{clean}"
+    if provider == "xai":
+        return f"xai/{clean}"
+    if provider == "openrouter":
+        return f"openrouter/{clean}"
+    if provider == "ollama":
+        return f"ollama/{clean}"
+    return clean
 
-    new_schema = schema.copy()
 
-    if "additionalProperties" in new_schema:
-        del new_schema["additionalProperties"]
+def _content_to_message(item: dict[str, Any]) -> dict[str, Any]:
+    role = str(item.get("role") or "user").strip() or "user"
+    parts = item.get("parts", [])
+    if isinstance(parts, dict):
+        parts = [parts]
+    if not isinstance(parts, list):
+        return {"role": role, "content": str(parts)}
 
-    for key, value in new_schema.items():
-        if isinstance(value, dict):
-            new_schema[key] = _sanitize_schema(value)
-        elif isinstance(value, list):
-            new_schema[key] = [
-                _sanitize_schema(item) if isinstance(item, dict) else item
-                for item in value
-            ]
+    text_parts: list[str] = []
+    content: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            text_parts.append(str(part))
+            continue
+        if "text" in part:
+            text_parts.append(str(part.get("text") or ""))
+        elif "data" in part and "mime_type" in part:
+            mime_type = str(part.get("mime_type") or "image/png")
+            data = str(part.get("data") or "")
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{data}"}})
 
-    return new_schema
+    text = "\n".join(chunk for chunk in text_parts if chunk)
+    if content:
+        if text:
+            content.insert(0, {"type": "text", "text": text})
+        return {"role": role, "content": content}
+    return {"role": role, "content": text}
+
+
+def _extract_text(response: Any) -> str:
+    try:
+        choices = response.get("choices") if isinstance(response, dict) else response.choices
+        if choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else choices[0].message
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
+            return str(content or "")
+    except Exception:
+        pass
+    return str(response or "")
 
 
 async def generate_content(request: GenerationRequest):
-    print(f"DEBUG: Processing request for model {request.model}")
-    contents = _process_contents(request.contents)
+    import litellm
 
+    provider = _provider()
     config_data = dict(request.config or {})
     for key in _PRIVATE_CONFIG_KEYS:
         config_data.pop(key, None)
+
     tools_config = config_data.pop("tools", None)
-    real_tools = None
     if tools_config:
-        real_tools = []
-        for t in tools_config:
-            if "google_search" in t:
-                real_tools.append(types.Tool(google_search=types.GoogleSearch()))
-            if "code_execution" in t:
-                real_tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
+        config_data["tools"] = [
+            item
+            for item in tools_config
+            if isinstance(item, dict) and item.get("type") == "function"
+        ]
+        if config_data["tools"]:
+            config_data["tool_choice"] = "auto"
+        else:
+            config_data.pop("tools", None)
 
     if "response_json_schema" in config_data:
-        schema = config_data.pop("response_json_schema")
-        config_data["response_schema"] = _sanitize_schema(schema)
+        config_data.pop("response_json_schema", None)
+        config_data.setdefault("response_format", {"type": "json_object"})
+    config_data.pop("thinking_config", None)
 
+    kwargs: dict[str, Any] = {
+        "model": _litellm_model_name(provider, request.model),
+        "messages": [_content_to_message(item) for item in request.contents],
+        **config_data,
+    }
+    api_key = _api_key_for(provider)
+    base_url = _base_url_for(provider)
+    if api_key:
+        kwargs["api_key"] = api_key
+    if base_url:
+        kwargs["api_base"] = base_url.rstrip("/")
 
-    thinking_conf = config_data.pop("thinking_config", None)
-    real_thinking_config = None
-    if thinking_conf:
-        real_thinking_config = types.ThinkingConfig(**thinking_conf)
-
-    conf = types.GenerateContentConfig(
-        **config_data, tools=real_tools, thinking_config=real_thinking_config
-    )
-
-    response = client.models.generate_content(
-        model=request.model, contents=contents, config=conf
-    )
-
-    return {"text": response.text}
+    response = await litellm.acompletion(**kwargs)
+    return {"text": _extract_text(response)}

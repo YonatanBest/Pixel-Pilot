@@ -10,12 +10,14 @@ import type {
   RuntimeSnapshot,
   SidecarFrame,
   StartupDefaultsSnapshot,
+  UiPreferences,
   WindowKind,
   WindowLayoutPayload
 } from '../shared/types.js';
 import { failureResult, successResult, type IpcResult } from '../shared/ipc-result.js';
 import { getAnchoredWindowBounds, normalizeWindowSize } from './window-layout.js';
 import { StartupDefaultsStore } from './startup-defaults.js';
+import { UiPreferencesStore } from './ui-preferences.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,16 +30,150 @@ type WindowManagerOptions = {
   launchToTray?: boolean;
 };
 
+function latestActionUpdate(snapshot: RuntimeSnapshot | null): RuntimeSnapshot['recentActionUpdates'][number] | null {
+  const updates = snapshot?.recentActionUpdates ?? [];
+  for (let index = updates.length - 1; index >= 0; index -= 1) {
+    const update = updates[index];
+    if (update?.error || update?.message || update?.name || update?.status) {
+      return update;
+    }
+  }
+  return null;
+}
+
+function isDoneStatus(status: unknown): boolean {
+  const normalized = String(status || '').trim().toLowerCase();
+  return (
+    normalized.includes('done')
+    || normalized.includes('complete')
+    || normalized.includes('success')
+    || normalized.includes('finished')
+  );
+}
+
+function isErrorStatus(status: unknown): boolean {
+  const normalized = String(status || '').trim().toLowerCase();
+  return normalized.includes('error') || normalized.includes('fail') || normalized.includes('cancel');
+}
+
+function statusSurfaceIsActive(snapshot: RuntimeSnapshot | null): boolean {
+  if (!snapshot || snapshot.auth.needsAuth) {
+    return false;
+  }
+  const liveState = String(snapshot.liveSessionState || '').trim().toLowerCase();
+  const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
+  const wakeWordHasTakenOver = liveState === 'disconnected' && wakeWordState === 'armed';
+  if (snapshot.bridgeStatus === 'starting' || snapshot.bridgeStatus === 'recovering' || snapshot.bridgeStatus === 'failed') {
+    return true;
+  }
+  const liveStatus = snapshot.liveStatus;
+  if (liveStatus && liveStatus.level !== 'idle' && String(liveStatus.message || '').trim()) {
+    if (wakeWordHasTakenOver && liveStatus.level === 'info') {
+      return false;
+    }
+    return true;
+  }
+  if (snapshot.liveVoiceActive) {
+    return true;
+  }
+  if (Number(snapshot.userAudioLevel || 0) > 0.02 || Number(snapshot.assistantAudioLevel || 0) > 0.02) {
+    return true;
+  }
+  if (['connecting', 'listening', 'thinking', 'waiting', 'acting', 'interrupted'].includes(liveState)) {
+    return true;
+  }
+  const latest = latestActionUpdate(snapshot);
+  if (!latest) {
+    return false;
+  }
+  if (latest.error || isErrorStatus(latest.status)) {
+    return true;
+  }
+  return latest.done !== true && !isDoneStatus(latest.status);
+}
+
+function actionUpdateLabel(snapshot: RuntimeSnapshot | null): string {
+  const latest = latestActionUpdate(snapshot);
+  if (!latest) {
+    return '';
+  }
+  const error = String(latest.error || '').trim();
+  const message = String(latest.message || '').trim();
+  const name = String(latest.name || '').trim();
+  const statusText = String(latest.status || '').trim();
+  if (message) {
+    return message;
+  }
+  if (error && error !== statusText) {
+    return error;
+  }
+  if (name && statusText) {
+    return `${name}: ${statusText}`;
+  }
+  return name || statusText;
+}
+
+function latestAssistantText(snapshot: RuntimeSnapshot | null): string {
+  const messages = snapshot?.recentMessages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const entry = messages[index];
+    const kind = String(entry?.kind || '').trim().toLowerCase();
+    const speaker = String(entry?.speaker || '').trim().toLowerCase();
+    const text = String(entry?.text || '').trim();
+    if (text && (kind === 'assistant' || speaker === 'assistant')) {
+      return text;
+    }
+  }
+  return '';
+}
+
+function notchSurfaceText(snapshot: RuntimeSnapshot | null): string {
+  if (!snapshot) {
+    return '';
+  }
+  const liveStatus = snapshot.liveStatus;
+  if (liveStatus && liveStatus.level !== 'idle' && String(liveStatus.message || '').trim()) {
+    return String(liveStatus.message).trim();
+  }
+  const actionLabel = actionUpdateLabel(snapshot);
+  if (actionLabel) {
+    return actionLabel;
+  }
+  return latestAssistantText(snapshot);
+}
+
+function trayStatusLabel(snapshot: RuntimeSnapshot | null, bridgeStatusMessage: string): string {
+  if (!snapshot) {
+    return bridgeStatusMessage || 'Starting runtime...';
+  }
+  const liveStatus = snapshot.liveStatus;
+  if (liveStatus && liveStatus.level !== 'idle' && String(liveStatus.message || '').trim()) {
+    return String(liveStatus.message).trim();
+  }
+  const actionLabel = actionUpdateLabel(snapshot);
+  if (actionLabel && statusSurfaceIsActive(snapshot)) {
+    return actionLabel;
+  }
+  const liveState = String(snapshot.liveSessionState || '').trim();
+  if (liveState) {
+    return `Live: ${liveState}`;
+  }
+  return bridgeStatusMessage || 'Ready';
+}
+
 export class WindowManager {
   private overlayWindow: BrowserWindowType | null = null;
   private notchWindow: BrowserWindowType | null = null;
+  private glowWindow: BrowserWindowType | null = null;
   private sidecarWindow: BrowserWindowType | null = null;
   private settingsWindow: BrowserWindowType | null = null;
   private tray: TrayType | null = null;
   private readonly invokeRuntime: InvokeRuntime;
   private readonly startupDefaultsStore: StartupDefaultsStore;
+  private readonly uiPreferencesStore: UiPreferencesStore;
   private readonly kinds = new Map<number, WindowKind>();
   private currentSnapshot: RuntimeSnapshot | null = null;
+  private uiPreferences: UiPreferences;
   private bridgeStatus: BridgeStatus = 'starting';
   private bridgeStatusMessage = 'Starting runtime...';
   private pendingConfirmations = new Map<string, (payload: Record<string, unknown>) => void>();
@@ -47,14 +183,29 @@ export class WindowManager {
   private readonly userMovedKinds = new Set<WindowKind>();
   private readonly programmaticMoveKinds = new Set<WindowKind>();
   private launchToTrayPending: boolean;
+  private readonly showManualLaunchGlow: boolean;
+  private initialPostLoginHideApplied = false;
+  private previousWakeWordState = '';
+  private previousLiveVoiceActive = false;
+  private wakeNotchActive = false;
+  private notchTextInitialized = false;
+  private previousNotchSurfaceText = '';
+  private notchVisibleUntil = 0;
+  private notchVisibilityTimer: NodeJS.Timeout | null = null;
+  private transientGlowUntil = 0;
+  private transientGlowTimer: NodeJS.Timeout | null = null;
 
   constructor(
     invokeRuntime: InvokeRuntime,
     startupDefaultsStore: StartupDefaultsStore,
+    uiPreferencesStore: UiPreferencesStore,
     options: WindowManagerOptions = {},
   ) {
     this.invokeRuntime = invokeRuntime;
     this.startupDefaultsStore = startupDefaultsStore;
+    this.uiPreferencesStore = uiPreferencesStore;
+    this.uiPreferences = uiPreferencesStore.load();
+    this.showManualLaunchGlow = !Boolean(options.launchToTray);
     this.launchToTrayPending = Boolean(options.launchToTray);
     this.registerIpc();
   }
@@ -62,9 +213,11 @@ export class WindowManager {
   createWindows(): void {
     this.overlayWindow = this.createWindow('overlay', 920, 180, false);
     this.notchWindow = this.createWindow('notch', 420, 76, true);
+    this.glowWindow = this.createWindow('glow', 400, 300, true);
     this.sidecarWindow = this.createWindow('sidecar', 390, 420, true);
     this.settingsWindow = this.createWindow('settings', 640, 560, true);
     this.notchWindow.hide();
+    this.glowWindow.hide();
     this.sidecarWindow.hide();
     this.settingsWindow.hide();
     this.repositionAnchoredWindows();
@@ -77,6 +230,14 @@ export class WindowManager {
 
   dispose(): void {
     globalShortcut.unregisterAll();
+    if (this.transientGlowTimer) {
+      clearTimeout(this.transientGlowTimer);
+      this.transientGlowTimer = null;
+    }
+    if (this.notchVisibilityTimer) {
+      clearTimeout(this.notchVisibilityTimer);
+      this.notchVisibilityTimer = null;
+    }
     screen.removeListener('display-metrics-changed', this.repositionAnchoredWindows);
     screen.removeListener('display-added', this.repositionAnchoredWindows);
     screen.removeListener('display-removed', this.repositionAnchoredWindows);
@@ -84,6 +245,7 @@ export class WindowManager {
     this.tray = null;
     this.overlayWindow?.destroy();
     this.notchWindow?.destroy();
+    this.glowWindow?.destroy();
     this.sidecarWindow?.destroy();
     this.settingsWindow?.destroy();
   }
@@ -94,6 +256,21 @@ export class WindowManager {
 
   applySnapshot(snapshot: RuntimeSnapshot): void {
     this.currentSnapshot = this.decorateSnapshot(snapshot);
+    this.updateTransientWakeGlow(this.currentSnapshot);
+    this.updateNotchVisibilityTail(this.currentSnapshot);
+    if (this.currentSnapshot.auth.needsAuth) {
+      this.initialPostLoginHideApplied = false;
+    }
+    if (!this.currentSnapshot.auth.needsAuth && !this.initialPostLoginHideApplied) {
+      this.initialPostLoginHideApplied = true;
+      if (this.showManualLaunchGlow) {
+        this.startTransientGlow(1800);
+      }
+      if (!this.currentSnapshot.backgroundHidden) {
+        this.fireAndForget(this.setBackgroundHidden(true));
+        return;
+      }
+    }
     if (!snapshot.backgroundHidden || snapshot.auth.needsAuth) {
       if (!this.launchToTrayPending) {
         this.trayOnly = false;
@@ -103,6 +280,7 @@ export class WindowManager {
     this.broadcastState(this.currentSnapshot);
     this.syncWindowVisibility();
     this.applyClickThrough();
+    this.rebuildTrayMenu();
   }
 
   setBridgeState(status: BridgeStatus, message = ''): void {
@@ -114,12 +292,14 @@ export class WindowManager {
     this.currentSnapshot = this.decorateSnapshot(this.currentSnapshot);
     this.broadcastState(this.currentSnapshot);
     this.syncWindowVisibility();
+    this.rebuildTrayMenu();
   }
 
   broadcastEvent(envelope: RuntimeEventEnvelope): void {
     for (const win of [
       this.overlayWindow,
       this.notchWindow,
+      this.glowWindow,
       this.sidecarWindow,
       this.settingsWindow,
     ]) {
@@ -155,29 +335,37 @@ export class WindowManager {
   }
 
   private createWindow(kind: WindowKind, width: number, height: number, skipTaskbar: boolean): BrowserWindowType {
+    const isGlow = kind === 'glow';
+    const isNotch = kind === 'notch';
+    const isClickThroughSurface = isGlow || isNotch;
     const window = new BrowserWindow({
       width,
       height,
       icon: this.resolveIconPath(),
       frame: false,
-      show: kind === 'overlay' && !this.launchToTrayPending,
+      show: false,
       transparent: true,
       resizable: false,
       hasShadow: false,
       skipTaskbar,
-      alwaysOnTop: true,
+      alwaysOnTop: kind !== 'overlay',
       movable:
-        kind !== 'notch'
+        !isClickThroughSurface
         && kind !== 'settings',
       maximizable: false,
       minimizable: false,
       backgroundColor: '#00000000',
+      focusable: !isClickThroughSurface,
       webPreferences: {
         preload: path.join(__dirname, '../preload/index.js'),
         contextIsolation: true,
         sandbox: false
       }
     });
+    if (isClickThroughSurface) {
+      window.setIgnoreMouseEvents(true, { forward: true });
+      window.setAlwaysOnTop(true, 'screen-saver');
+    }
     this.kinds.set(window.webContents.id, kind);
     window.on('moved', () => {
       if (!this.programmaticMoveKinds.has(kind) && kind !== 'notch') {
@@ -208,17 +396,130 @@ export class WindowManager {
     const icon = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
     this.tray = new Tray(icon);
     this.tray.setToolTip('PixelPilot');
-    this.tray.setContextMenu(
-      Menu.buildFromTemplate([
-        { label: 'Show PixelPilot', click: () => this.fireAndForget(this.setBackgroundHidden(false)) },
-        { label: 'Hide to Background', click: () => this.fireAndForget(this.setBackgroundHidden(true)) },
-        { type: 'separator' },
-        { label: 'Quit', click: () => app.quit() }
-      ])
-    );
+    this.rebuildTrayMenu();
     this.tray.on('click', () => {
       this.fireAndForget(this.setBackgroundHidden(false));
     });
+  }
+
+  private rebuildTrayMenu(): void {
+    if (!this.tray) {
+      return;
+    }
+
+    const snapshot = this.currentSnapshot;
+    const authRequired = Boolean(snapshot?.auth.needsAuth);
+    const bridgeBusy = this.bridgeStatus === 'starting' || this.bridgeStatus === 'recovering';
+    const liveAvailable = Boolean(snapshot?.liveAvailable);
+    const liveVoiceActive = Boolean(snapshot?.liveVoiceActive);
+    const wakeWordEnabled = Boolean(snapshot?.wakeWordEnabled);
+    const liveState = String(snapshot?.liveSessionState || '').trim().toLowerCase();
+    const agentPreviewAvailable = Boolean(snapshot?.agentViewEnabled);
+    const agentPreviewRequested = Boolean(snapshot?.agentViewRequested);
+
+    this.tray.setToolTip(`PixelPilot - ${trayStatusLabel(snapshot, this.bridgeStatusMessage)}`);
+    this.tray.setContextMenu(
+      Menu.buildFromTemplate([
+        {
+          label: authRequired ? 'Open PixelPilot Login' : 'Open Command Bar',
+          click: () => this.fireAndForget(this.setBackgroundHidden(false)),
+        },
+        {
+          label: 'Stop Current Task',
+          enabled: !authRequired && !bridgeBusy,
+          click: () => this.fireAndForget(this.invokeRuntime('live.stop')),
+        },
+        { type: 'separator' },
+        {
+          label: 'Mode',
+          enabled: !authRequired && !bridgeBusy,
+          submenu: [
+            {
+              label: 'Guidance',
+              type: 'radio',
+              checked: snapshot?.operationMode === 'GUIDANCE',
+              click: () => this.fireAndForget(this.invokeRuntime('mode.set', { value: 'GUIDANCE' })),
+            },
+            {
+              label: 'Safe',
+              type: 'radio',
+              checked: snapshot?.operationMode === 'SAFE',
+              click: () => this.fireAndForget(this.invokeRuntime('mode.set', { value: 'SAFE' })),
+            },
+            {
+              label: 'Auto',
+              type: 'radio',
+              checked: snapshot?.operationMode === 'AUTO',
+              click: () => this.fireAndForget(this.invokeRuntime('mode.set', { value: 'AUTO' })),
+            },
+          ],
+        },
+        {
+          label: 'Input',
+          enabled: !authRequired && !bridgeBusy,
+          submenu: [
+            {
+              label: liveVoiceActive ? 'Stop Voice Input' : 'Start Voice Input',
+              enabled: liveAvailable,
+              click: () => this.fireAndForget(this.invokeRuntime('live.setVoice', { enabled: !liveVoiceActive })),
+            },
+            {
+              label: wakeWordEnabled ? 'Disable Wake Word' : 'Enable Wake Word',
+              click: () => this.fireAndForget(this.invokeRuntime('wakeWord.setEnabled', { enabled: !wakeWordEnabled })),
+            },
+            {
+              label: liveState === 'disconnected' ? 'Reconnect Live' : 'Disconnect Live',
+              enabled: liveAvailable,
+              click: () => this.fireAndForget(this.invokeRuntime('live.setEnabled', { enabled: liveState === 'disconnected' })),
+            },
+          ],
+        },
+        {
+          label: 'Visibility',
+          enabled: !authRequired,
+          submenu: [
+            {
+              label: 'Corner Glow',
+              type: 'checkbox',
+              checked: this.uiPreferences.cornerGlowEnabled,
+              click: () => this.setUiPreferences({ cornerGlowEnabled: !this.uiPreferences.cornerGlowEnabled }),
+            },
+            {
+              label: 'Status Notch',
+              type: 'checkbox',
+              checked: this.uiPreferences.statusNotchEnabled,
+              click: () => this.setUiPreferences({ statusNotchEnabled: !this.uiPreferences.statusNotchEnabled }),
+            },
+            {
+              label: 'Agent Preview',
+              type: 'checkbox',
+              enabled: agentPreviewAvailable,
+              checked: agentPreviewRequested,
+              click: () => this.fireAndForget(this.invokeRuntime('agentView.setRequested', { requested: !agentPreviewRequested })),
+            },
+          ],
+        },
+        { type: 'separator' },
+        {
+          label: 'Settings',
+          enabled: !authRequired,
+          click: () => {
+            this.openSettingsWindow();
+          },
+        },
+        {
+          label: 'Run Diagnostics',
+          enabled: !authRequired && !bridgeBusy,
+          click: () => this.fireAndForget(this.invokeRuntime('doctor.run')),
+        },
+        {
+          label: 'Open Logs',
+          click: () => this.fireAndForget(this.openLogsFolder()),
+        },
+        { type: 'separator' },
+        { label: 'Quit PixelPilot', click: () => app.quit() },
+      ])
+    );
   }
 
   private resolveIconPath(): string | undefined {
@@ -245,6 +546,9 @@ export class WindowManager {
 
   private registerShortcuts(): void {
     globalShortcut.register('CommandOrControl+Shift+Q', () => app.quit());
+    globalShortcut.register('CommandOrControl+Shift+Space', () => {
+      this.fireAndForget(this.setBackgroundHidden(false));
+    });
     globalShortcut.register('CommandOrControl+Shift+X', () => {
       this.fireAndForget(this.invokeRuntime('live.stop'));
     });
@@ -262,6 +566,12 @@ export class WindowManager {
   private registerIpc(): void {
     ipcMain.handle('pixelpilot:get-window-kind', (event) => this.getWindowKind(event.sender.id));
     ipcMain.handle('pixelpilot:get-snapshot', () => this.currentSnapshot);
+    ipcMain.handle('pixelpilot:get-ui-preferences', () =>
+      this.wrapIpcResult(() => this.getUiPreferences())
+    );
+    ipcMain.handle('pixelpilot:set-ui-preferences', (_event, payload: Partial<UiPreferences>) =>
+      this.wrapIpcResult(() => this.setUiPreferences(payload))
+    );
     ipcMain.handle('pixelpilot:get-startup-defaults', () =>
       this.wrapIpcResult(() => this.getStartupDefaults())
     );
@@ -302,6 +612,7 @@ export class WindowManager {
         if (resolver) {
           this.pendingConfirmations.delete(id);
           resolver(payload);
+          this.syncWindowVisibility();
         }
         return { ok: true };
       })
@@ -317,37 +628,54 @@ export class WindowManager {
     if (!this.currentSnapshot) {
       return;
     }
-    const hidden = this.currentSnapshot.backgroundHidden && !this.currentSnapshot.auth.needsAuth;
-    if (this.launchToTrayPending) {
-      this.overlayWindow?.hide();
+    if (this.currentSnapshot.auth.needsAuth) {
+      this.overlayWindow?.setAlwaysOnTop(true, 'floating');
+      this.overlayWindow?.show();
       this.notchWindow?.hide();
+      this.glowWindow?.hide();
       this.sidecarWindow?.hide();
       this.settingsWindow?.hide();
       return;
     }
-    const trayOnly = hidden && this.trayOnly;
-    if (trayOnly) {
+
+    if (this.launchToTrayPending) {
       this.overlayWindow?.hide();
       this.notchWindow?.hide();
+      this.glowWindow?.hide();
+      this.sidecarWindow?.hide();
       this.settingsWindow?.hide();
-    } else if (hidden) {
-      this.overlayWindow?.hide();
-      this.settingsWindow?.hide();
-      this.anchorWindow('notch');
-      this.notchWindow?.showInactive();
-    } else {
-      this.notchWindow?.hide();
-      this.overlayWindow?.showInactive();
+      return;
     }
 
-    if (!hidden && this.currentSnapshot.sidecarVisible && !this.currentSnapshot.auth.needsAuth) {
+    const activeStatus = statusSurfaceIsActive(this.currentSnapshot) || this.hasTransientGlow();
+    const notchActive = this.notchSurfaceIsVisible(this.currentSnapshot);
+    const commandHidden = Boolean(this.currentSnapshot.backgroundHidden) && this.pendingConfirmations.size === 0;
+    if (commandHidden) {
+      this.overlayWindow?.hide();
+      if (notchActive && this.uiPreferences.statusNotchEnabled && !this.trayOnly) {
+        this.anchorWindow('notch');
+        this.notchWindow?.showInactive();
+      } else {
+        this.notchWindow?.hide();
+      }
+    } else {
+      this.notchWindow?.hide();
+      this.anchorWindow('overlay');
+      this.overlayWindow?.setAlwaysOnTop(false);
+      this.overlayWindow?.show();
+    }
+
+    if (activeStatus && this.uiPreferences.cornerGlowEnabled) {
+      this.anchorWindow('glow');
+      this.glowWindow?.showInactive();
+    } else {
+      this.glowWindow?.hide();
+    }
+
+    if (this.currentSnapshot.sidecarVisible && !this.currentSnapshot.auth.needsAuth) {
       this.sidecarWindow?.showInactive();
     } else {
       this.sidecarWindow?.hide();
-    }
-
-    if (this.currentSnapshot.auth.needsAuth) {
-      this.settingsWindow?.hide();
     }
   }
 
@@ -369,6 +697,7 @@ export class WindowManager {
     for (const win of [
       this.overlayWindow,
       this.notchWindow,
+      this.glowWindow,
       this.sidecarWindow,
       this.settingsWindow,
     ]) {
@@ -381,7 +710,27 @@ export class WindowManager {
       ...snapshot,
       bridgeStatus: this.bridgeStatus,
       bridgeStatusMessage: this.bridgeStatusMessage,
+      uiPreferences: { ...this.uiPreferences },
     };
+  }
+
+  private getUiPreferences(): UiPreferences {
+    this.uiPreferences = this.uiPreferencesStore.load();
+    return { ...this.uiPreferences };
+  }
+
+  private setUiPreferences(payload: Partial<UiPreferences>): UiPreferences {
+    this.uiPreferences = this.uiPreferencesStore.save(payload);
+    if (!this.uiPreferences.cornerGlowEnabled) {
+      this.clearTransientGlow();
+    }
+    if (this.currentSnapshot) {
+      this.currentSnapshot = this.decorateSnapshot(this.currentSnapshot);
+      this.broadcastState(this.currentSnapshot);
+      this.syncWindowVisibility();
+    }
+    this.rebuildTrayMenu();
+    return { ...this.uiPreferences };
   }
 
   private getStartupDefaults(): StartupDefaultsSnapshot {
@@ -401,10 +750,11 @@ export class WindowManager {
     if (!this.overlayWindow) {
       return { approved: false };
     }
-    this.overlayWindow.showInactive();
-    this.overlayWindow.webContents.send('runtime:confirmation-request', request);
     return new Promise((resolve) => {
       this.pendingConfirmations.set(request.id, resolve);
+      this.syncWindowVisibility();
+      this.overlayWindow?.show();
+      this.overlayWindow?.webContents.send('runtime:confirmation-request', request);
     });
   }
 
@@ -412,6 +762,7 @@ export class WindowManager {
     const payload = {
       overlay_visible: this.isWindowVisible(this.overlayWindow),
       notch_visible: this.isWindowVisible(this.notchWindow),
+      glow_visible: this.isWindowVisible(this.glowWindow),
       sidecar_visible: this.isWindowVisible(this.sidecarWindow),
       settings_visible: this.isWindowVisible(this.settingsWindow),
       restore_main_window: Boolean(this.currentSnapshot && !this.currentSnapshot.backgroundHidden),
@@ -419,7 +770,7 @@ export class WindowManager {
       restore_tray_only: Boolean(this.currentSnapshot?.backgroundHidden && this.trayOnly),
     };
     this.overlayWindow?.hide();
-    this.notchWindow?.hide();
+    this.glowWindow?.hide();
     this.sidecarWindow?.hide();
     this.settingsWindow?.hide();
     return payload;
@@ -429,12 +780,14 @@ export class WindowManager {
     const hasExactVisibilityState =
       Object.prototype.hasOwnProperty.call(payload, 'overlay_visible')
       || Object.prototype.hasOwnProperty.call(payload, 'notch_visible')
+      || Object.prototype.hasOwnProperty.call(payload, 'glow_visible')
       || Object.prototype.hasOwnProperty.call(payload, 'sidecar_visible')
       || Object.prototype.hasOwnProperty.call(payload, 'settings_visible');
 
     if (hasExactVisibilityState) {
       this.restoreWindowVisibility(this.overlayWindow, Boolean(payload.overlay_visible));
       this.restoreWindowVisibility(this.notchWindow, Boolean(payload.notch_visible));
+      this.restoreWindowVisibility(this.glowWindow, Boolean(payload.glow_visible));
       this.restoreWindowVisibility(this.sidecarWindow, Boolean(payload.sidecar_visible));
       if (Boolean(payload.settings_visible)) {
         this.positionSettingsWindow();
@@ -453,6 +806,7 @@ export class WindowManager {
       this.restoreWindowVisibility(this.notchWindow, true);
       this.restoreWindowVisibility(this.overlayWindow, false);
     }
+    this.restoreWindowVisibility(this.glowWindow, Boolean(statusSurfaceIsActive(this.currentSnapshot) && this.uiPreferences.cornerGlowEnabled));
     this.restoreWindowVisibility(this.sidecarWindow, Boolean(this.currentSnapshot?.sidecarVisible));
     this.restoreWindowVisibility(this.settingsWindow, false);
   }
@@ -509,11 +863,9 @@ export class WindowManager {
     this.trayOnly = false;
     if (this.currentSnapshot) {
       this.currentSnapshot = { ...this.currentSnapshot, backgroundHidden: hidden };
-      if (hidden) {
-        this.settingsWindow?.hide();
-      }
       this.syncWindowVisibility();
       this.broadcastState(this.currentSnapshot);
+      this.rebuildTrayMenu();
     }
     try {
       return await this.invokeRuntime('shell.setBackgroundHidden', { hidden });
@@ -524,6 +876,7 @@ export class WindowManager {
         this.currentSnapshot = previousSnapshot;
         this.syncWindowVisibility();
         this.broadcastState(previousSnapshot);
+        this.rebuildTrayMenu();
       }
       throw error;
     }
@@ -539,11 +892,9 @@ export class WindowManager {
     this.trayOnly = enabled;
     if (this.currentSnapshot) {
       this.currentSnapshot = { ...this.currentSnapshot, backgroundHidden: hidden };
-      if (hidden) {
-        this.settingsWindow?.hide();
-      }
       this.syncWindowVisibility();
       this.broadcastState(this.currentSnapshot);
+      this.rebuildTrayMenu();
     }
 
     try {
@@ -555,13 +906,158 @@ export class WindowManager {
         this.currentSnapshot = previousSnapshot;
         this.syncWindowVisibility();
         this.broadcastState(previousSnapshot);
+        this.rebuildTrayMenu();
       }
       throw error;
     }
   }
 
+  private hasTransientGlow(): boolean {
+    return Date.now() < this.transientGlowUntil;
+  }
+
+  private hasNotchVisibilityTail(): boolean {
+    return Date.now() < this.notchVisibleUntil;
+  }
+
+  private notchSurfaceIsVisible(snapshot: RuntimeSnapshot | null): boolean {
+    if (!snapshot || snapshot.auth.needsAuth) {
+      return false;
+    }
+    const liveState = String(snapshot.liveSessionState || '').trim().toLowerCase();
+    const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
+    if (liveState === 'disconnected' && wakeWordState === 'armed') {
+      return false;
+    }
+    return statusSurfaceIsActive(snapshot) || this.wakeNotchActive || this.hasNotchVisibilityTail();
+  }
+
+  private updateNotchVisibilityTail(snapshot: RuntimeSnapshot): void {
+    if (snapshot.auth.needsAuth) {
+      this.notchVisibleUntil = 0;
+      this.previousNotchSurfaceText = '';
+      this.notchTextInitialized = false;
+      return;
+    }
+    const liveState = String(snapshot.liveSessionState || '').trim().toLowerCase();
+    const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
+    if (liveState === 'disconnected' && wakeWordState === 'armed') {
+      this.notchVisibleUntil = 0;
+      this.scheduleNotchVisibilityTimer();
+    }
+
+    const text = notchSurfaceText(snapshot);
+    if (!this.notchTextInitialized) {
+      this.previousNotchSurfaceText = text;
+      this.notchTextInitialized = true;
+      return;
+    }
+    if (text && text !== this.previousNotchSurfaceText) {
+      this.previousNotchSurfaceText = text;
+      this.notchVisibleUntil = Math.max(this.notchVisibleUntil, Date.now() + 8000);
+      this.scheduleNotchVisibilityTimer();
+      return;
+    }
+    if (statusSurfaceIsActive(snapshot)) {
+      this.notchVisibleUntil = Math.max(this.notchVisibleUntil, Date.now() + 1600);
+      this.scheduleNotchVisibilityTimer();
+    }
+  }
+
+  private scheduleNotchVisibilityTimer(): void {
+    if (this.notchVisibilityTimer) {
+      clearTimeout(this.notchVisibilityTimer);
+      this.notchVisibilityTimer = null;
+    }
+    if (!this.hasNotchVisibilityTail()) {
+      this.syncWindowVisibility();
+      return;
+    }
+    this.notchVisibilityTimer = setTimeout(() => {
+      this.notchVisibilityTimer = null;
+      this.syncWindowVisibility();
+    }, Math.max(250, this.notchVisibleUntil - Date.now() + 60));
+  }
+
+  private updateTransientWakeGlow(snapshot: RuntimeSnapshot): void {
+    const wakeWordState = String(snapshot.wakeWordState || '').trim().toLowerCase();
+    const liveState = String(snapshot.liveSessionState || '').trim().toLowerCase();
+    const liveVoiceActive = Boolean(snapshot.liveVoiceActive);
+    if (snapshot.auth.needsAuth) {
+      this.wakeNotchActive = false;
+      this.previousWakeWordState = wakeWordState;
+      this.previousLiveVoiceActive = liveVoiceActive;
+      return;
+    }
+
+    if (
+      wakeWordState === 'armed'
+      && liveState === 'disconnected'
+      && !liveVoiceActive
+    ) {
+      this.wakeNotchActive = false;
+    } else if (
+      (wakeWordState === 'paused' && this.previousWakeWordState === 'armed')
+      || (liveVoiceActive && !this.previousLiveVoiceActive && this.previousWakeWordState === 'armed')
+      || (wakeWordState === 'paused' && liveVoiceActive)
+    ) {
+      this.wakeNotchActive = true;
+    } else if (['disabled', 'unavailable'].includes(wakeWordState)) {
+      this.wakeNotchActive = false;
+    }
+
+    if (!this.uiPreferences.cornerGlowEnabled) {
+      this.previousWakeWordState = wakeWordState;
+      this.previousLiveVoiceActive = liveVoiceActive;
+      return;
+    }
+
+    if (
+      wakeWordState === 'armed'
+      && this.previousWakeWordState === 'paused'
+      && liveState === 'disconnected'
+    ) {
+      this.clearTransientGlow();
+    } else if (
+      wakeWordState === 'armed'
+      && this.previousWakeWordState !== 'armed'
+      && this.previousWakeWordState !== 'paused'
+    ) {
+      this.startTransientGlow(1600);
+    } else if (
+      (wakeWordState === 'paused' && this.previousWakeWordState === 'armed')
+      || (liveVoiceActive && !this.previousLiveVoiceActive && this.previousWakeWordState === 'armed')
+    ) {
+      this.startTransientGlow(2200);
+    }
+
+    this.previousWakeWordState = wakeWordState;
+    this.previousLiveVoiceActive = liveVoiceActive;
+  }
+
+  private clearTransientGlow(): void {
+    this.transientGlowUntil = 0;
+    if (this.transientGlowTimer) {
+      clearTimeout(this.transientGlowTimer);
+      this.transientGlowTimer = null;
+    }
+  }
+
+  private startTransientGlow(durationMs: number): void {
+    const until = Date.now() + Math.max(250, durationMs);
+    this.transientGlowUntil = Math.max(this.transientGlowUntil, until);
+    if (this.transientGlowTimer) {
+      clearTimeout(this.transientGlowTimer);
+    }
+    this.transientGlowTimer = setTimeout(() => {
+      this.transientGlowTimer = null;
+      this.syncWindowVisibility();
+    }, Math.max(250, this.transientGlowUntil - Date.now() + 60));
+  }
+
   private readonly repositionAnchoredWindows = (): void => {
     this.anchorWindow('notch');
+    this.anchorWindow('glow');
     if (!this.userMovedKinds.has('overlay')) {
       this.anchorWindow('overlay');
     }
@@ -576,6 +1072,9 @@ export class WindowManager {
   private getWindow(kind: WindowKind): BrowserWindowType | null {
     if (kind === 'notch') {
       return this.notchWindow;
+    }
+    if (kind === 'glow') {
+      return this.glowWindow;
     }
     if (kind === 'sidecar') {
       return this.sidecarWindow;
@@ -593,7 +1092,8 @@ export class WindowManager {
     }
     const bounds = window.getBounds();
     const display = screen.getDisplayMatching(bounds);
-    const anchored = getAnchoredWindowBounds(kind, display.workArea, {
+    const anchorArea = kind === 'glow' ? display.bounds : display.workArea;
+    const anchored = getAnchoredWindowBounds(kind, anchorArea, {
       width: bounds.width,
       height: bounds.height
     });
@@ -608,7 +1108,8 @@ export class WindowManager {
     }
 
     const display = screen.getDisplayMatching(window.getBounds());
-    const normalized = normalizeWindowSize(kind, display.workArea, {
+    const anchorArea = kind === 'glow' ? display.bounds : display.workArea;
+    const normalized = normalizeWindowSize(kind, anchorArea, {
       width: Number(payload.width) || window.getBounds().width,
       height: Number(payload.height) || window.getBounds().height
     });
@@ -619,7 +1120,7 @@ export class WindowManager {
     }
 
     if (kind === 'notch' || !this.userMovedKinds.has(kind)) {
-      const anchored = getAnchoredWindowBounds(kind, display.workArea, normalized);
+      const anchored = getAnchoredWindowBounds(kind, anchorArea, normalized);
       this.setWindowBounds(kind, window, anchored);
       if (kind === 'overlay' && this.settingsWindow?.isVisible()) {
         this.positionSettingsWindow();
@@ -644,12 +1145,23 @@ export class WindowManager {
     if (!window || window.isDestroyed()) {
       return { visible: false };
     }
-    if (this.currentSnapshot?.backgroundHidden || this.currentSnapshot?.auth.needsAuth) {
+    if (this.currentSnapshot?.auth.needsAuth) {
       this.hideAllSettingsWindows();
       return { visible: false };
     }
     if (window.isVisible()) {
       window.hide();
+      return { visible: false };
+    }
+    this.positionSettingsWindow();
+    window.show();
+    window.focus();
+    return { visible: true };
+  }
+
+  private openSettingsWindow(): { visible: boolean } {
+    const window = this.settingsWindow;
+    if (!window || window.isDestroyed() || this.currentSnapshot?.auth.needsAuth) {
       return { visible: false };
     }
     this.positionSettingsWindow();
@@ -666,11 +1178,18 @@ export class WindowManager {
   private positionSettingsWindow(size?: { width: number; height: number }): void {
     const settingsWindow = this.settingsWindow;
     const overlayWindow = this.overlayWindow;
-    if (!settingsWindow || settingsWindow.isDestroyed() || !overlayWindow || overlayWindow.isDestroyed()) {
+    if (!settingsWindow || settingsWindow.isDestroyed()) {
       return;
     }
 
-    const overlayBounds = overlayWindow.getBounds();
+    const overlayBounds = overlayWindow && !overlayWindow.isDestroyed()
+      ? overlayWindow.getBounds()
+      : {
+          x: screen.getPrimaryDisplay().workArea.x + Math.round((screen.getPrimaryDisplay().workArea.width - (size?.width ?? settingsWindow.getBounds().width)) / 2),
+          y: screen.getPrimaryDisplay().workArea.y + 72,
+          width: size?.width ?? settingsWindow.getBounds().width,
+          height: size?.height ?? settingsWindow.getBounds().height,
+        };
     const display = screen.getDisplayMatching(overlayBounds);
     const normalized = normalizeWindowSize('settings', display.workArea, size ?? settingsWindow.getBounds());
     const x = Math.min(
@@ -692,6 +1211,21 @@ export class WindowManager {
 
   private hideAllSettingsWindows(): void {
     this.settingsWindow?.hide();
+  }
+
+  private async openLogsFolder(): Promise<void> {
+    const localAppData = process.env.LOCALAPPDATA;
+    const candidates = localAppData
+      ? [path.join(localAppData, 'PixelPilot', 'logs'), path.join(process.cwd(), 'logs')]
+      : [path.join(process.cwd(), 'logs')];
+    const target = candidates.find((candidate) => {
+      try {
+        return fs.existsSync(candidate);
+      } catch {
+        return false;
+      }
+    }) ?? candidates[0];
+    await shell.openPath(target);
   }
 
   private async wrapIpcResult<T>(action: () => Promise<T> | T): Promise<IpcResult<T>> {

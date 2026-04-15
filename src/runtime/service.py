@@ -340,7 +340,11 @@ class ElectronRuntimeService(QObject):
         return {"auth": auth_state}
 
     def _auth_use_api_key(self, payload: dict[str, Any]) -> dict[str, Any]:
-        auth_state = save_api_key(str(payload.get("apiKey") or ""))
+        auth_state = save_api_key(
+            str(payload.get("apiKey") or ""),
+            provider_id=str(payload.get("provider") or ""),
+            base_url=str(payload.get("baseUrl") or ""),
+        )
         self.controller.refresh_live_runtime()
         self.bridge_server.publish_event("auth.changed", {"auth": auth_state})
         self.bridge_server.publish_state_updated()

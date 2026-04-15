@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import difflib
+import io
 import os
 import logging
 import threading
 import time
+import wave
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +41,11 @@ except Exception as exc:  # noqa: BLE001
     _ONNX_IMPORT_ERROR = str(exc)
 else:
     _ONNX_IMPORT_ERROR = ""
+
+try:
+    import speech_recognition as sr
+except Exception:  # noqa: BLE001
+    sr = None
 
 FEATURE_EXTRACTOR_MODEL_NAMES = {"pixie.onnx"}
 FEATURE_EXTRACTOR_DATA_FILENAMES = ("pixie.onnx.data",)
@@ -439,20 +447,20 @@ class OpenWakeWordDetector(WakeWordDetector):
         try:
             self._model.reset()
         except Exception:
-            logger.debug("Failed to reset openWakeWord detector", exc_info=True)
+            pass
 
     def _close_audio_handles(self) -> None:
         if self._stream is not None:
             try:
                 self._stream.close()
             except Exception:
-                logger.debug("Failed to close wake-word microphone stream", exc_info=True)
+                pass
         self._stream = None
         if self._audio is not None:
             try:
                 self._audio.terminate()
             except Exception:
-                logger.debug("Failed to terminate wake-word microphone handle", exc_info=True)
+                pass
         self._audio = None
 
     def _close_model(self) -> None:
@@ -464,21 +472,34 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
     CHUNK = 4000
     BUFFER_SAMPLES = 48000
     FEATURE_FRAMES = 16
-    RMS_THRESHOLD = 150.0
     COOLDOWN_SECONDS = 3.0
     COOLDOWN_CHUNKS = max(1, int(round((COOLDOWN_SECONDS * SAMPLE_RATE) / CHUNK)))
+    ASR_FALLBACK_ATTEMPTS = 3
 
     def __init__(
         self,
         *,
         model_path: Path | None,
+        phrase: str,
         threshold: float,
+        rms_threshold: float,
+        score_smoothing_chunks: int,
+        asr_fallback_enabled: bool,
+        asr_fallback_min_score: float,
+        asr_fallback_cooldown_seconds: float,
         melspec_model_path: Path | None,
         embedding_model_path: Path | None,
     ) -> None:
         super().__init__()
         self._model_path = Path(model_path) if model_path is not None else None
+        self._phrase = str(phrase or "Hey Pixie").strip() or "Hey Pixie"
         self._threshold = max(0.0, min(1.0, float(threshold or 0.0)))
+        self._rms_threshold = max(0.0, float(rms_threshold or 0.0))
+        self._score_smoothing_chunks = max(1, int(score_smoothing_chunks or 1))
+        self._asr_fallback_enabled = bool(asr_fallback_enabled and sr is not None)
+        self._asr_fallback_min_score = max(0.0, float(asr_fallback_min_score or 0.0))
+        self._asr_fallback_cooldown_seconds = max(0.0, float(asr_fallback_cooldown_seconds or 0.0))
+        self._asr_fallback_last_attempt_at = 0.0
         self._melspec_model_path = Path(melspec_model_path) if melspec_model_path is not None else None
         self._embedding_model_path = (
             Path(embedding_model_path) if embedding_model_path is not None else None
@@ -496,6 +517,7 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
         self._classifier_input_name: str | None = None
         self._model_data_path = resolve_feature_extractor_data_path(self._model_path)
         self._buffer = np.zeros(self.BUFFER_SAMPLES, dtype=np.int16)
+        self._recent_scores: list[float] = []
         self._cooldown_chunks = 0
 
         available, reason = self._compute_static_availability()
@@ -522,7 +544,7 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
 
             self._paused.clear()
             self._mic_released.clear()
-        self._reset_runtime_state(clear_cooldown=False)
+        self._clear_cooldown()
         self._set_state("starting")
         return True
 
@@ -632,20 +654,42 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
                     self._cooldown_chunks -= 1
                     continue
 
-                if self._compute_rms(audio_chunk) < self.RMS_THRESHOLD:
+                rms = self._compute_rms(audio_chunk)
+                if self._rms_threshold > 0.0 and rms < self._rms_threshold:
                     continue
 
+                rolling_buffer = self._buffer.copy()
                 score = self._predict_from_buffer()
                 if score is None:
                     continue
 
-                if score >= self._threshold:
+                self._recent_scores.append(float(score))
+                self._recent_scores = self._recent_scores[-self._score_smoothing_chunks :]
+                smoothed_score = max(self._recent_scores) if self._recent_scores else float(score)
+                if smoothed_score >= self._threshold:
+                    self._recent_scores = []
                     self._cooldown_chunks = self.COOLDOWN_CHUNKS
                     self._paused.set()
                     self._close_audio_handles()
                     self._mic_released.set()
                     self._set_state("paused")
                     self.detected.emit()
+                    continue
+
+                if self._maybe_asr_fallback_detect(
+                    rolling_buffer,
+                    score=float(score),
+                    smoothed_score=smoothed_score,
+                ):
+                    self._recent_scores = []
+                    self._cooldown_chunks = self.COOLDOWN_CHUNKS
+                    self._paused.set()
+                    self._close_audio_handles()
+                    self._mic_released.set()
+                    self._set_state("paused")
+                    self.detected.emit()
+                    continue
+
         except Exception as exc:  # noqa: BLE001
             logger.exception("Wake-word listener failed")
             self._set_state("unavailable", f"Wake-word listener failed: {exc}")
@@ -727,17 +771,10 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
         self._buffer[-chunk_length:] = audio_chunk
 
     def _predict_from_buffer(self) -> float | None:
-        if (
-            self._feature_extractor is None
-            or self._classifier_session is None
-            or self._classifier_input_name is None
-        ):
-            return None
-        features = self._feature_extractor.embed_clips(np.expand_dims(self._buffer, axis=0))
-        if len(features) == 0:
-            return None
-        prepared_frames = self._prepare_feature_frames(features[0])
-        if prepared_frames is None:
+        return self._predict_best_window_from_buffer()
+
+    def _score_prepared_frames(self, prepared_frames: np.ndarray) -> float | None:
+        if self._classifier_session is None or self._classifier_input_name is None:
             return None
         outputs = self._classifier_session.run(
             None,
@@ -749,6 +786,31 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
         if flattened_scores.size == 0:
             return None
         return _sigmoid_logit(float(flattened_scores[0]))
+
+    def _predict_best_window_from_buffer(self) -> float | None:
+        if (
+            self._feature_extractor is None
+            or self._classifier_session is None
+            or self._classifier_input_name is None
+        ):
+            return None
+        features = self._feature_extractor.embed_clips(np.expand_dims(self._buffer, axis=0))
+        if len(features) == 0:
+            return None
+        feature_frames = features[0]
+        if feature_frames is None or getattr(feature_frames, "ndim", 0) != 2:
+            return None
+        best_score: float | None = None
+        for end_index in range(1, int(feature_frames.shape[0]) + 1):
+            prepared_frames = self._prepare_feature_frames(feature_frames[:end_index])
+            if prepared_frames is None:
+                continue
+            score = self._score_prepared_frames(prepared_frames)
+            if score is None:
+                continue
+            if best_score is None or score > best_score:
+                best_score = score
+        return best_score
 
     @classmethod
     def _prepare_feature_frames(cls, feature_frames: np.ndarray) -> np.ndarray | None:
@@ -762,6 +824,94 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
             selected = np.pad(feature_frames, ((pad_len, 0), (0, 0)), mode="constant")
         return selected.reshape(1, cls.FEATURE_FRAMES, selected.shape[1]).astype(np.float32, copy=False)
 
+    def _maybe_asr_fallback_detect(
+        self,
+        rolling_buffer: np.ndarray,
+        *,
+        score: float,
+        smoothed_score: float,
+    ) -> bool:
+        if not self._asr_fallback_enabled:
+            return False
+        if max(float(score), float(smoothed_score)) < self._asr_fallback_min_score:
+            return False
+        now = time.monotonic()
+        if (now - self._asr_fallback_last_attempt_at) < self._asr_fallback_cooldown_seconds:
+            return False
+        self._asr_fallback_last_attempt_at = now
+        recognized_text = self._recognize_wake_word_text(rolling_buffer)
+        return self._recognized_text_matches_phrase(recognized_text)
+
+    def _recognize_wake_word_text(self, audio: np.ndarray) -> str:
+        if sr is None:
+            return ""
+        samples = np.asarray(audio, dtype=np.int16)
+        wav_buffer = io.BytesIO()
+        try:
+            with wave.open(wav_buffer, "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(self.SAMPLE_RATE)
+                handle.writeframes(samples.tobytes())
+            wav_buffer.seek(0)
+            recognizer = sr.Recognizer()
+            recognizer.operation_timeout = max(1.0, self._asr_fallback_cooldown_seconds)
+            with sr.AudioFile(wav_buffer) as source:
+                audio_data = recognizer.record(source)
+            for attempt in range(self.ASR_FALLBACK_ATTEMPTS):
+                try:
+                    return str(recognizer.recognize_google(audio_data) or "").strip()
+                except sr.UnknownValueError:
+                    if attempt >= self.ASR_FALLBACK_ATTEMPTS - 1:
+                        return ""
+                    continue
+                except Exception:
+                    if attempt >= self.ASR_FALLBACK_ATTEMPTS - 1:
+                        raise
+                    continue
+            return ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _recognized_text_matches_phrase(self, text: str) -> bool:
+        candidate = self._normalize_text_for_match(text)
+        phrase = self._normalize_text_for_match(self._phrase)
+        if not candidate or not phrase:
+            return False
+        if phrase in candidate or candidate in phrase:
+            return True
+        if phrase == "heypixie":
+            candidate_suffix = self._strip_wake_prefix(candidate)
+            phrase_suffix = self._strip_wake_prefix(phrase)
+            suffix_ratio = difflib.SequenceMatcher(None, candidate_suffix, phrase_suffix).ratio()
+            candidate_suffix_key = self._wake_suffix_key(candidate_suffix)
+            phrase_suffix_key = self._wake_suffix_key(phrase_suffix)
+            if candidate_suffix and phrase_suffix and suffix_ratio >= 0.60:
+                return True
+            if (
+                candidate_suffix_key
+                and phrase_suffix_key
+                and difflib.SequenceMatcher(None, candidate_suffix_key, phrase_suffix_key).ratio() >= 0.90
+            ):
+                return True
+        return difflib.SequenceMatcher(None, candidate, phrase).ratio() >= 0.72
+
+    @staticmethod
+    def _normalize_text_for_match(text: str) -> str:
+        return "".join(ch for ch in str(text or "").lower() if ch.isalnum())
+
+    @staticmethod
+    def _strip_wake_prefix(text: str) -> str:
+        for prefix in ("hey", "hay", "hi"):
+            if text.startswith(prefix):
+                return text[len(prefix) :]
+        return text
+
+    @staticmethod
+    def _wake_suffix_key(text: str) -> str:
+        normalized = str(text or "").replace("x", "cs")
+        return "".join(ch for ch in normalized if ch not in {"a", "e", "i", "o", "u", "y"})
+
     @staticmethod
     def _compute_rms(audio_chunk: np.ndarray) -> float:
         if audio_chunk.size == 0:
@@ -770,21 +920,26 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
 
     def _reset_runtime_state(self, *, clear_cooldown: bool) -> None:
         self._buffer = np.zeros(self.BUFFER_SAMPLES, dtype=np.int16)
+        self._recent_scores = []
         if clear_cooldown:
             self._cooldown_chunks = 0
+
+    def _clear_cooldown(self) -> None:
+        self._cooldown_chunks = 0
+        self._recent_scores = []
 
     def _close_audio_handles(self) -> None:
         if self._stream is not None:
             try:
                 self._stream.close()
             except Exception:
-                logger.debug("Failed to close wake-word microphone stream", exc_info=True)
+                pass
         self._stream = None
         if self._audio is not None:
             try:
                 self._audio.terminate()
             except Exception:
-                logger.debug("Failed to terminate wake-word microphone handle", exc_info=True)
+                pass
         self._audio = None
 
     def _close_model(self) -> None:

@@ -103,7 +103,7 @@ class ElectronShellProxy:
         )
         return dict(response or {})
 
-    def restore_after_screenshot(self, payload: dict[str, object]) -> None:
+    def restore_after_screenshot(self, payload: Optional[dict[str, object]] = None) -> None:
         self.bridge_server.request_ui(
             "ui.restoreAfterScreenshot",
             dict(payload or {}),
