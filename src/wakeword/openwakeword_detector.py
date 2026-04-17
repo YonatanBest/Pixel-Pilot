@@ -95,6 +95,17 @@ def _resolve_first_existing_path(candidates: list[Path]) -> Optional[Path]:
     return None
 
 
+def _wake_trigger_payload(audio: np.ndarray, *, score: float, source: str) -> dict[str, object]:
+    samples = np.asarray(audio, dtype=np.int16)
+    return {
+        "pcm16": samples.tobytes(),
+        "sampleRate": 16000,
+        "score": float(score),
+        "source": str(source or "wakeword"),
+        "timestamp": time.time(),
+    }
+
+
 def _configured_path_candidates(
     raw_path: str,
     *,
@@ -232,6 +243,7 @@ def resolve_openwakeword_feature_model_paths(
 class OpenWakeWordDetector(WakeWordDetector):
     SAMPLE_RATE = 16000
     FRAME_LENGTH = 1280
+    BUFFER_SAMPLES = 48000
 
     def __init__(
         self,
@@ -253,6 +265,7 @@ class OpenWakeWordDetector(WakeWordDetector):
         self._audio: pyaudio.PyAudio | None = None
         self._stream = None
         self._model = None
+        self._buffer = np.zeros(self.BUFFER_SAMPLES, dtype=np.int16)
 
         available, reason = self._compute_static_availability()
         self._set_availability(available, reason)
@@ -364,14 +377,24 @@ class OpenWakeWordDetector(WakeWordDetector):
                 if not pcm:
                     continue
 
-                scores = self._predict(pcm)
-                if scores and max(scores.values()) >= self._threshold:
+                audio_chunk = np.frombuffer(pcm, dtype=np.int16)
+                self._push_audio_chunk(audio_chunk)
+                scores = self._predict_samples(audio_chunk)
+                max_score = max(scores.values()) if scores else 0.0
+                if scores and max_score >= self._threshold:
+                    rolling_buffer = self._buffer.copy()
                     self._paused.set()
                     self._close_audio_handles()
                     self._reset_model()
                     self._mic_released.set()
                     self._set_state("paused")
-                    self.detected.emit()
+                    self.detected.emit(
+                        _wake_trigger_payload(
+                            rolling_buffer,
+                            score=float(max_score),
+                            source="openwakeword",
+                        )
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Wake-word listener failed")
             self._set_state("unavailable", f"Wake-word listener failed: {exc}")
@@ -430,6 +453,11 @@ class OpenWakeWordDetector(WakeWordDetector):
         if self._model is None:
             return {}
         samples = np.frombuffer(pcm, dtype=np.int16)
+        return self._predict_samples(samples)
+
+    def _predict_samples(self, samples: np.ndarray) -> dict[str, float]:
+        if self._model is None:
+            return {}
         raw_scores = self._model.predict(samples)
         scores: dict[str, float] = {}
         if not isinstance(raw_scores, dict):
@@ -441,7 +469,19 @@ class OpenWakeWordDetector(WakeWordDetector):
                 continue
         return scores
 
+    def _push_audio_chunk(self, audio_chunk: np.ndarray) -> None:
+        chunk = np.asarray(audio_chunk, dtype=np.int16)
+        chunk_length = int(chunk.size)
+        if chunk_length <= 0:
+            return
+        if chunk_length >= self.BUFFER_SAMPLES:
+            self._buffer[:] = chunk[-self.BUFFER_SAMPLES :]
+            return
+        self._buffer[:-chunk_length] = self._buffer[chunk_length:]
+        self._buffer[-chunk_length:] = chunk
+
     def _reset_model(self) -> None:
+        self._buffer = np.zeros(self.BUFFER_SAMPLES, dtype=np.int16)
         if self._model is None:
             return
         try:
@@ -673,7 +713,13 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
                     self._close_audio_handles()
                     self._mic_released.set()
                     self._set_state("paused")
-                    self.detected.emit()
+                    self.detected.emit(
+                        _wake_trigger_payload(
+                            rolling_buffer,
+                            score=float(smoothed_score),
+                            source="openwakeword_onnx",
+                        )
+                    )
                     continue
 
                 if self._maybe_asr_fallback_detect(
@@ -687,7 +733,13 @@ class OnnxFeatureWakeWordDetector(WakeWordDetector):
                     self._close_audio_handles()
                     self._mic_released.set()
                     self._set_state("paused")
-                    self.detected.emit()
+                    self.detected.emit(
+                        _wake_trigger_payload(
+                            rolling_buffer,
+                            score=float(smoothed_score),
+                            source="openwakeword_asr_fallback",
+                        )
+                    )
                     continue
 
         except Exception as exc:  # noqa: BLE001

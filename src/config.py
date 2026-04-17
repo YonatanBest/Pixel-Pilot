@@ -147,6 +147,13 @@ class Config:
     WAKE_WORD_ASR_FALLBACK_ENABLED = _env_bool("WAKE_WORD_ASR_FALLBACK_ENABLED", True)
     WAKE_WORD_ASR_FALLBACK_MIN_SCORE = _env_float("WAKE_WORD_ASR_FALLBACK_MIN_SCORE", 0.00015)
     WAKE_WORD_ASR_FALLBACK_COOLDOWN_SECONDS = _env_float("WAKE_WORD_ASR_FALLBACK_COOLDOWN_SECONDS", 2.0)
+    VOICEPRINT_ENABLED = _env_bool("VOICEPRINT_ENABLED", False)
+    VOICEPRINT_THRESHOLD = _env_float("VOICEPRINT_THRESHOLD", 0.78)
+    VOICEPRINT_UNCERTAIN_THRESHOLD = _env_float("VOICEPRINT_UNCERTAIN_THRESHOLD", 0.72)
+    VOICEPRINT_ENCODER_ONNX_PATH = _env_str("VOICEPRINT_ENCODER_ONNX_PATH")
+    VOICEPRINT_MIN_ENROLLMENT_SAMPLES = max(1, int(_env_float("VOICEPRINT_MIN_ENROLLMENT_SAMPLES", 4.0)))
+    VOICEPRINT_DEBUG_SAVE_AUDIO = _env_bool("VOICEPRINT_DEBUG_SAVE_AUDIO", False)
+    VOICEPRINT_PATH = os.path.expanduser("~/.pixelpilot/voiceprint.json")
     ENABLE_GATEWAY = False
     GATEWAY_HOST = "localhost"
     GATEWAY_PORT = 8765
@@ -294,6 +301,42 @@ class Config:
             is_frozen=bool(getattr(sys, "frozen", False)),
             model_path=model_path,
         )
+
+    @classmethod
+    def resolve_voiceprint_encoder_model_path(cls) -> Optional[Path]:
+        configured = str(cls.VOICEPRINT_ENCODER_ONNX_PATH or "").strip()
+        candidates: list[Path] = []
+        if configured:
+            raw = Path(os.path.expandvars(os.path.expanduser(configured)))
+            if raw.is_absolute():
+                candidates.append(raw)
+            else:
+                candidates.extend(
+                    [
+                        cls.PROJECT_ROOT / raw,
+                        cls.runtime_resource_dir() / "speaker" / raw.name,
+                        cls.runtime_resource_dir() / raw,
+                    ]
+                )
+        candidates.extend(
+            [
+                Path.home().resolve() / ".pixelpilot" / "models" / "speaker-embedding.onnx",
+                cls.PROJECT_ROOT / "models" / "speaker-embedding.onnx",
+                cls.runtime_resource_dir() / "speaker" / "speaker-embedding.onnx",
+            ]
+        )
+        seen: set[str] = set()
+        deduped: list[Path] = []
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        for candidate in deduped:
+            if candidate.exists():
+                return candidate
+        return deduped[0] if deduped else None
 
     @classmethod
     def get_mode(cls, mode_str: Optional[str] = None) -> OperationMode:

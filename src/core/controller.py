@@ -24,6 +24,7 @@ class MainController(QObject):
         self._live_voice_active = False
         self._live_action_passthrough_active = False
         self.wake_word_controller = None
+        self.voiceprint_service = None
         self.desktop_manager = None
         self.gateway_server = None
         self.gateway_thread = None
@@ -259,6 +260,7 @@ class MainController(QObject):
                 is_live_enabled=lambda: self.live_mode_enabled,
                 is_live_voice_active=lambda: self._live_voice_active,
                 start_one_shot_voice=self._start_one_shot_voice,
+                verify_trigger=self._verify_wake_trigger,
                 ensure_live_connected=lambda trigger, reason: self._ensure_live_connected_for_wake_fallback(
                     trigger=trigger,
                     reason=reason,
@@ -298,7 +300,7 @@ class MainController(QObject):
             if not self.live_mode_enabled:
                 return False
 
-        started = self.live_session.start_voice(mode="continuous")
+        started = self.live_session.start_voice(mode="one_shot")
         if not started:
             return False
         if bool(getattr(self.live_session, "is_connection_pending", False)):
@@ -306,6 +308,70 @@ class MainController(QObject):
                 "Wake word heard. PixelPilot Live is still connecting and will start listening as soon as the session is ready."
             )
         return True
+
+    def _voiceprint(self):
+        if self.voiceprint_service is None:
+            from live.voiceprint import VoiceprintEncoder, VoiceprintService, VoiceprintStore
+
+            store = VoiceprintStore(
+                Config.VOICEPRINT_PATH,
+                default_enabled=Config.VOICEPRINT_ENABLED,
+                threshold=Config.VOICEPRINT_THRESHOLD,
+                uncertain_threshold=Config.VOICEPRINT_UNCERTAIN_THRESHOLD,
+            )
+            encoder = VoiceprintEncoder(Config.resolve_voiceprint_encoder_model_path())
+            self.voiceprint_service = VoiceprintService(
+                store=store,
+                encoder=encoder,
+                min_samples=Config.VOICEPRINT_MIN_ENROLLMENT_SAMPLES,
+                debug_save_audio=Config.VOICEPRINT_DEBUG_SAVE_AUDIO,
+                debug_dir=Config.APP_DATA_DIR / "voiceprint-debug",
+            )
+        return self.voiceprint_service
+
+    def voiceprint_status(self) -> dict:
+        return self._voiceprint().status()
+
+    def voiceprint_set_enabled(self, enabled: bool) -> dict:
+        status = self._voiceprint().set_enabled(bool(enabled))
+        self._sync_wake_word_controller()
+        return status
+
+    def voiceprint_clear(self) -> dict:
+        status = self._voiceprint().clear()
+        self._sync_wake_word_controller()
+        return status
+
+    def voiceprint_complete_enrollment(self) -> dict:
+        status = self._voiceprint().complete_enrollment()
+        self._sync_wake_word_controller()
+        return status
+
+    def voiceprint_record_sample(self, *, seconds: float = 2.0) -> dict:
+        detector = getattr(self.wake_word_controller, "detector", None)
+        paused = False
+        if detector is not None:
+            try:
+                paused = bool(detector.pause(wait_timeout_s=1.5))
+                self.gui_adapter.update_wake_word_state("paused", "Recording voiceprint sample.")
+            except Exception:
+                logger.debug("Failed to pause wake word for voiceprint enrollment", exc_info=True)
+        try:
+            result = self._voiceprint().record_sample(seconds=seconds)
+            self.gui_adapter.add_activity_message(
+                f"Voiceprint sample {result.get('pendingSampleCount')} recorded."
+            )
+            return result
+        finally:
+            if paused:
+                self._sync_wake_word_controller()
+
+    def _verify_wake_trigger(self, payload: dict) -> dict:
+        decision = self._voiceprint().verify_trigger(payload).as_dict()
+        reason = str(decision.get("reason") or "")
+        if decision.get("decision") == "unavailable":
+            self.gui_adapter.update_wake_word_state("unavailable", reason)
+        return decision
 
     def _create_robotics_eye(self):
         if not Config.USE_ROBOTICS_EYE:

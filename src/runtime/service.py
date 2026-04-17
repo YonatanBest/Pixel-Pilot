@@ -169,6 +169,34 @@ class ElectronRuntimeService(QObject):
         except Exception:
             return {"pluginCount": 0, "mcpServerCount": 0, "toolCount": 0, "toolNames": []}
 
+    def _voiceprint_status(self) -> dict[str, Any]:
+        status = getattr(self.controller, "voiceprint_status", None)
+        if not callable(status):
+            return {
+                "enabled": False,
+                "enrolled": False,
+                "available": True,
+                "status": "unavailable",
+                "lastScore": None,
+                "threshold": Config.VOICEPRINT_THRESHOLD,
+                "sampleCount": 0,
+                "unavailableReason": "Voiceprint service is unavailable.",
+            }
+        try:
+            return dict(status())
+        except Exception as exc:
+            logger.debug("Failed to build voiceprint status", exc_info=True)
+            return {
+                "enabled": False,
+                "enrolled": False,
+                "available": False,
+                "status": "unavailable",
+                "lastScore": None,
+                "threshold": Config.VOICEPRINT_THRESHOLD,
+                "sampleCount": 0,
+                "unavailableReason": str(exc),
+            }
+
     def _settings_signature(self) -> tuple[tuple[str, int, int], ...]:
         signature: list[tuple[str, int, int]] = []
         for path in discover_settings_paths(Config.PROJECT_ROOT):
@@ -235,6 +263,7 @@ class ElectronRuntimeService(QObject):
             extra={
                 "latestSessionContext": self._latest_session_context(),
                 "extensions": self._extension_summary(),
+                "voiceprint": self._voiceprint_status(),
                 "settingsSources": self._runtime_settings_sources(),
                 "settingsValidationErrors": self._runtime_settings_validation_errors(),
                 "sessionDirectory": self._session_directory(),
@@ -320,6 +349,25 @@ class ElectronRuntimeService(QObject):
                 "wakeWordState": self.state_store.wakeWordState,
                 "wakeWordUnavailableReason": self.state_store.wakeWordUnavailableReason,
             }
+        if command == "voiceprint.getStatus":
+            return {"voiceprint": self._voiceprint_status()}
+        if command == "voiceprint.setEnabled":
+            status = self.controller.voiceprint_set_enabled(bool(body.get("enabled")))
+            self.bridge_server.publish_state_updated()
+            return {"voiceprint": status}
+        if command == "voiceprint.recordSample":
+            seconds = float(body.get("seconds") or 2.0)
+            status = self.controller.voiceprint_record_sample(seconds=seconds)
+            self.bridge_server.publish_state_updated()
+            return status
+        if command == "voiceprint.completeEnrollment":
+            status = self.controller.voiceprint_complete_enrollment()
+            self.bridge_server.publish_state_updated()
+            return {"voiceprint": status}
+        if command == "voiceprint.clear":
+            status = self.controller.voiceprint_clear()
+            self.bridge_server.publish_state_updated()
+            return {"voiceprint": status}
         if command == "uac.getState":
             return {
                 "uac": get_uac_state_snapshot(),

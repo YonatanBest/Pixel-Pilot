@@ -67,6 +67,25 @@ export type ExtensionSummary = {
   toolNames: string[];
 };
 
+export type VoiceprintStatus = {
+  enabled: boolean;
+  enrolled: boolean;
+  available: boolean;
+  status: string;
+  lastScore: number | null;
+  lastDecision?: string;
+  lastReason?: string;
+  threshold: number;
+  uncertainThreshold?: number;
+  sampleCount: number;
+  pendingSampleCount?: number;
+  minEnrollmentSamples?: number;
+  embeddingDim?: number;
+  modelId?: string;
+  modelPath?: string;
+  unavailableReason: string;
+};
+
 export type BridgeStatus = 'starting' | 'connected' | 'recovering' | 'failed';
 
 export type UiPreferences = {
@@ -103,6 +122,7 @@ export type RuntimeSnapshot = {
   recentActionUpdates: ActionUpdate[];
   latestSessionContext: SessionContextSummary;
   extensions: ExtensionSummary;
+  voiceprint: VoiceprintStatus;
   settingsSources: string[];
   settingsValidationErrors?: Record<string, string>[];
   sessionDirectory: string;

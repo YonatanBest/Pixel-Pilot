@@ -54,8 +54,8 @@ export function normalizeWindowSize(kind: WindowKind, workArea: ScreenWorkArea, 
 
   if (kind === 'settings') {
     return {
-      width: clamp(Math.round(size.width), 520, Math.min(720, maxWidth)),
-      height: clamp(Math.round(size.height), 420, Math.min(720, maxHeight))
+      width: clamp(Math.round(size.width), 560, Math.min(980, maxWidth)),
+      height: clamp(Math.round(size.height), 480, Math.min(860, maxHeight))
     };
   }
 

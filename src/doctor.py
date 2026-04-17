@@ -63,6 +63,7 @@ def run_doctor(
         _check_backend(),
         _check_settings(agent=agent or getattr(controller, "agent", None)),
         _check_wakeword_assets(),
+        _check_voiceprint(controller=controller),
         _check_audio_devices(),
         _check_uac_tasks(),
         _check_app_startup(),
@@ -214,6 +215,80 @@ def _check_wakeword_assets() -> DoctorCheck:
             "embeddingModelPath": str(embedding_path or ""),
         },
     )
+
+
+def _check_voiceprint(*, controller: Any = None) -> DoctorCheck:
+    service = getattr(controller, "voiceprint_service", None) if controller is not None else None
+    if service is None and controller is not None:
+        factory = getattr(controller, "_voiceprint", None)
+        if callable(factory):
+            try:
+                service = factory()
+            except Exception as exc:
+                return DoctorCheck(
+                    name="voiceprint",
+                    status="warn",
+                    summary=f"Voiceprint service could not initialize: {exc}",
+                )
+    if service is None:
+        try:
+            from live.voiceprint import VoiceprintEncoder, VoiceprintService, VoiceprintStore
+
+            service = VoiceprintService(
+                store=VoiceprintStore(
+                    Config.VOICEPRINT_PATH,
+                    default_enabled=Config.VOICEPRINT_ENABLED,
+                    threshold=Config.VOICEPRINT_THRESHOLD,
+                    uncertain_threshold=Config.VOICEPRINT_UNCERTAIN_THRESHOLD,
+                ),
+                encoder=VoiceprintEncoder(Config.resolve_voiceprint_encoder_model_path()),
+                min_samples=Config.VOICEPRINT_MIN_ENROLLMENT_SAMPLES,
+                debug_save_audio=Config.VOICEPRINT_DEBUG_SAVE_AUDIO,
+                debug_dir=Config.APP_DATA_DIR / "voiceprint-debug",
+            )
+        except Exception as exc:
+            return DoctorCheck(
+                name="voiceprint",
+                status="warn",
+                summary=f"Voiceprint service could not initialize: {exc}",
+            )
+
+    status = dict(service.status())
+    if not bool(status.get("enabled")):
+        return DoctorCheck(
+            name="voiceprint",
+            status="ok",
+            summary="Voiceprint wake verification is disabled.",
+            details=_voiceprint_doctor_details(status),
+        )
+    if not bool(status.get("available")):
+        return DoctorCheck(
+            name="voiceprint",
+            status="error",
+            summary=str(status.get("unavailableReason") or "Voiceprint wake verification is unavailable."),
+            details=_voiceprint_doctor_details(status),
+        )
+    if not bool(status.get("enrolled")):
+        return DoctorCheck(
+            name="voiceprint",
+            status="warn",
+            summary="Voiceprint wake verification is enabled but not enrolled.",
+            details=_voiceprint_doctor_details(status),
+        )
+    return DoctorCheck(
+        name="voiceprint",
+        status="ok",
+        summary="Voiceprint wake verification is enrolled and ready.",
+        details=_voiceprint_doctor_details(status),
+    )
+
+
+def _voiceprint_doctor_details(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(status).items()
+        if key not in {"embedding", "voiceprint"}
+    }
 
 
 def _check_audio_devices() -> DoctorCheck:

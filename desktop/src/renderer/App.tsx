@@ -34,6 +34,7 @@ import type {
   SessionContextSummary,
   SidecarFrame,
   StartupDefaultsSnapshot,
+  VoiceprintStatus,
   WindowKind
 } from '@shared/types.js';
 
@@ -94,6 +95,23 @@ const emptyLiveStatus: LiveStatus = {
   source: ''
 };
 
+const emptyVoiceprintStatus: VoiceprintStatus = {
+  enabled: false,
+  enrolled: false,
+  available: true,
+  status: 'disabled',
+  lastScore: null,
+  threshold: 0.78,
+  uncertainThreshold: 0.72,
+  sampleCount: 0,
+  pendingSampleCount: 0,
+  minEnrollmentSamples: 4,
+  embeddingDim: 0,
+  modelId: '',
+  modelPath: '',
+  unavailableReason: ''
+};
+
 const defaultUiPreferences = {
   cornerGlowEnabled: true,
   statusNotchEnabled: false
@@ -104,7 +122,7 @@ type WindowLayout = {
   height: number;
 };
 
-type SettingsSectionId = 'general' | 'startup' | 'sessions' | 'extensions' | 'diagnostics';
+type SettingsSectionId = 'account' | 'behavior' | 'voice' | 'health';
 
 type CommandBarStatusKind = 'placeholder' | 'reply' | 'status' | 'busy' | 'error';
 type CommandBarStatusTone = 'placeholder' | 'status' | 'error';
@@ -275,7 +293,8 @@ function withSnapshotDefaults(snapshot: RuntimeSnapshot): RuntimeSnapshot {
     uiPreferences: {
       ...defaultUiPreferences,
       ...(snapshot.uiPreferences || {})
-    }
+    },
+    voiceprint: parseVoiceprintStatus(snapshot.voiceprint)
   };
 }
 
@@ -333,6 +352,31 @@ function parseExtensionSummary(payload: unknown): ExtensionSummary {
     pluginIds: Array.isArray(record.pluginIds) ? record.pluginIds.map((value) => String(value)) : [],
     mcpServerNames: Array.isArray(record.mcpServerNames) ? record.mcpServerNames.map((value) => String(value)) : [],
     toolNames: Array.isArray(record.toolNames) ? record.toolNames.map((value) => String(value)) : []
+  };
+}
+
+function parseVoiceprintStatus(payload: unknown): VoiceprintStatus {
+  if (!payload || typeof payload !== 'object') {
+    return emptyVoiceprintStatus;
+  }
+  const record = payload as Record<string, unknown>;
+  return {
+    enabled: Boolean(record.enabled),
+    enrolled: Boolean(record.enrolled),
+    available: Boolean(record.available),
+    status: typeof record.status === 'string' ? record.status : 'disabled',
+    lastScore: typeof record.lastScore === 'number' ? record.lastScore : null,
+    lastDecision: typeof record.lastDecision === 'string' ? record.lastDecision : undefined,
+    lastReason: typeof record.lastReason === 'string' ? record.lastReason : undefined,
+    threshold: Number(record.threshold || emptyVoiceprintStatus.threshold),
+    uncertainThreshold: Number(record.uncertainThreshold || emptyVoiceprintStatus.uncertainThreshold),
+    sampleCount: Number(record.sampleCount || 0),
+    pendingSampleCount: Number(record.pendingSampleCount || 0),
+    minEnrollmentSamples: Number(record.minEnrollmentSamples || emptyVoiceprintStatus.minEnrollmentSamples),
+    embeddingDim: Number(record.embeddingDim || 0),
+    modelId: typeof record.modelId === 'string' ? record.modelId : '',
+    modelPath: typeof record.modelPath === 'string' ? record.modelPath : '',
+    unavailableReason: typeof record.unavailableReason === 'string' ? record.unavailableReason : ''
   };
 }
 
@@ -826,6 +870,179 @@ function StatusPill({
   );
 }
 
+function SettingsButton({
+  children,
+  onClick,
+  disabled = false,
+  tone = 'secondary'
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  tone?: 'primary' | 'secondary' | 'danger';
+}): React.JSX.Element {
+  const toneClass =
+    tone === 'primary'
+      ? 'border-teal-600 bg-teal-600 text-white hover:bg-teal-700'
+      : tone === 'danger'
+        ? 'border-rose-200 bg-rose-50 text-rose-900 hover:bg-rose-100'
+        : 'border-zinc-200 bg-white text-slate-800 hover:bg-zinc-50';
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={[
+        'no-drag inline-flex min-h-10 items-center justify-center rounded-lg border px-4 py-2 text-sm font-semibold transition',
+        toneClass,
+        disabled ? 'cursor-not-allowed opacity-45' : ''
+      ].join(' ')}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SettingsStatusChip({
+  children,
+  tone = 'neutral'
+}: {
+  children: React.ReactNode;
+  tone?: 'neutral' | 'good' | 'warn' | 'error';
+}): React.JSX.Element {
+  const toneClass =
+    tone === 'good'
+      ? 'border-teal-200 bg-teal-50 text-teal-900'
+      : tone === 'warn'
+        ? 'border-amber-200 bg-amber-50 text-amber-900'
+        : tone === 'error'
+          ? 'border-rose-200 bg-rose-50 text-rose-900'
+          : 'border-zinc-200 bg-zinc-50 text-slate-700';
+  return (
+    <span className={`inline-flex items-center rounded-lg border px-2.5 py-1 text-xs font-semibold ${toneClass}`}>
+      {children}
+    </span>
+  );
+}
+
+function SettingsTabButton({
+  label,
+  active,
+  onClick
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        'no-drag rounded-lg px-3 py-2 text-sm font-semibold transition',
+        active
+          ? 'bg-teal-600 text-white shadow-sm'
+          : 'text-slate-600 hover:bg-zinc-100 hover:text-slate-900'
+      ].join(' ')}
+    >
+      {label}
+    </button>
+  );
+}
+
+function SettingsSectionBlock({
+  title,
+  description,
+  children
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <section className="rounded-lg border border-zinc-200 bg-white">
+      <div className="border-b border-zinc-200 px-4 py-3">
+        <div className="text-sm font-semibold text-slate-950">{title}</div>
+        {description && <div className="mt-1 text-sm leading-5 text-slate-600">{description}</div>}
+      </div>
+      <div className="divide-y divide-zinc-200">{children}</div>
+    </section>
+  );
+}
+
+function SettingsRow({
+  title,
+  description,
+  value,
+  children
+}: {
+  title: string;
+  description?: string;
+  value?: React.ReactNode;
+  children?: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-slate-900">{title}</div>
+        {description && <div className="mt-1 text-sm leading-5 text-slate-600">{description}</div>}
+        {value && <div className="mt-2 break-all text-sm text-slate-700">{value}</div>}
+      </div>
+      {children && <div className="flex shrink-0 flex-wrap gap-2">{children}</div>}
+    </div>
+  );
+}
+
+function SettingsChoiceGroup<T extends string>({
+  value,
+  options,
+  onChange,
+  disabled = false
+}: {
+  value: T;
+  options: readonly { id: T; label: string; hint?: string }[];
+  onChange: (value: T) => void;
+  disabled?: boolean;
+}): React.JSX.Element {
+  return (
+    <div className="grid gap-2">
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          onClick={() => onChange(option.id)}
+          disabled={disabled}
+          className={[
+            'no-drag rounded-lg border px-3 py-2 text-left transition',
+            value === option.id
+              ? 'border-teal-300 bg-teal-50 text-teal-950'
+              : 'border-zinc-200 bg-white text-slate-800 hover:bg-zinc-50',
+            disabled ? 'cursor-not-allowed opacity-45' : ''
+          ].join(' ')}
+        >
+          <div className="text-sm font-semibold">{option.label}</div>
+          {option.hint && <div className="mt-0.5 text-xs text-slate-600">{option.hint}</div>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function SettingsDisclosure({
+  title,
+  children
+}: {
+  title: string;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <details className="rounded-lg border border-zinc-200 bg-white px-4 py-3">
+      <summary className="no-drag cursor-pointer text-sm font-semibold text-slate-900">{title}</summary>
+      <div className="mt-3 text-sm leading-6 text-slate-700">{children}</div>
+    </details>
+  );
+}
+
 function isSettingsWindowKind(kind: WindowKind | null): boolean {
   return kind === 'settings';
 }
@@ -845,7 +1062,7 @@ function LoadingShell({
       : windowKind === 'sidecar'
         ? 'w-[380px]'
         : windowKind === 'settings'
-          ? 'w-[640px]'
+          ? 'w-[760px]'
           : 'w-[560px]';
   useWindowLayout(
     windowKind === 'notch'
@@ -854,8 +1071,8 @@ function LoadingShell({
         ? { width: 400, height: 300 }
       : windowKind === 'sidecar'
         ? { width: 380, height: 320 }
-        : windowKind === 'settings'
-          ? { width: 640, height: 560 }
+      : windowKind === 'settings'
+          ? { width: 760, height: 620 }
           : { width: 560, height: 128 }
   );
   return (
@@ -1444,10 +1661,12 @@ function CommandBarShell({
   const [commandText, setCommandText] = useState('');
   const [busyText, setBusyText] = useState('');
   const [localError, setLocalError] = useState('');
+  const [isSubmittingCommand, setIsSubmittingCommand] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const submittingRef = useRef(false);
   const bridgeBusy = isBridgeBusyStatus(snapshot.bridgeStatus);
+  const commandInputDisabled = !snapshot.liveAvailable || bridgeBusy || isSubmittingCommand;
   const status = useMemo(
     () => buildCommandBarStatus(snapshot, messages, actionUpdates, busyText, localError, runtimeError),
     [snapshot, messages, actionUpdates, busyText, localError, runtimeError]
@@ -1478,10 +1697,11 @@ function CommandBarShell({
 
   const submitCommand = async (): Promise<void> => {
     const text = commandText.trim();
-    if (!text || submittingRef.current || bridgeBusy || !snapshot.liveAvailable) {
+    if (!text || submittingRef.current || commandInputDisabled) {
       return;
     }
     submittingRef.current = true;
+    setIsSubmittingCommand(true);
     setBusyText('Submitting...');
     setLocalError('');
     try {
@@ -1494,6 +1714,7 @@ function CommandBarShell({
       setBusyText('');
     } finally {
       submittingRef.current = false;
+      setIsSubmittingCommand(false);
     }
   };
 
@@ -1528,7 +1749,7 @@ function CommandBarShell({
               ref={inputRef}
               value={commandText}
               onChange={(event) => setCommandText(event.target.value)}
-              readOnly={!snapshot.liveAvailable || bridgeBusy}
+              readOnly={commandInputDisabled}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') {
                   event.preventDefault();
@@ -1548,7 +1769,7 @@ function CommandBarShell({
             type="button"
             aria-label="Run command"
             onClick={() => void submitCommand()}
-            disabled={!snapshot.liveAvailable || bridgeBusy || !commandText.trim()}
+            disabled={commandInputDisabled || !commandText.trim()}
             className={[
               'no-drag flex h-12 shrink-0 items-center rounded-full px-6 text-[20px] font-medium transition',
               commandText.trim() ? 'bg-slate-100 text-slate-950 hover:bg-slate-200' : 'bg-slate-100/80 text-slate-500',
@@ -1564,6 +1785,170 @@ function CommandBarShell({
         </div>
       </div>
     </motion.div>
+  );
+}
+
+function VoiceprintSettingsSection({
+  snapshot,
+  disabled = false
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled?: boolean;
+}): React.JSX.Element {
+  const [localError, setLocalError] = useState('');
+  const [busyAction, setBusyAction] = useState('');
+  const [voiceprint, setVoiceprint] = useState<VoiceprintStatus>(
+    parseVoiceprintStatus(snapshot.voiceprint)
+  );
+
+  useEffect(() => {
+    setVoiceprint(parseVoiceprintStatus(snapshot.voiceprint));
+  }, [snapshot.voiceprint]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadStatus = async (): Promise<void> => {
+      try {
+        const result = await window.pixelPilot.invokeRuntime('voiceprint.getStatus');
+        if (!cancelled) {
+          setVoiceprint(parseVoiceprintStatus(result.voiceprint));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLocalError(error instanceof Error ? error.message : 'Unable to load voiceprint status.');
+        }
+      }
+    };
+
+    void loadStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runVoiceprintAction = async (
+    action: string,
+    method: string,
+    payload?: Record<string, unknown>
+  ): Promise<void> => {
+    if (disabled || busyAction) {
+      return;
+    }
+    setBusyAction(action);
+    setLocalError('');
+    try {
+      const result = await window.pixelPilot.invokeRuntime(method, payload);
+      setVoiceprint(parseVoiceprintStatus(result.voiceprint));
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Voiceprint action failed.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const pending = Number(voiceprint.pendingSampleCount || 0);
+  const required = Number(voiceprint.minEnrollmentSamples || 4);
+  const readyToComplete = pending >= required;
+  const lastScore =
+    typeof voiceprint.lastScore === 'number'
+      ? voiceprint.lastScore.toFixed(2)
+      : 'No wake score yet';
+  const healthText = voiceprint.enabled
+    ? voiceprint.enrolled
+      ? voiceprint.available
+        ? 'Protected'
+        : 'Needs model'
+      : 'Needs training'
+    : voiceprint.enrolled
+      ? 'Trained, off'
+      : 'Off';
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-sm font-semibold text-slate-900">Hey Pixie Voiceprint</div>
+          <div className="mt-1 text-sm text-slate-600">Only your enrolled voice can wake Live when protection is on.</div>
+        </div>
+        <button
+          type="button"
+          onClick={() =>
+            void runVoiceprintAction(
+              'toggle',
+              'voiceprint.setEnabled',
+              { enabled: !voiceprint.enabled }
+            )
+          }
+          disabled={busyAction !== '' || disabled}
+          className="no-drag rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          {voiceprint.enabled ? 'Turn Off' : 'Turn On'}
+        </button>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        <div className="rounded-lg border border-white/38 bg-white/46 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Status</div>
+          <div className="mt-2 text-sm text-slate-700">{healthText}</div>
+        </div>
+        <div className="rounded-lg border border-white/38 bg-white/46 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Samples</div>
+          <div className="mt-2 text-sm text-slate-700">{voiceprint.sampleCount || pending} / {required}</div>
+        </div>
+        <div className="rounded-lg border border-white/38 bg-white/46 px-4 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Last Score</div>
+          <div className="mt-2 text-sm text-slate-700">{lastScore}</div>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Training</div>
+        <div className="mt-2 text-sm leading-6 text-slate-700">
+          Say "Hey Pixie" clearly. Record {required} samples, then finish training.
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void runVoiceprintAction('record', 'voiceprint.recordSample', { seconds: 2 })}
+            disabled={busyAction !== '' || disabled}
+            className="no-drag rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            {busyAction === 'record' ? 'Recording...' : 'Record Sample'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void runVoiceprintAction('complete', 'voiceprint.completeEnrollment')}
+            disabled={!readyToComplete || busyAction !== '' || disabled}
+            className="no-drag rounded-lg border border-white/38 bg-white/46 px-4 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-white/62 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            Finish Training
+          </button>
+          <button
+            type="button"
+            onClick={() => void runVoiceprintAction('clear', 'voiceprint.clear')}
+            disabled={busyAction !== '' || disabled}
+            className="no-drag rounded-lg border border-rose-200 bg-rose-50 px-4 py-2.5 text-sm font-semibold text-rose-900 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            Clear Voiceprint
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-white/38 bg-white/46 px-4 py-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Model</div>
+        <div className="mt-2 break-all text-sm leading-6 text-slate-700">
+          {voiceprint.modelId || 'speaker-embedding.onnx'}
+          {voiceprint.unavailableReason ? ` - ${voiceprint.unavailableReason}` : ''}
+        </div>
+      </div>
+
+      {localError && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2072,6 +2457,576 @@ function DiagnosticsSettingsSection({
   );
 }
 
+function AccountSettingsPanel({
+  snapshot,
+  disabled
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled: boolean;
+}): React.JSX.Element {
+  const [localError, setLocalError] = useState('');
+  const [busyAction, setBusyAction] = useState('');
+  const auth = snapshot.auth || emptyAuth;
+  const providerLabel = auth.directApi
+    ? auth.hasApiKey
+      ? 'Using your API key'
+      : 'Direct mode is selected'
+    : auth.backendUrl
+      ? 'Using PixelPilot cloud'
+      : 'Not connected';
+
+  const signOut = async (): Promise<void> => {
+    if (disabled || busyAction) {
+      return;
+    }
+    setBusyAction('sign-out');
+    setLocalError('');
+    try {
+      await window.pixelPilot.invokeRuntime('auth.logout');
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to sign out right now.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <SettingsSectionBlock title="Account" description="Your sign-in and model connection for this desktop app.">
+        <SettingsRow
+          title="Signed in"
+          description={auth.signedIn ? 'PixelPilot can sync with your account.' : 'Sign in is needed before PixelPilot can connect.'}
+          value={auth.email || auth.userId || 'No account email available'}
+        >
+          <SettingsStatusChip tone={auth.signedIn ? 'good' : 'warn'}>
+            {auth.signedIn ? 'Connected' : 'Needs sign in'}
+          </SettingsStatusChip>
+        </SettingsRow>
+        <SettingsRow
+          title="Model connection"
+          description="How PixelPilot is currently reaching an AI model."
+          value={auth.backendUrl || 'Local direct mode'}
+        >
+          <SettingsStatusChip tone={auth.directApi || auth.backendUrl ? 'good' : 'warn'}>{providerLabel}</SettingsStatusChip>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      <SettingsSectionBlock title="Session" description="Sign out of this desktop session.">
+        <SettingsRow title="Sign out" description="You can sign back in from the welcome screen.">
+          <SettingsButton onClick={() => void signOut()} disabled={disabled || busyAction !== ''}>
+            {busyAction === 'sign-out' ? 'Signing out...' : 'Sign Out'}
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      {localError && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BehaviorSettingsPanel({
+  snapshot,
+  disabled
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled: boolean;
+}): React.JSX.Element {
+  const [localError, setLocalError] = useState('');
+  const [statusText, setStatusText] = useState('');
+  const [busyAction, setBusyAction] = useState('');
+  const [startupSource, setStartupSource] = useState<StartupDefaultsSnapshot['source']>('fallback');
+  const preferences = snapshot.uiPreferences || defaultUiPreferences;
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadDefaults = async (): Promise<void> => {
+      try {
+        const result = await window.pixelPilot.getStartupDefaults();
+        if (!cancelled) {
+          setStartupSource(result.source);
+          setStatusText(result.hasPersisted ? 'Saved startup choices are ready.' : startupDefaultsSourceLabel(result.source));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLocalError(error instanceof Error ? error.message : 'Unable to load startup choices.');
+        }
+      }
+    };
+    void loadDefaults();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runRuntimeAction = async (action: string, method: string, payload?: Record<string, unknown>): Promise<void> => {
+    if (disabled || busyAction) {
+      return;
+    }
+    setBusyAction(action);
+    setLocalError('');
+    try {
+      await window.pixelPilot.invokeRuntime(method, payload);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to update this setting.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const updatePreference = async (action: string, payload: Partial<typeof defaultUiPreferences>): Promise<void> => {
+    if (disabled || busyAction) {
+      return;
+    }
+    setBusyAction(action);
+    setLocalError('');
+    try {
+      await window.pixelPilot.setUiPreferences(payload);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to update desktop indicators.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const saveStartupDefaults = async (): Promise<void> => {
+    if (disabled || busyAction) {
+      return;
+    }
+    setBusyAction('startup');
+    setLocalError('');
+    setStatusText('Saving startup choices...');
+    try {
+      const result = await window.pixelPilot.setStartupDefaults({
+        operationMode: snapshot.operationMode,
+        visionMode: snapshot.visionMode
+      });
+      setStartupSource(result.source);
+      setStatusText('Startup choices saved.');
+    } catch (error) {
+      setStatusText('');
+      setLocalError(error instanceof Error ? error.message : 'Unable to save startup choices.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <SettingsSectionBlock title="Behavior" description="Choose how PixelPilot should help and read the screen.">
+        <SettingsRow title="Mode" description="Safe is the balanced default for everyday use.">
+          <SettingsChoiceGroup
+            value={snapshot.operationMode}
+            options={modes}
+            disabled={disabled || busyAction !== ''}
+            onChange={(value) => void runRuntimeAction(`mode-${value}`, 'mode.set', { value })}
+          />
+        </SettingsRow>
+        <SettingsRow title="Screen reading" description="Pick the screen reader PixelPilot should use right now.">
+          <SettingsChoiceGroup
+            value={snapshot.visionMode}
+            options={[
+              { id: 'OCR', label: 'OCR', hint: 'Best for reading text on screen.' },
+              { id: 'ROBO', label: 'Robo', hint: 'Best for richer screen structure.' }
+            ]}
+            disabled={disabled || busyAction !== ''}
+            onChange={(value) => void runRuntimeAction(`vision-${value}`, 'vision.set', { value })}
+          />
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      <SettingsSectionBlock title="Startup" description="Save the current mode and screen reading choice for next launch.">
+        <SettingsRow
+          title="Startup choices"
+          description={statusText || startupDefaultsSourceLabel(startupSource)}
+          value={`${snapshot.operationMode} + ${snapshot.visionMode}`}
+        >
+          <SettingsButton tone="primary" onClick={() => void saveStartupDefaults()} disabled={disabled || busyAction !== ''}>
+            {busyAction === 'startup' ? 'Saving...' : 'Save Current Choices'}
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      <SettingsSectionBlock title="Desktop indicators" description="Small visual cues that show what PixelPilot is doing.">
+        <SettingsRow title="Corner glow" description="A soft corner signal while PixelPilot is active.">
+          <SettingsButton
+            onClick={() => void updatePreference('corner-glow', { cornerGlowEnabled: !preferences.cornerGlowEnabled })}
+            disabled={disabled || busyAction !== ''}
+          >
+            {preferences.cornerGlowEnabled ? 'Turn Off' : 'Turn On'}
+          </SettingsButton>
+        </SettingsRow>
+        <SettingsRow title="Status notch" description="A compact status label at the top of the screen.">
+          <SettingsButton
+            onClick={() => void updatePreference('status-notch', { statusNotchEnabled: !preferences.statusNotchEnabled })}
+            disabled={disabled || busyAction !== ''}
+          >
+            {preferences.statusNotchEnabled ? 'Turn Off' : 'Turn On'}
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      {localError && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VoiceSettingsPanel({
+  snapshot,
+  disabled
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled: boolean;
+}): React.JSX.Element {
+  const [localError, setLocalError] = useState('');
+  const [busyAction, setBusyAction] = useState('');
+  const [voiceprint, setVoiceprint] = useState<VoiceprintStatus>(parseVoiceprintStatus(snapshot.voiceprint));
+
+  useEffect(() => {
+    setVoiceprint(parseVoiceprintStatus(snapshot.voiceprint));
+  }, [snapshot.voiceprint]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadVoiceprint = async (): Promise<void> => {
+      try {
+        const result = await window.pixelPilot.invokeRuntime('voiceprint.getStatus');
+        if (!cancelled) {
+          setVoiceprint(parseVoiceprintStatus(result.voiceprint));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLocalError(error instanceof Error ? error.message : 'Unable to load voice settings.');
+        }
+      }
+    };
+    void loadVoiceprint();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runRuntimeAction = async (action: string, method: string, payload?: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+    if (disabled || busyAction) {
+      return null;
+    }
+    setBusyAction(action);
+    setLocalError('');
+    try {
+      return await window.pixelPilot.invokeRuntime(method, payload);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Voice setting failed.');
+      return null;
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const runVoiceprintAction = async (action: string, method: string, payload?: Record<string, unknown>): Promise<void> => {
+    const result = await runRuntimeAction(action, method, payload);
+    if (result) {
+      setVoiceprint(parseVoiceprintStatus(result.voiceprint));
+    }
+  };
+
+  const pending = Number(voiceprint.pendingSampleCount || 0);
+  const required = Number(voiceprint.minEnrollmentSamples || 4);
+  const readyToComplete = pending >= required;
+  const sampleText = `${voiceprint.sampleCount || pending} / ${required}`;
+  const voiceprintTone = !voiceprint.enabled
+    ? 'neutral'
+    : voiceprint.enrolled && voiceprint.available
+      ? 'good'
+      : voiceprint.available
+        ? 'warn'
+        : 'error';
+  const voiceprintLabel = !voiceprint.enabled
+    ? voiceprint.enrolled
+      ? 'Trained, off'
+      : 'Off'
+    : voiceprint.enrolled && voiceprint.available
+      ? 'Protected'
+      : voiceprint.available
+        ? 'Needs training'
+        : 'Needs model';
+
+  return (
+    <div className="space-y-4">
+      <SettingsSectionBlock title="Wake word" description="Control hands-free listening for Hey Pixie.">
+        <SettingsRow
+          title="Hey Pixie"
+          description={snapshot.wakeWordPhrase ? `Current phrase: ${snapshot.wakeWordPhrase}` : 'Current phrase: Hey Pixie'}
+          value={snapshot.wakeWordUnavailableReason || ''}
+        >
+          <SettingsStatusChip tone={snapshot.wakeWordEnabled && snapshot.wakeWordState === 'armed' ? 'good' : 'neutral'}>
+            {humanizeState(snapshot.wakeWordState || (snapshot.wakeWordEnabled ? 'on' : 'off'))}
+          </SettingsStatusChip>
+          <SettingsButton
+            onClick={() => void runRuntimeAction('wake-word', 'wakeWord.setEnabled', { enabled: !snapshot.wakeWordEnabled })}
+            disabled={disabled || busyAction !== ''}
+          >
+            {snapshot.wakeWordEnabled ? 'Turn Off' : 'Turn On'}
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      <SettingsSectionBlock title="Voice protection" description="Train PixelPilot to wake only for your voice.">
+        <SettingsRow title="Protection" description="When on, PixelPilot checks the wake phrase against your saved voiceprint.">
+          <SettingsStatusChip tone={voiceprintTone}>{voiceprintLabel}</SettingsStatusChip>
+          <SettingsButton
+            onClick={() => void runVoiceprintAction('voiceprint-toggle', 'voiceprint.setEnabled', { enabled: !voiceprint.enabled })}
+            disabled={disabled || busyAction !== ''}
+          >
+            {voiceprint.enabled ? 'Turn Off' : 'Turn On'}
+          </SettingsButton>
+        </SettingsRow>
+        <SettingsRow title="Train Hey Pixie" description={`Record ${required} clear samples. Current progress: ${sampleText}.`}>
+          <SettingsButton
+            tone="primary"
+            onClick={() => void runVoiceprintAction('record', 'voiceprint.recordSample', { seconds: 2 })}
+            disabled={disabled || busyAction !== ''}
+          >
+            {busyAction === 'record' ? 'Recording...' : 'Record Sample'}
+          </SettingsButton>
+          <SettingsButton
+            onClick={() => void runVoiceprintAction('complete', 'voiceprint.completeEnrollment')}
+            disabled={disabled || busyAction !== '' || !readyToComplete}
+          >
+            Finish Training
+          </SettingsButton>
+          <SettingsButton
+            tone="danger"
+            onClick={() => void runVoiceprintAction('clear', 'voiceprint.clear')}
+            disabled={disabled || busyAction !== ''}
+          >
+            Clear
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      <SettingsDisclosure title="Voice details">
+        <div>Last score: {typeof voiceprint.lastScore === 'number' ? voiceprint.lastScore.toFixed(2) : 'No wake score yet'}</div>
+        <div>Threshold: {voiceprint.threshold}</div>
+        <div>Samples: {sampleText}</div>
+        <div>Model: {voiceprint.modelId || 'speaker-embedding.onnx'}</div>
+        {voiceprint.modelPath && <div className="break-all">Path: {voiceprint.modelPath}</div>}
+        {voiceprint.unavailableReason && <div>{voiceprint.unavailableReason}</div>}
+      </SettingsDisclosure>
+
+      {localError && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HealthSettingsPanel({
+  snapshot,
+  disabled
+}: {
+  snapshot: RuntimeSnapshot;
+  disabled: boolean;
+}): React.JSX.Element {
+  const [localError, setLocalError] = useState('');
+  const [busyAction, setBusyAction] = useState('');
+  const [sessionContext, setSessionContext] = useState<SessionContextSummary>(parseSessionContext(snapshot.latestSessionContext));
+  const [extensionSummary, setExtensionSummary] = useState<ExtensionSummary>(parseExtensionSummary(snapshot.extensions));
+  const [report, setReport] = useState<DoctorReport>(parseDoctorReport(snapshot.lastDoctorReport));
+  const [doctorText, setDoctorText] = useState(() => renderDoctorReportText(parseDoctorReport(snapshot.lastDoctorReport)));
+  const sessionDirectory = String(snapshot.sessionDirectory || '').trim();
+
+  useEffect(() => {
+    setSessionContext(parseSessionContext(snapshot.latestSessionContext));
+  }, [snapshot.latestSessionContext]);
+
+  useEffect(() => {
+    setExtensionSummary(parseExtensionSummary(snapshot.extensions));
+  }, [snapshot.extensions]);
+
+  useEffect(() => {
+    const nextReport = parseDoctorReport(snapshot.lastDoctorReport);
+    setReport(nextReport);
+    setDoctorText((current) => current || renderDoctorReportText(nextReport));
+  }, [snapshot.lastDoctorReport]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadHealth = async (): Promise<void> => {
+      try {
+        const [sessionResult, extensionResult] = await Promise.all([
+          window.pixelPilot.invokeRuntime('session.getLatestContext'),
+          window.pixelPilot.invokeRuntime('extensions.getSummary')
+        ]);
+        if (!cancelled) {
+          setSessionContext(parseSessionContext(sessionResult.session));
+          setExtensionSummary(parseExtensionSummary(extensionResult.extensions));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLocalError(error instanceof Error ? error.message : 'Unable to load health details.');
+        }
+      }
+    };
+    void loadHealth();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runAction = async (action: string, method: string): Promise<Record<string, unknown> | null> => {
+    if (disabled || busyAction) {
+      return null;
+    }
+    setBusyAction(action);
+    setLocalError('');
+    try {
+      return await window.pixelPilot.invokeRuntime(method);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Action failed.');
+      return null;
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const runDiagnostics = async (): Promise<void> => {
+    const result = await runAction('doctor', 'doctor.run');
+    if (result) {
+      const nextReport = parseDoctorReport(result.doctor);
+      setReport(nextReport);
+      setDoctorText(String(result.text || renderDoctorReportText(nextReport)));
+    }
+  };
+
+  const resumeSession = async (): Promise<void> => {
+    const result = await runAction('resume', 'session.resumeLatestContext');
+    if (result) {
+      setSessionContext(parseSessionContext(result.session));
+    }
+  };
+
+  const reloadExtensions = async (): Promise<void> => {
+    const result = await runAction('extensions', 'extensions.reload');
+    if (result) {
+      setExtensionSummary(parseExtensionSummary(result.extensions));
+    }
+  };
+
+  const copyDoctorText = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await copyTextToClipboard(doctorText || renderDoctorReportText(report));
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to copy the checkup text.');
+    }
+  };
+
+  const copyDoctorJson = async (): Promise<void> => {
+    setLocalError('');
+    try {
+      await copyTextToClipboard(JSON.stringify(report, null, 2));
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : 'Unable to copy the checkup JSON.');
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <SettingsSectionBlock title="Checkup" description="Run a quick health check when something feels off.">
+        <SettingsRow title="App health" description="Checks account, wake word, audio, sessions, and tools.">
+          <SettingsStatusChip tone={report.status === 'ok' ? 'good' : report.status === 'error' ? 'error' : 'warn'}>
+            {humanizeState(report.status || 'unknown')}
+          </SettingsStatusChip>
+          <SettingsButton tone="primary" onClick={() => void runDiagnostics()} disabled={disabled || busyAction !== ''}>
+            {busyAction === 'doctor' ? 'Checking...' : 'Run Checkup'}
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      <SettingsSectionBlock title="Session" description="Resume recent context or open the local session folder.">
+        <SettingsRow
+          title="Latest context"
+          description={sessionContext.available ? 'A recent session can be resumed.' : 'No recent session is ready to resume.'}
+          value={sessionContext.summaryText || sessionContext.lastActivityAt || ''}
+        >
+          <SettingsButton onClick={() => void resumeSession()} disabled={disabled || busyAction !== '' || !sessionContext.available}>
+            {busyAction === 'resume' ? 'Resuming...' : 'Resume'}
+          </SettingsButton>
+          <SettingsButton onClick={() => void runAction('open-session', 'session.openFolder')} disabled={disabled || busyAction !== '' || !sessionDirectory}>
+            {busyAction === 'open-session' ? 'Opening...' : 'Open Logs'}
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      <SettingsSectionBlock title="Tools" description="Plugins and MCP servers add local tools for PixelPilot.">
+        <SettingsRow
+          title="Connectors"
+          description={`${extensionSummary.pluginCount} plugins, ${extensionSummary.mcpServerCount} MCP servers, ${extensionSummary.toolCount} tools.`}
+        >
+          <SettingsStatusChip tone={extensionSummary.toolCount > 0 ? 'good' : 'neutral'}>
+            {extensionSummary.toolCount > 0 ? 'Ready' : 'No tools'}
+          </SettingsStatusChip>
+          <SettingsButton onClick={() => void reloadExtensions()} disabled={disabled || busyAction !== ''}>
+            {busyAction === 'extensions' ? 'Reloading...' : 'Reload'}
+          </SettingsButton>
+        </SettingsRow>
+      </SettingsSectionBlock>
+
+      <SettingsDisclosure title="Advanced health details">
+        <div className="space-y-3">
+          <div>
+            <div className="font-semibold text-slate-900">Checkup results</div>
+            <div className="mt-2 space-y-2">
+              {report.checks.length > 0 ? report.checks.map((check) => (
+                <div key={check.name} className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-medium text-slate-900">{check.name}</span>
+                    <SettingsStatusChip tone={check.status === 'ok' ? 'good' : check.status === 'error' ? 'error' : 'warn'}>
+                      {humanizeState(check.status)}
+                    </SettingsStatusChip>
+                  </div>
+                  <div className="mt-1 text-slate-600">{check.summary || 'No summary available.'}</div>
+                </div>
+              )) : <div>No checkup has been run yet.</div>}
+            </div>
+          </div>
+          <div>
+            <div className="font-semibold text-slate-900">Settings files</div>
+            <div className="mt-1 break-all text-slate-600">
+              {snapshot.settingsSources.length > 0 ? snapshot.settingsSources.join(', ') : 'No settings files are active.'}
+            </div>
+          </div>
+          <div>
+            <div className="font-semibold text-slate-900">Tool names</div>
+            <div className="mt-1 break-all text-slate-600">
+              {extensionSummary.toolNames.length > 0 ? extensionSummary.toolNames.join(', ') : 'No extension tools are loaded.'}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <SettingsButton onClick={() => void copyDoctorText()} disabled={busyAction !== ''}>Copy Text</SettingsButton>
+            <SettingsButton onClick={() => void copyDoctorJson()} disabled={busyAction !== ''}>Copy JSON</SettingsButton>
+          </div>
+        </div>
+      </SettingsDisclosure>
+
+      {localError && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {localError}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsNavButton({
   label,
   active,
@@ -2096,12 +3051,27 @@ function SettingsNavButton({
 }
 
 function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.Element {
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>('general');
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('account');
   const [localError, setLocalError] = useState('');
+  const shellRef = useRef<HTMLDivElement>(null);
   const bridgeBusy = isBridgeBusyStatus(snapshot.bridgeStatus);
   const bridgeStateText = bridgeStatusText(snapshot);
 
-  useWindowLayout({ width: 640, height: 560 });
+  useMeasuredWindowLayout(shellRef, {
+    width: 760,
+    height: 620
+  }, [
+    activeSection,
+    snapshot.bridgeStatus,
+    snapshot.operationMode,
+    snapshot.visionMode,
+    snapshot.wakeWordEnabled,
+    snapshot.wakeWordState,
+    snapshot.voiceprint?.enabled,
+    snapshot.voiceprint?.sampleCount,
+    snapshot.extensions?.toolCount,
+    snapshot.lastDoctorReport
+  ]);
 
   const closeWindow = async (): Promise<void> => {
     setLocalError('');
@@ -2113,84 +3083,67 @@ function SettingsShell({ snapshot }: { snapshot: RuntimeSnapshot }): React.JSX.E
   };
 
   const sections: { id: SettingsSectionId; label: string }[] = [
-    { id: 'general', label: 'General' },
-    { id: 'startup', label: 'Startup' },
-    { id: 'sessions', label: 'Sessions' },
-    { id: 'extensions', label: 'Extensions' },
-    { id: 'diagnostics', label: 'Diagnostics' }
+    { id: 'account', label: 'Account' },
+    { id: 'behavior', label: 'Behavior' },
+    { id: 'voice', label: 'Voice' },
+    { id: 'health', label: 'Health' }
   ];
 
   return (
     <motion.div
-      className="w-[640px]"
+      ref={shellRef}
+      className="w-screen min-w-[560px] max-w-[980px] p-3"
       initial={{ opacity: 0, y: -6 }}
       animate={{ opacity: 1, y: 0 }}
     >
-      <div className="overflow-hidden rounded-[28px] border border-white/45 bg-[rgba(236,245,255,0.82)] shadow-[0_24px_56px_rgba(15,23,42,0.18)] backdrop-blur-2xl">
-        <div className="flex h-[560px] min-h-[560px]">
-          <aside className="flex w-[176px] shrink-0 flex-col border-r border-white/30 bg-[rgba(255,255,255,0.56)] px-3 py-4">
-            <div className="px-2">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Settings Hub</div>
-              <div className="mt-2 text-sm text-slate-700">Startup, sessions, extensions, and diagnostics now live in one place.</div>
-            </div>
-            <div className="mt-5 flex-1 space-y-1">
-              {sections.map((section) => (
-                <SettingsNavButton
-                  key={section.id}
-                  label={section.label}
-                  active={activeSection === section.id}
-                  onClick={() => setActiveSection(section.id)}
-                />
-              ))}
-            </div>
-            {bridgeStateText && snapshot.bridgeStatus !== 'connected' && (
-              <div
-                className={[
-                  'mt-3 rounded-2xl border px-3 py-2 text-xs',
-                  snapshot.bridgeStatus === 'failed'
-                    ? 'border-rose-200 bg-rose-50 text-rose-900'
-                    : 'border-sky-200 bg-sky-50 text-sky-900'
-                ].join(' ')}
-              >
-                {bridgeStateText}
+      <div className="overflow-hidden rounded-lg border border-zinc-200 bg-zinc-50 text-slate-950 shadow-[0_20px_52px_rgba(15,23,42,0.18)]">
+        <div className="drag-region border-b border-zinc-200 bg-white px-5 py-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-lg font-semibold text-slate-950">Settings</div>
+              <div className="mt-1 text-sm text-slate-600">
+                {snapshot.bridgeStatus === 'connected' ? 'PixelPilot is connected.' : bridgeStateText || 'PixelPilot is starting.'}
               </div>
-            )}
-          </aside>
-
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex items-center justify-between gap-3 border-b border-white/28 px-5 py-4">
-              <div>
-                <div className="text-lg font-semibold text-slate-950">
-                  {sections.find((section) => section.id === activeSection)?.label}
-                </div>
-                <div className="mt-1 text-sm text-slate-600">
-                  {snapshot.bridgeStatus === 'connected' ? 'Runtime connected' : bridgeStateText}
-                </div>
-              </div>
-              <button
-                type="button"
-                aria-label="Close settings hub"
-                onClick={() => void closeWindow()}
-                className="no-drag flex h-9 w-9 items-center justify-center rounded-full border border-white/34 bg-white/32 text-slate-700 transition hover:bg-white/48"
-              >
-                <X className="h-4 w-4" />
-              </button>
             </div>
-
-            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-              {activeSection === 'general' && <GeneralSettingsSection snapshot={snapshot} disabled={bridgeBusy} />}
-              {activeSection === 'startup' && <StartupDefaultsSection snapshot={snapshot} disabled={bridgeBusy} />}
-              {activeSection === 'sessions' && <SessionSettingsSection snapshot={snapshot} disabled={bridgeBusy} />}
-              {activeSection === 'extensions' && <ExtensionsSettingsSection snapshot={snapshot} disabled={bridgeBusy} />}
-              {activeSection === 'diagnostics' && <DiagnosticsSettingsSection snapshot={snapshot} disabled={bridgeBusy} />}
-
-              {localError && (
-                <div className="mt-4 rounded-[18px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
-                  {localError}
-                </div>
-              )}
-            </div>
+            <button
+              type="button"
+              aria-label="Close settings"
+              onClick={() => void closeWindow()}
+              className="no-drag flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 bg-white text-slate-700 transition hover:bg-zinc-50"
+            >
+              <X className="h-4 w-4" />
+            </button>
           </div>
+
+          <div className="no-drag mt-4 flex flex-wrap gap-2">
+            {sections.map((section) => (
+              <SettingsTabButton
+                key={section.id}
+                label={section.label}
+                active={activeSection === section.id}
+                onClick={() => setActiveSection(section.id)}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div className="max-h-[calc(100vh-132px)] overflow-y-auto px-5 py-5">
+          {activeSection === 'account' && <AccountSettingsPanel snapshot={snapshot} disabled={bridgeBusy} />}
+          {activeSection === 'behavior' && <BehaviorSettingsPanel snapshot={snapshot} disabled={bridgeBusy} />}
+          {activeSection === 'voice' && <VoiceSettingsPanel snapshot={snapshot} disabled={bridgeBusy} />}
+          {activeSection === 'health' && <HealthSettingsPanel snapshot={snapshot} disabled={bridgeBusy} />}
+
+          {bridgeBusy && (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              Settings will unlock when PixelPilot finishes connecting.
+            </div>
+          )}
+
+          {localError && (
+            <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+              {localError}
+            </div>
+          )}
         </div>
       </div>
     </motion.div>

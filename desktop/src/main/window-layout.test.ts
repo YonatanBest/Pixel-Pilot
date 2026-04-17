@@ -60,21 +60,30 @@ describe('window-layout', () => {
     });
   });
 
-  it('clamps the settings hub within the available work area', () => {
+  it('clamps the settings panel within the available work area', () => {
     const size = normalizeWindowSize('settings', { x: 0, y: 0, width: 240, height: 260 }, { width: 900, height: 999 });
 
     expect(size).toEqual({
-      width: 520,
-      height: 420
+      width: 560,
+      height: 480
     });
   });
 
-  it('preserves the intended settings hub size when the display has room', () => {
-    const size = normalizeWindowSize('settings', workArea, { width: 640, height: 560 });
+  it('preserves the intended settings panel size when the display has room', () => {
+    const size = normalizeWindowSize('settings', workArea, { width: 760, height: 620 });
 
     expect(size).toEqual({
-      width: 640,
-      height: 560
+      width: 760,
+      height: 620
+    });
+  });
+
+  it('caps the settings panel at the larger redesign maximum', () => {
+    const size = normalizeWindowSize('settings', workArea, { width: 1200, height: 980 });
+
+    expect(size).toEqual({
+      width: 980,
+      height: 860
     });
   });
 });

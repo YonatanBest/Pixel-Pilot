@@ -4,7 +4,7 @@ from PySide6.QtCore import QObject, Signal
 
 
 class WakeWordDetector(QObject):
-    detected = Signal()
+    detected = Signal(object)
     availability_changed = Signal(bool, str)
     state_changed = Signal(str, str)
 

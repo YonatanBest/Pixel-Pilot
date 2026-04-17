@@ -224,7 +224,7 @@ export class WindowManager {
     this.notchWindow = this.createWindow('notch', 420, 76, true);
     this.glowWindow = this.createWindow('glow', 400, 300, true);
     this.sidecarWindow = this.createWindow('sidecar', 390, 420, true);
-    this.settingsWindow = this.createWindow('settings', 640, 560, true);
+    this.settingsWindow = this.createWindow('settings', 760, 620, true);
     this.notchWindow.hide();
     this.glowWindow.hide();
     this.sidecarWindow.hide();
@@ -359,7 +359,7 @@ export class WindowManager {
       frame: false,
       show: false,
       transparent: true,
-      resizable: false,
+      resizable: kind === 'settings',
       hasShadow: false,
       skipTaskbar,
       alwaysOnTop: kind !== 'overlay',
@@ -376,6 +376,9 @@ export class WindowManager {
         sandbox: false
       }
     });
+    if (kind === 'settings') {
+      this.applySettingsWindowSizeLimits(window, screen.getPrimaryDisplay().workArea);
+    }
     if (isClickThroughSurface) {
       window.setIgnoreMouseEvents(true, { forward: true });
       window.setAlwaysOnTop(true, 'screen-saver');
@@ -1203,6 +1206,13 @@ export class WindowManager {
     return { visible: false };
   }
 
+  private applySettingsWindowSizeLimits(window: BrowserWindowType, workArea: { width: number; height: number }): void {
+    const maxWidth = Math.max(1, Math.min(980, workArea.width - 24));
+    const maxHeight = Math.max(1, Math.min(860, workArea.height - 24));
+    window.setMinimumSize(Math.min(560, maxWidth), Math.min(480, maxHeight));
+    window.setMaximumSize(maxWidth, maxHeight);
+  }
+
   private positionSettingsWindow(size?: { width: number; height: number }): void {
     const settingsWindow = this.settingsWindow;
     const overlayWindow = this.overlayWindow;
@@ -1220,6 +1230,7 @@ export class WindowManager {
         };
     const display = screen.getDisplayMatching(overlayBounds);
     const normalized = normalizeWindowSize('settings', display.workArea, size ?? settingsWindow.getBounds());
+    this.applySettingsWindowSizeLimits(settingsWindow, display.workArea);
     const x = Math.min(
       display.workArea.x + display.workArea.width - normalized.width - 12,
       Math.max(display.workArea.x + 12, overlayBounds.x + overlayBounds.width - normalized.width - 8)

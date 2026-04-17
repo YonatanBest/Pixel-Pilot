@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
-from PySide6.QtCore import QObject, Slot
+from PySide6.QtCore import QObject, QTimer, Slot
 
 from config import Config
 from .base import WakeWordDetector
@@ -24,6 +25,7 @@ class WakeWordController(QObject):
         publish_phrase: Callable[[str], None],
         publish_state: Callable[[str, str], None],
         add_activity_message: Callable[[str], None] | None = None,
+        verify_trigger: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         super().__init__()
         self.detector = detector
@@ -34,6 +36,7 @@ class WakeWordController(QObject):
         self._is_live_enabled = is_live_enabled
         self._is_live_voice_active = is_live_voice_active
         self._start_one_shot_voice = start_one_shot_voice
+        self._verify_trigger = verify_trigger
         self._ensure_live_connected = ensure_live_connected
         self._publish_enabled = publish_enabled
         self._publish_phrase = publish_phrase
@@ -114,8 +117,8 @@ class WakeWordController(QObject):
     def shutdown(self) -> None:
         self.detector.stop()
 
-    @Slot()
-    def _handle_detected(self) -> None:
+    @Slot(object)
+    def _handle_detected(self, payload: object = None) -> None:
         if (
             not self._enabled
             or not self._is_live_available()
@@ -124,12 +127,51 @@ class WakeWordController(QObject):
             return
         self.detector.pause()
         self._publish_state("paused", "")
+
+        verification = self._verify_wake_payload(payload)
+        if not bool(verification.get("accepted")):
+            decision = str(verification.get("decision") or "rejected")
+            reason = str(verification.get("reason") or "").strip()
+            score = verification.get("score")
+            if decision == "unavailable":
+                self.detector.stop()
+                self._publish_state("unavailable", reason or "Voice verification is unavailable.")
+                return
+            if decision == "uncertain":
+                detail = f" Voice score {float(score):.2f}." if isinstance(score, (int, float)) else ""
+                self._publish_state("paused", f"Voice match was uncertain. Please try again.{detail}")
+                if callable(self._add_activity_message):
+                    self._add_activity_message("Voice match was uncertain. Please say the wake phrase again.")
+            elif decision == "enrollment_required":
+                self._publish_state("paused", "Train Hey Pixie in settings before voiceprint wake protection can start Live.")
+                if callable(self._add_activity_message):
+                    self._add_activity_message("Train Hey Pixie in settings to use voiceprint wake protection.")
+            else:
+                self._publish_state("paused", "")
+            QTimer.singleShot(int(max(0.1, Config.WAKE_WORD_RESUME_DELAY_SECONDS) * 1000), self.reconcile)
+            return
+
         if callable(self._add_activity_message):
             self._add_activity_message(
                 f'Wake word detected. PixelPilot Live is listening after "{self._phrase}".'
             )
         if not self._start_one_shot_voice():
             self.reconcile()
+
+    def _verify_wake_payload(self, payload: object) -> dict[str, Any]:
+        verifier = self._verify_trigger
+        if not callable(verifier):
+            return {"accepted": True, "decision": "accepted", "reason": "voiceprint_unconfigured"}
+        try:
+            body = dict(payload or {}) if isinstance(payload, dict) else {}
+            result = verifier(body)
+            return dict(result or {})
+        except Exception as exc:
+            return {
+                "accepted": False,
+                "decision": "unavailable",
+                "reason": str(exc) or "Voice verification failed.",
+            }
 
     @Slot(str, str)
     def _handle_detector_state_changed(self, state: str, reason: str) -> None:

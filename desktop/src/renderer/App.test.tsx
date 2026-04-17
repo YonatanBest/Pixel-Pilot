@@ -13,6 +13,20 @@ import type {
 
 type Listener<T> = (value: T) => void;
 
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function makeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
   return {
     operationMode: 'SAFE',
@@ -81,6 +95,22 @@ function makeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot
       pluginIds: [],
       mcpServerNames: [],
       toolNames: []
+    },
+    voiceprint: {
+      enabled: false,
+      enrolled: false,
+      available: true,
+      status: 'disabled',
+      lastScore: null,
+      threshold: 0.78,
+      uncertainThreshold: 0.72,
+      sampleCount: 0,
+      pendingSampleCount: 0,
+      minEnrollmentSamples: 4,
+      embeddingDim: 0,
+      modelId: '',
+      modelPath: '',
+      unavailableReason: ''
     },
     settingsSources: [],
     sessionDirectory: 'C:\\Users\\tester\\.pixelpilot\\sessions',
@@ -432,6 +462,38 @@ describe('Electron renderer App', () => {
     });
   });
 
+  it('disables the command submit button while a command is in flight', async () => {
+    const pendingSubmit = createDeferred<Record<string, never>>();
+    const controls = setupApi('overlay', makeSnapshot());
+    controls.invokeRuntime.mockImplementation((method: string, payload?: Record<string, unknown>) => {
+      if (method === 'live.submitText') {
+        return pendingSubmit.promise;
+      }
+      return Promise.resolve({ method, payload });
+    });
+
+    render(<App />);
+
+    const commandInput = await screen.findByLabelText(/pixelpilot command/i);
+    const runButton = screen.getByRole('button', { name: /run command/i });
+    await userEvent.type(commandInput, 'Summarize the open window');
+    await userEvent.click(runButton);
+
+    await waitFor(() => {
+      expect(runButton).toBeDisabled();
+      expect(commandInput).toHaveAttribute('readonly');
+    });
+
+    await userEvent.click(runButton);
+    expect(controls.invokeRuntime).toHaveBeenCalledTimes(1);
+
+    pendingSubmit.resolve({});
+
+    await waitFor(() => {
+      expect(controls.setBackgroundHidden).toHaveBeenCalledWith(true);
+    });
+  });
+
   it('closes the command bar without submitting', async () => {
     const controls = setupApi('overlay', makeSnapshot());
 
@@ -527,7 +589,7 @@ describe('Electron renderer App', () => {
     expect(screen.queryByText(/^failed$/i)).not.toBeInTheDocument();
   });
 
-  it('renders the unified settings hub and wires the general section actions', async () => {
+  it('renders the redesigned settings tabs and wires account and behavior actions', async () => {
     const controls = setupApi(
       'settings',
       makeSnapshot({
@@ -538,29 +600,247 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/settings hub/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^general$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^startup$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^sessions$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^extensions$/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^diagnostics$/i })).toBeInTheDocument();
+    expect(await screen.findByText(/^settings$/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^account$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^behavior$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^voice$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^health$/i })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /^auto$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^robo$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /corner glow/i }));
-    await userEvent.click(screen.getByRole('button', { name: /status notch/i }));
     await userEvent.click(screen.getByRole('button', { name: /sign out/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^behavior$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /auto/i }));
+    await userEvent.click(screen.getByRole('button', { name: /robo/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^save current choices$/i }));
+    await userEvent.click(screen.getAllByRole('button', { name: /^turn off$/i })[0]);
+    await userEvent.click(screen.getByRole('button', { name: /^turn on$/i }));
 
     await waitFor(() => {
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('auth.logout');
       expect(controls.invokeRuntime).toHaveBeenCalledWith('mode.set', { value: 'AUTO' });
       expect(controls.invokeRuntime).toHaveBeenCalledWith('vision.set', { value: 'ROBO' });
+      expect(controls.setStartupDefaults).toHaveBeenCalledWith({
+        operationMode: 'SAFE',
+        visionMode: 'OCR'
+      });
       expect(controls.setUiPreferences).toHaveBeenCalledWith({ cornerGlowEnabled: false });
       expect(controls.setUiPreferences).toHaveBeenCalledWith({ statusNotchEnabled: true });
-      expect(controls.invokeRuntime).toHaveBeenCalledWith('auth.logout', undefined);
+      expect(controls.updateWindowLayout).toHaveBeenCalledWith(expect.objectContaining({
+        height: expect.any(Number),
+        width: expect.any(Number)
+      }));
     });
   });
 
-  it('switches to the startup section and saves persisted defaults', async () => {
+  it('renders the voice tab and wires wake and voiceprint enrollment actions', async () => {
+    const controls = setupApi(
+      'settings',
+      makeSnapshot({
+        voiceprint: {
+          enabled: false,
+          enrolled: false,
+          available: true,
+          status: 'disabled',
+          lastScore: null,
+          threshold: 0.78,
+          uncertainThreshold: 0.72,
+          sampleCount: 0,
+          pendingSampleCount: 0,
+          minEnrollmentSamples: 1,
+          embeddingDim: 0,
+          modelId: 'speaker-embedding.onnx',
+          modelPath: 'C:\\Users\\tester\\.pixelpilot\\models\\speaker-embedding.onnx',
+          unavailableReason: ''
+        }
+      })
+    );
+
+    controls.invokeRuntime.mockImplementation((method: string, payload?: Record<string, unknown>) => {
+      if (method === 'voiceprint.getStatus') {
+        return Promise.resolve({
+          voiceprint: {
+            enabled: false,
+            enrolled: false,
+            available: true,
+            status: 'disabled',
+            lastScore: null,
+            threshold: 0.78,
+            uncertainThreshold: 0.72,
+            sampleCount: 0,
+            pendingSampleCount: 0,
+            minEnrollmentSamples: 1,
+            modelId: 'speaker-embedding.onnx',
+            unavailableReason: ''
+          }
+        });
+      }
+      if (method === 'voiceprint.recordSample') {
+        return Promise.resolve({
+          voiceprint: {
+            enabled: false,
+            enrolled: false,
+            available: true,
+            status: 'disabled',
+            lastScore: null,
+            threshold: 0.78,
+            uncertainThreshold: 0.72,
+            sampleCount: 0,
+            pendingSampleCount: 1,
+            minEnrollmentSamples: 1,
+            modelId: 'speaker-embedding.onnx',
+            unavailableReason: ''
+          }
+        });
+      }
+      if (method === 'voiceprint.completeEnrollment') {
+        return Promise.resolve({
+          voiceprint: {
+            enabled: true,
+            enrolled: true,
+            available: true,
+            status: 'ready',
+            lastScore: null,
+            threshold: 0.78,
+            uncertainThreshold: 0.72,
+            sampleCount: 1,
+            pendingSampleCount: 0,
+            minEnrollmentSamples: 1,
+            modelId: 'speaker-embedding.onnx',
+            unavailableReason: ''
+          }
+        });
+      }
+      if (method === 'voiceprint.setEnabled') {
+        return Promise.resolve({
+          voiceprint: {
+            enabled: Boolean(payload?.enabled),
+            enrolled: true,
+            available: true,
+            status: 'ready',
+            lastScore: null,
+            threshold: 0.78,
+            uncertainThreshold: 0.72,
+            sampleCount: 1,
+            pendingSampleCount: 0,
+            minEnrollmentSamples: 1,
+            modelId: 'speaker-embedding.onnx',
+            unavailableReason: ''
+          }
+        });
+      }
+      if (method === 'voiceprint.clear') {
+        return Promise.resolve({
+          voiceprint: {
+            enabled: false,
+            enrolled: false,
+            available: true,
+            status: 'disabled',
+            lastScore: null,
+            threshold: 0.78,
+            uncertainThreshold: 0.72,
+            sampleCount: 0,
+            pendingSampleCount: 0,
+            minEnrollmentSamples: 1,
+            modelId: 'speaker-embedding.onnx',
+            unavailableReason: ''
+          }
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText(/^settings$/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^voice$/i }));
+
+    expect(await screen.findByText(/train pixelpilot to wake only for your voice/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /record sample/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /finish training/i }));
+    expect(await screen.findByText(/protected/i)).toBeInTheDocument();
+    await userEvent.click(screen.getAllByRole('button', { name: /^turn off$/i })[1]);
+    await userEvent.click(screen.getByRole('button', { name: /^clear$/i }));
+
+    await waitFor(() => {
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('voiceprint.recordSample', { seconds: 2 });
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('voiceprint.completeEnrollment', undefined);
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('voiceprint.setEnabled', { enabled: false });
+      expect(controls.invokeRuntime).toHaveBeenCalledWith('voiceprint.clear', undefined);
+    });
+  });
+
+  it('keeps voiceprint enrollment buttons safe across disabled, busy, and error states', async () => {
+    const pendingRecord = createDeferred<{
+      voiceprint: RuntimeSnapshot['voiceprint'];
+    }>();
+    let recordAttempts = 0;
+    const initialVoiceprint: RuntimeSnapshot['voiceprint'] = {
+      enabled: false,
+      enrolled: false,
+      available: true,
+      status: 'disabled',
+      lastScore: null,
+      threshold: 0.78,
+      uncertainThreshold: 0.72,
+      sampleCount: 0,
+      pendingSampleCount: 0,
+      minEnrollmentSamples: 2,
+      embeddingDim: 0,
+      modelId: 'speaker-embedding.onnx',
+      modelPath: 'C:\\Users\\tester\\.pixelpilot\\models\\speaker-embedding.onnx',
+      unavailableReason: ''
+    };
+    const controls = setupApi('settings', makeSnapshot({ voiceprint: initialVoiceprint }));
+    controls.invokeRuntime.mockImplementation((method: string) => {
+      if (method === 'voiceprint.getStatus') {
+        return Promise.resolve({ voiceprint: initialVoiceprint });
+      }
+      if (method === 'voiceprint.recordSample') {
+        recordAttempts += 1;
+        if (recordAttempts === 1) {
+          return pendingRecord.promise;
+        }
+        return Promise.reject(new Error('Microphone unavailable'));
+      }
+      return Promise.resolve({ voiceprint: initialVoiceprint });
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText(/^settings$/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^voice$/i }));
+
+    const finishButton = await screen.findByRole('button', { name: /finish training/i });
+    expect(finishButton).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: /record sample/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /recording/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /turn on/i })).toBeDisabled();
+      expect(screen.getByRole('button', { name: /^clear$/i })).toBeDisabled();
+    });
+
+    await act(async () => {
+      pendingRecord.resolve({
+        voiceprint: {
+          ...initialVoiceprint,
+          pendingSampleCount: 1
+        }
+      });
+      await pendingRecord.promise;
+    });
+
+    expect(await screen.findByText('Record 2 clear samples. Current progress: 1 / 2.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /finish training/i })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: /record sample/i }));
+
+    expect(await screen.findByText(/microphone unavailable/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /record sample/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /finish training/i })).toBeDisabled();
+  });
+
+  it('saves startup choices from the behavior tab', async () => {
     const controls = setupApi('settings', makeSnapshot({ operationMode: 'SAFE', visionMode: 'OCR' }));
     controls.getStartupDefaults.mockResolvedValueOnce({
       operationMode: 'SAFE',
@@ -571,20 +851,41 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/settings hub/i)).toBeInTheDocument();
+    expect(await screen.findByText(/^settings$/i)).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /^startup$/i }));
-    expect(await screen.findByText(/^startup defaults$/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /^auto$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /^robo$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /save startup defaults/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^behavior$/i }));
+    expect(await screen.findByText(/^startup$/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /save current choices/i }));
 
     await waitFor(() => {
       expect(controls.setStartupDefaults).toHaveBeenCalledWith({
-        operationMode: 'AUTO',
-        visionMode: 'ROBO'
+        operationMode: 'SAFE',
+        visionMode: 'OCR'
       });
     });
+  });
+
+  it('disables settings runtime controls while the bridge is starting', async () => {
+    const controls = setupApi(
+      'settings',
+      makeSnapshot({
+        bridgeStatus: 'starting',
+        bridgeStatusMessage: 'Starting runtime...'
+      })
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(/^settings$/i)).toBeInTheDocument();
+    expect(screen.getByText(/settings will unlock/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign out/i })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: /^behavior$/i }));
+    expect(await screen.findByRole('button', { name: /auto/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /save current choices/i })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: /auto/i }));
+    expect(controls.invokeRuntime).not.toHaveBeenCalledWith('mode.set', expect.anything());
   });
 
   it('shows loading bridge state and disables runtime controls during startup', async () => {
@@ -601,6 +902,7 @@ describe('Electron renderer App', () => {
 
     const commandInput = await screen.findByPlaceholderText(/starting runtime/i);
     await userEvent.type(commandInput, 'hello');
+    expect(commandInput).toHaveAttribute('readonly');
     expect(screen.getByRole('button', { name: /run command/i })).toBeDisabled();
     expect(controls.invokeRuntime).not.toHaveBeenCalledWith('live.submitText', expect.anything());
   });
@@ -628,7 +930,7 @@ describe('Electron renderer App', () => {
     expect(await screen.findByLabelText(/pixelpilot status glow: launching the current project workspace/i)).toBeInTheDocument();
   });
 
-  it('renders the sessions section and wires resume and open-folder actions', async () => {
+  it('renders health session controls and wires resume and open-folder actions', async () => {
     const controls = setupApi(
       'settings',
       makeSnapshot({
@@ -671,14 +973,14 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/settings hub/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /^sessions$/i }));
+    expect(await screen.findByText(/^settings$/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^health$/i }));
 
-    expect(await screen.findByText(/manual resume and session log access for the current workspace/i)).toBeInTheDocument();
+    expect(await screen.findByText(/resume recent context or open the local session folder/i)).toBeInTheDocument();
     expect(screen.getByText(/recovered context from the deployment dashboard\./i)).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /^resume last context$/i }));
-    await userEvent.click(screen.getByRole('button', { name: /open session logs/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^resume$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /open logs/i }));
 
     await waitFor(() => {
       expect(controls.invokeRuntime).toHaveBeenCalledWith('session.resumeLatestContext');
@@ -688,7 +990,7 @@ describe('Electron renderer App', () => {
     expect(await screen.findByText(/resumed context from the deployment dashboard\./i)).toBeInTheDocument();
   });
 
-  it('renders the extensions and diagnostics sections and handles their actions', async () => {
+  it('renders health connector and checkup actions', async () => {
     const controls = setupApi(
       'settings',
       makeSnapshot({
@@ -716,6 +1018,13 @@ describe('Electron renderer App', () => {
     );
 
     controls.invokeRuntime.mockImplementation((method: string) => {
+      if (method === 'session.getLatestContext') {
+        return Promise.resolve({
+          session: {
+            available: false
+          }
+        });
+      }
       if (method === 'extensions.getSummary') {
         return Promise.resolve({
           extensions: {
@@ -767,25 +1076,25 @@ describe('Electron renderer App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/settings hub/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /^extensions$/i }));
+    expect(await screen.findByText(/^settings$/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^health$/i }));
 
-    expect(await screen.findByText(/plugin and mcp tool discovery with explicit local opt-in/i)).toBeInTheDocument();
+    expect(await screen.findByText(/plugins and mcp servers add local tools/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByText(/advanced health details/i));
     expect(screen.getByText(/plugin__demo__echo/i)).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /reload extensions/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^reload$/i }));
 
     await waitFor(() => {
       expect(controls.invokeRuntime).toHaveBeenCalledWith('extensions.reload');
     });
 
+    expect(await screen.findByText(/1 plugins, 1 MCP servers, 3 tools\./i)).toBeInTheDocument();
     expect(await screen.findByText(/plugin__demo__summarize/i)).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /^diagnostics$/i }));
-    expect(await screen.findByText(/run the shared doctor pipeline and copy the latest runtime health report/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /run diagnostics/i }));
-    await userEvent.click(screen.getByRole('button', { name: /copy doctor text/i }));
-    await userEvent.click(screen.getByRole('button', { name: /copy doctor json/i }));
+    await userEvent.click(screen.getByRole('button', { name: /run checkup/i }));
+    await userEvent.click(screen.getByRole('button', { name: /copy text/i }));
+    await userEvent.click(screen.getByRole('button', { name: /copy json/i }));
 
     await waitFor(() => {
       expect(controls.invokeRuntime).toHaveBeenCalledWith('doctor.run');
