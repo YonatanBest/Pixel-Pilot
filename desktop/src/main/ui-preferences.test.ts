@@ -52,4 +52,38 @@ describe('UiPreferencesStore', () => {
       statusNotchEnabled: false,
     });
   });
+
+  it('accepts legacy nested notch visibility shape', () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(
+      path.join(dir, 'ui-preferences.json'),
+      JSON.stringify({
+        cornerGlowEnabled: true,
+        notch: { visible: true },
+      }),
+      'utf-8'
+    );
+
+    expect(new UiPreferencesStore(dir).load()).toEqual({
+      cornerGlowEnabled: true,
+      statusNotchEnabled: true,
+    });
+  });
+
+  it('accepts legacy statusNotchVisible boolean', () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(
+      path.join(dir, 'ui-preferences.json'),
+      JSON.stringify({
+        cornerGlowEnabled: false,
+        statusNotchVisible: true,
+      }),
+      'utf-8'
+    );
+
+    expect(new UiPreferencesStore(dir).load()).toEqual({
+      cornerGlowEnabled: false,
+      statusNotchEnabled: true,
+    });
+  });
 });

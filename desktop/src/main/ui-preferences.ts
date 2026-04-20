@@ -14,14 +14,31 @@ function normalizeBoolean(value: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
+function readNestedBoolean(parent: unknown, key: string): boolean | undefined {
+  if (!parent || typeof parent !== 'object') {
+    return undefined;
+  }
+  const record = parent as Record<string, unknown>;
+  const value = record[key];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
 function normalizePreferences(payload: unknown): UiPreferences {
   if (!payload || typeof payload !== 'object') {
     return { ...defaults };
   }
   const candidate = payload as Record<string, unknown>;
+  const legacyNestedVisible =
+    readNestedBoolean(candidate.statusNotch, 'visible')
+    ?? readNestedBoolean(candidate.notch, 'visible');
+  const legacyVisible = typeof candidate.statusNotchVisible === 'boolean' ? candidate.statusNotchVisible : undefined;
+  const statusNotchEnabled =
+    typeof candidate.statusNotchEnabled === 'boolean'
+      ? candidate.statusNotchEnabled
+      : legacyVisible ?? legacyNestedVisible ?? defaults.statusNotchEnabled;
   return {
     cornerGlowEnabled: normalizeBoolean(candidate.cornerGlowEnabled, defaults.cornerGlowEnabled),
-    statusNotchEnabled: normalizeBoolean(candidate.statusNotchEnabled, defaults.statusNotchEnabled),
+    statusNotchEnabled,
   };
 }
 

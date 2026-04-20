@@ -666,11 +666,10 @@ export class WindowManager {
     }
 
     const activeStatus = statusSurfaceIsActive(this.currentSnapshot) || this.hasTransientGlow();
-    const notchActive = this.notchSurfaceIsVisible(this.currentSnapshot);
     const commandHidden = Boolean(this.currentSnapshot.backgroundHidden) && this.pendingConfirmations.size === 0;
     if (commandHidden) {
       this.overlayWindow?.hide();
-      if (notchActive && this.uiPreferences.statusNotchEnabled && !this.trayOnly) {
+      if (this.uiPreferences.statusNotchEnabled && !this.trayOnly) {
         this.anchorWindow('notch');
         this.notchWindow?.showInactive();
       } else {
