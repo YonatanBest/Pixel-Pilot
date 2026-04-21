@@ -324,8 +324,25 @@ describe('Electron renderer App', () => {
           hasApiKey: false,
           needsAuth: true,
           requestProvider: {
-            provider_id: 'openai'
-          }
+              provider_id: 'openai',
+              display_name: 'OpenAI',
+              mode_kind: 'request',
+              model: 'gpt-4o',
+              api_key_env: 'OPENAI_API_KEY',
+              has_api_key: false,
+              base_url: '',
+              capabilities: {
+                realtime: false,
+                request: true,
+                text_input: true,
+                image_input: true,
+                audio_input: false,
+                video_input: false,
+                text_output: true,
+                audio_output: false,
+                tool_calling: true
+              }
+            }
         }
       })
     );

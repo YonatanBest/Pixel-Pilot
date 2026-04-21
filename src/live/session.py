@@ -28,13 +28,7 @@ from config import Config, OperationMode
 from uac.detection import get_uac_prompt_state
 from uac.flow import get_uac_queue_gate, set_external_uac_mode
 from .broker import LiveActionBroker
-from .transports import (
-    BaseLiveTransport,
-    BackendGeminiLiveTransport,
-    DirectGeminiLiveTransport,
-    LiteLLMRequestLiveTransport,
-    OpenAIRealtimeTransport,
-)
+from .transports import BaseLiveTransport
 from .tools import LiveToolRegistry
 from tools import ui_automation
 from model_providers import get_live_provider_config
@@ -473,12 +467,11 @@ class LiveSessionManager(QObject):
 
     def _transport_cls(self):
         self._provider_config = get_live_provider_config()
-        provider_id = self._provider_config.provider_id
-        if provider_id == "openai" and self._provider_config.mode_kind == "realtime":
-            return OpenAIRealtimeTransport
-        if provider_id == "gemini" and self._provider_config.mode_kind == "realtime":
-            return DirectGeminiLiveTransport if Config.USE_DIRECT_API else BackendGeminiLiveTransport
-        return LiteLLMRequestLiveTransport
+        from .transport_factory import resolve_transport_cls
+        return resolve_transport_cls(
+            self._provider_config.provider_id,
+            self._provider_config.mode_kind,
+        )
 
     def _create_transport(self) -> BaseLiveTransport:
         cls = self._transport_cls()

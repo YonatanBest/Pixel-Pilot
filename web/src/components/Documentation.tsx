@@ -1,9 +1,12 @@
 import './Documentation.css';
 
 const envVars = [
-    { key: 'GEMINI_API_KEY', note: 'Optional for direct mode' },
+    { key: 'GEMINI_API_KEY', note: 'Primary provider API key (Direct Mode)' },
     { key: 'BACKEND_URL', note: 'Use for hosted backend mode' },
-    { key: 'WEB_URL', note: 'Browser-first sign-in and sign-up host' }
+    { key: 'WEB_URL', note: 'Browser-first sign-in and sign-up host' },
+    { key: 'WAKE_WORD_PHRASE', note: 'Custom wake: Hey Pixie (default)' },
+    { key: 'VOICEPRINT_ENABLED', note: 'Enable biometric speaker verification' },
+    { key: 'GATEWAY_TOKEN', note: 'Secure the remote control gateway' }
 ];
 
 export const Documentation = () => {
@@ -63,9 +66,10 @@ export const Documentation = () => {
                         <h3>Architecture</h3>
                         <ul className="doc-list">
                             <li><strong>Browser-First Auth</strong>: hosted sign-in/sign-up returns to the desktop through a deep-link handoff.</li>
-                            <li><strong>Live-Only Runtime</strong>: Gemini Live powers both typed and voice control paths.</li>
+                            <li><strong>Live-Only Runtime</strong>: Multi-provider Live and Realtime models power both typed and voice control paths.</li>
+                            <li><strong>Packaged Binaries</strong>: Runtime, Orchestrator (UAC), and Agent (Workspace) binaries built via PyInstaller.</li>
                             <li><strong>UAC Orchestrator</strong>: SYSTEM-level service for Secure Desktop interaction with per-request IPC.</li>
-                            <li><strong>Vision Pipeline</strong>: Dynamic selection between Gemini Robotics-ER and local OCR.</li>
+                            <li><strong>Vision Pipeline</strong>: Dynamic selection between Vision Foundation models and local OCR.</li>
                             <li><strong>Agent Desktop</strong>: Isolated workspace sandbox for safe background automation.</li>
                             <li><strong>SAFE Mode</strong>: Mutating Live actions require explicit user confirmation.</li>
                         </ul>
@@ -73,17 +77,28 @@ export const Documentation = () => {
 
                     <article className="doc-card">
                         <h3>Gateway (Optional)</h3>
-                        <p>Enable the gateway to submit remote commands into the same Gemini Live runtime used by the desktop UI.</p>
+                        <p>Enable the gateway to submit remote commands into the same Live runtime used by the desktop UI.</p>
                         <p className="doc-muted">Protect it with <code>PIXELPILOT_GATEWAY_TOKEN</code>.</p>
                     </article>
 
                     <article className="doc-card">
                         <h3>Troubleshooting & Uninstall</h3>
                         <ul className="doc-list">
-                            <li>Verify <code>GEMINI_API_KEY</code> for direct mode, or confirm <code>BACKEND_URL</code> and hosted auth services for backend mode.</li>
+                            <li>Verify <code>GEMINI_API_KEY</code> or equivalent provider key for direct mode, or confirm <code>BACKEND_URL</code> for hosted mode.</li>
                             <li>Re-run <code>python install.py</code> as admin for UAC tasks.</li>
                         </ul>
                         <pre className="doc-code">$ python uninstall.py</pre>
+                    </article>
+
+                    <article className="doc-card glass-panel">
+                        <h3>Technical Capabilities</h3>
+                        <p>PixelPilot supports a wide array of foundations for vision and execution:</p>
+                        <ul className="doc-list">
+                            <li><strong>Vision</strong>: Native Robotics-ER, EasyOCR-ONNX, OpenCV.</li>
+                            <li><strong>Live Sessions</strong>: Gemini 1.5/2.0/3.0, GPT-4o, OpenAI Realtime.</li>
+                            <li><strong>Request Models</strong>: Claude 3.5+, Grok, Llama 3 (Ollama), DeepSeek.</li>
+                            <li><strong>Safety</strong>: Granular Tool Policies (settings.json), Safe Confirmation Mode.</li>
+                        </ul>
                     </article>
                 </div>
 

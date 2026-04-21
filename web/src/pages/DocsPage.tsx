@@ -11,7 +11,7 @@ const gettingStarted = [
     {
         title: 'Choose an auth path',
         detail:
-            'Use browser sign-in or browser sign-up for hosted backend mode, or paste a Gemini API key to run in direct mode without an account gate.'
+            'Use browser sign-in or browser sign-up for hosted backend mode, or paste a provider API key to run in direct mode without an account gate.'
     },
     {
         title: 'Operate from one shell',
@@ -34,7 +34,7 @@ const architectureLayers = [
     {
         title: 'Python runtime',
         detail:
-            'The runtime coordinates Gemini Live, automation policies, session state, hotkeys, UAC flow, tool routing, and activity logging.'
+            'The runtime coordinates Live sessions, automation policies, session state, hotkeys, UAC flow, tool routing, and activity logging.'
     },
     {
         title: 'Automation and perception',
@@ -44,20 +44,20 @@ const architectureLayers = [
     {
         title: 'Optional backend',
         detail:
-            'FastAPI provides hosted auth, desktop code redemption, OCR services, Gemini key brokerage, and a JWT-protected Live relay for signed-in users.'
+            'FastAPI provides hosted auth, desktop code redemption, OCR services, API key brokerage, and a JWT-protected Live relay for signed-in users.'
     }
 ];
 
 const codebaseMap = [
     { name: 'desktop/', detail: 'Electron main process, preload bridge, renderer UI, packaging, and desktop deep-link integration.' },
     { name: 'web/', detail: 'Landing site, hosted auth pages, and public documentation surfaces.' },
-    { name: 'src/runtime/', detail: 'Runtime bridge commands, auth status, startup snapshot building, and Electron-facing runtime service glue.' },
-    { name: 'src/live/', detail: 'Gemini Live session lifecycle, brokered action execution, tool declarations, and reconnect behavior.' },
+    { name: 'src/runtime/', detail: 'Bootstrap entry for the packaged runtime binary, bridge commands, and auth status.' },
+    { name: 'src/live/', detail: 'Native Live and Realtime orchestration, brokered action execution, and reconnect behavior.' },
     { name: 'src/tools/', detail: 'Desktop action tools, OCR routing, app indexing, and lower-level execution helpers.' },
-    { name: 'src/uac/', detail: 'Secure Desktop detection, orchestrator messaging, IPC helpers, and elevation-specific control paths.' },
-    { name: 'src/services/', detail: 'Gateway and service-level integrations that sit beside the main runtime.' },
-    { name: 'src/auth_manager.py', detail: 'Desktop auth flow orchestration, browser-flow state, secure token persistence, and backend handoff redemption.' },
-    { name: 'backend/', detail: 'FastAPI routes, OAuth/JWT auth logic, Redis-backed limits, OCR services, and backend Gemini Live relay.' }
+    { name: 'src/uac/', detail: 'SYSTEM-level orchestrator, Secure Desktop detection, and elevation-specific control paths.' },
+    { name: 'src/wakeword/', detail: 'OpenWakeWord integration for "Hey Pixie" and VAD logic.' },
+    { name: 'src/auth_manager.py', detail: 'Desktop auth flow orchestration, secure token persistence, and backend handoff redemption.' },
+    { name: 'backend/', detail: 'FastAPI routes, Google OAuth, Redis-backed limits, OCR services, and secure Live relay.' }
 ];
 
 const operatorFeatures = [
@@ -72,13 +72,13 @@ const operatorFeatures = [
     {
         title: 'Direct mode',
         bullets: [
-            'A local Gemini API key can bypass backend auth entirely.',
+            'A local provider API key can bypass backend auth entirely.',
             'Direct mode keeps the desktop usable when a hosted backend is not desired.',
-            'The auth gate clearly separates direct Gemini usage from hosted account mode.'
+            'The auth gate clearly separates direct provider usage from hosted account mode.'
         ]
     },
     {
-        title: 'Gemini Live runtime',
+        title: 'Live runtime',
         bullets: [
             'Typed and voice control share one Live-first runtime model.',
             'Session connection is explicit, and voice capture is no longer forced at startup.',
@@ -86,9 +86,10 @@ const operatorFeatures = [
         ]
     },
     {
-        title: 'Automation model',
+        title: 'Automation model & Permissions',
         bullets: [
-            'GUIDANCE is read-only coaching, SAFE requires approval for mutations, and AUTO runs mutating actions without per-step confirmation.',
+            'GUIDANCE is read-only coaching, SAFE requires approval for mutations, and AUTO runs actions automatically.',
+            'Granular permissions via settings.json: allow, deny, or ask for specific tools like Browser(open) or Media(*).',
             'Hotkeys work globally even when the overlay is unfocused.',
             'Agent Desktop isolation remains available for separated task execution.'
         ]
@@ -120,7 +121,7 @@ const contributionGuide = [
     {
         title: 'Develop locally with explicit mode choices',
         detail:
-            'Use a local GEMINI_API_KEY for direct mode, or point BACKEND_URL and WEB_URL at your hosted or local auth stack for backend mode.'
+            'Use a local provider API key (GEMINI_API_KEY) for direct mode, or point BACKEND_URL and WEB_URL at your hosted or local auth stack for backend mode.'
     },
     {
         title: 'Respect the Windows packaging path',
@@ -156,8 +157,8 @@ const docsSections = [
     {
         title: 'Environment',
         items: [
-            ['Repo root .env', 'Desktop runtime config such as GEMINI_API_KEY, BACKEND_URL, and WEB_URL.'],
-            ['backend/.env', 'Hosted service secrets for MongoDB, Redis, JWT, Google OAuth, and backend Gemini services.'],
+            ['Repo root .env', 'Desktop runtime config such as provider API keys, BACKEND_URL, and WEB_URL.'],
+            ['backend/.env', 'Hosted service secrets for MongoDB, Redis, JWT, Google OAuth, and backend Live services.'],
             ['web/.env.local', 'Frontend build-time values such as VITE_BACKEND_URL for hosted auth pages.']
         ]
     },
@@ -188,7 +189,7 @@ export const DocsPage = () => {
                     <h1>Product Guide, Architecture Map, and Contributor Handbook</h1>
                     <p>
                         PixelPilot is a Windows desktop automation agent with a browser-first hosted auth
-                        flow, a Gemini direct mode, a Live-first runtime, and optional backend services for
+                        flow, a direct provider mode, a Live-first runtime, and optional backend services for
                         OCR and authenticated sessions. These docs cover how it works, how the codebase is
                         organized, and how to contribute safely.
                     </p>

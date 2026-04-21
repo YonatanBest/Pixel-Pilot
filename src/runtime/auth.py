@@ -6,18 +6,12 @@ from typing import Any
 
 from auth_manager import get_auth_manager
 from config import Config
-from model_providers import get_live_provider_config, get_request_provider_config, normalize_provider_id
-
-
-_PROVIDER_KEY_ENV = {
-    "gemini": "GEMINI_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "xai": "XAI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
-    "vercel_ai_gateway": "VERCEL_AI_GATEWAY_API_KEY",
-}
+from model_providers import (
+    PROVIDER_KEY_ENVS as _PROVIDER_KEY_ENV,
+    get_live_provider_config,
+    get_request_provider_config,
+    normalize_provider_id,
+)
 
 
 def get_auth_state() -> dict[str, Any]:

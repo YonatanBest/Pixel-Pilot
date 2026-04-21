@@ -1,3 +1,26 @@
+export type ProviderCapabilities = {
+  realtime: boolean;
+  request: boolean;
+  text_input: boolean;
+  image_input: boolean;
+  audio_input: boolean;
+  video_input: boolean;
+  text_output: boolean;
+  audio_output: boolean;
+  tool_calling: boolean;
+};
+
+export type ProviderInfo = {
+  provider_id: string;
+  display_name: string;
+  mode_kind: string;
+  model: string;
+  api_key_env: string;
+  has_api_key: boolean;
+  base_url: string;
+  capabilities: ProviderCapabilities;
+};
+
 export type AuthState = {
   signedIn: boolean;
   directApi: boolean;
@@ -6,8 +29,8 @@ export type AuthState = {
   backendUrl: string;
   hasApiKey: boolean;
   needsAuth: boolean;
-  requestProvider?: Record<string, unknown>;
-  liveProvider?: Record<string, unknown>;
+  requestProvider?: ProviderInfo;
+  liveProvider?: ProviderInfo;
 };
 
 export type MessageEntry = {

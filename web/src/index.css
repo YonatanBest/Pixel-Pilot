@@ -1,30 +1,27 @@
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  /* Brand Colors */
-  --color-primary: #4a8fd7;
-  --color-secondary: #7cb6f0;
+  /* Mission Control Palette */
+  --color-primary: #00f0ff;
+  --color-secondary: #00a8ff;
   --color-accent: #d7e5f5;
 
-  /* Backgrounds */
-  --color-bg: #080b10;
-  --color-surface: #10161f;
+  /* Deep Backgrounds */
+  --color-bg: #030508;
+  --color-surface: rgba(16, 22, 31, 0.6);
+  --color-border: rgba(0, 240, 255, 0.1);
 
-  /* Text */
+  /* Vibrant Text */
   --color-text: #f5f8fc;
-  --color-text-muted: #96a3b4;
+  --color-text-muted: #6b7c93;
 
-  /* Typography */
+  /* Branding */
   --font-sans: 'Manrope', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 
-  /* Spacing */
-  --space-xs: 0.5rem;
-  --space-sm: 1rem;
-  --space-md: 2rem;
-  --space-lg: 4rem;
-  --space-xl: 8rem;
-  --space-2xl: 12rem;
+  /* Shadows & Glows */
+  --shadow-glow: 0 0 20px rgba(0, 240, 255, 0.15);
+  --glass-bg: blur(12px) saturate(180%);
 }
 
 * {
@@ -86,14 +83,32 @@ select {
 
 /* Utilities */
 .container {
-  max-width: 1400px;
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 0 2rem;
+  padding: 0 4rem;
 }
 
-.text-gradient,
+.glass-panel {
+  background: var(--color-surface);
+  backdrop-filter: var(--glass-bg);
+  -webkit-backdrop-filter: var(--glass-bg);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-glow);
+}
+
+.glow-primary {
+  box-shadow: 0 0 30px rgba(0, 240, 255, 0.2);
+}
+
 .text-brand-gradient {
-  color: var(--color-text);
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-secondary) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.mission-gradient {
+  background: radial-gradient(80% 80% at 50% 20%, rgba(0, 240, 255, 0.08) 0%, transparent 100%);
 }
 
 /* Noise Texture Overlay */

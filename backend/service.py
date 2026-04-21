@@ -1,9 +1,18 @@
-import base64
 import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared.provider_catalog import (
+    api_key_for,
+    base_url_for,
+    litellm_model_name,
+    normalize_provider_id,
+)
 
 load_dotenv()
 
@@ -17,48 +26,8 @@ class GenerationRequest(BaseModel):
 
 
 def _provider() -> str:
-    return str(os.getenv("PIXELPILOT_MODEL_PROVIDER") or os.getenv("AI_PROVIDER") or "gemini").strip().lower()
-
-
-def _api_key_for(provider: str) -> str:
-    env_name = {
-        "gemini": "GEMINI_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "claude": "ANTHROPIC_API_KEY",
-        "xai": "XAI_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-        "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
-        "vercel_ai_gateway": "VERCEL_AI_GATEWAY_API_KEY",
-    }.get(provider, "")
-    return str(os.getenv(env_name, "")).strip() if env_name else ""
-
-
-def _base_url_for(provider: str) -> str:
-    if provider == "ollama":
-        return str(os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).strip()
-    if provider == "openai_compatible":
-        return str(os.getenv("OPENAI_COMPATIBLE_BASE_URL", "")).strip()
-    if provider == "vercel_ai_gateway":
-        return str(os.getenv("VERCEL_AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")).strip()
-    return ""
-
-
-def _litellm_model_name(provider: str, model: str) -> str:
-    clean = str(model or "").strip()
-    if "/" in clean:
-        return clean
-    if provider == "gemini":
-        return f"gemini/{clean}"
-    if provider in {"anthropic", "claude"}:
-        return f"anthropic/{clean}"
-    if provider == "xai":
-        return f"xai/{clean}"
-    if provider == "openrouter":
-        return f"openrouter/{clean}"
-    if provider == "ollama":
-        return f"ollama/{clean}"
-    return clean
+    raw = os.getenv("PIXELPILOT_MODEL_PROVIDER") or os.getenv("AI_PROVIDER") or "gemini"
+    return normalize_provider_id(raw)
 
 
 def _content_to_message(item: dict[str, Any]) -> dict[str, Any]:
@@ -128,12 +97,12 @@ async def generate_content(request: GenerationRequest):
     config_data.pop("thinking_config", None)
 
     kwargs: dict[str, Any] = {
-        "model": _litellm_model_name(provider, request.model),
+        "model": litellm_model_name(provider, request.model),
         "messages": [_content_to_message(item) for item in request.contents],
         **config_data,
     }
-    api_key = _api_key_for(provider)
-    base_url = _base_url_for(provider)
+    api_key = api_key_for(provider, os.getenv)
+    base_url = base_url_for(provider, os.getenv)
     if api_key:
         kwargs["api_key"] = api_key
     if base_url:

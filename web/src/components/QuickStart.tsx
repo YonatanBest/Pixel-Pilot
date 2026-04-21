@@ -5,7 +5,7 @@ import { Magnetic } from './Magnetic';
 
 const commands = [
     { text: "Install the desktop control room", output: "The installer wires up deep links and stages the runtime helpers." },
-    { text: "Choose your connection path", output: "Use hosted sign-in or bring your own Gemini API key for direct mode." },
+    { text: "Choose your connection path", output: "Use hosted sign-in or bring your own provider API key for direct mode." },
     { text: "Set the automation posture", output: "Pick Guidance, Safe, or Auto based on how much autonomy you want." },
     { text: "Open the field manual", output: "Review hosted auth, backend setup, and troubleshooting in one pass." }
 ];

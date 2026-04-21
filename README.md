@@ -18,10 +18,12 @@ PixelPilot is a Windows desktop AI agent for real computer work. It combines a d
 ## What PixelPilot Does
 
 - Runs as a Windows desktop agent with a compact overlay UI.
-- Uses PixelPilot Live for typed and voice-driven interaction with native realtime providers, and typed request-mode fallback for providers such as Claude, xAI, OpenRouter, and Ollama.
+- Uses PixelPilot Live for typed and voice-driven interaction with native realtime providers (Gemini, OpenAI) plus local Ollama live mode with local ASR input and text replies.
 - Automates desktop tasks with keyboard, mouse, UI Automation, OCR, and vision fallbacks.
+- Supports "Hey Pixie" Wake Word detection for hands-free interaction.
+- Supports Speaker Identification (Voiceprint) for personalized/secure control.
 - Supports browser-first account login for hosted backend mode.
-- Supports direct mode with provider keys such as `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`, or a local Ollama endpoint.
+- Supports direct mode with provider keys such as `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`, `VERCEL_AI_GATEWAY_API_KEY`, or a local Ollama endpoint.
 
 ## Main Modes
 
@@ -29,12 +31,28 @@ PixelPilot is a Windows desktop AI agent for real computer work. It combines a d
 - `SAFE`: mutating actions require confirmation.
 - `AUTO`: mutating actions run without per-step confirmation.
 
+## Operation & Permissions
+
+PixelPilot uses a granular permission system via `settings.json`. You can define rules for specific tools:
+
+```json
+{
+  "toolPolicy": {
+    "allow": ["Browser(open)", "Media(*)"],
+    "deny": ["System(lock)"],
+    "ask": ["*"]
+  }
+}
+```
+
+Rules support exact matches or wildcards (`*`).
+
 ## Login Model
 
 PixelPilot supports two primary ways to start:
 
 1. `Direct mode`
-   Add a provider key locally, or configure `PIXELPILOT_MODEL_PROVIDER=ollama`, and launch the app without a login gate.
+   Add a provider key locally, or configure `PIXELPILOT_MODEL_PROVIDER=ollama` and `PIXELPILOT_LIVE_PROVIDER=ollama`, and launch the app without a login gate.
 
 2. `Hosted backend mode`
    Configure `BACKEND_URL`, launch the app, and sign in from the browser. The browser returns to the desktop app through the `pixelpilot://` deep-link flow.
@@ -54,6 +72,8 @@ Use the Windows installer and launch PixelPilot.
    ```env
    PIXELPILOT_MODEL_PROVIDER=gemini
    PIXELPILOT_LIVE_PROVIDER=gemini
+   PIXELPILOT_MODEL=gemini-3-flash-preview
+   PIXELPILOT_LIVE_MODEL=gemini-3.1-flash-live-preview
    GEMINI_API_KEY=your_api_key_here
    BACKEND_URL=http://localhost:8000
    WEB_URL=http://localhost:5173
@@ -120,7 +140,12 @@ VITE_BACKEND_URL=http://localhost:8000
 ## Project Structure
 
 - `desktop/`: Electron shell, renderer UI, preload bridge, Windows packaging.
-- `src/`: Python runtime, Live orchestration, automation, diagnostics, auth state, UAC flow.
+- `src/`: Python runtime containing:
+  - `live/`: Gemini Live, OpenAI Realtime, and local Ollama live orchestration.
+  - `tools/`: Automation tools, OCR, and app indexing.
+  - `uac/`: SYSTEM-level orchestrator for Secure Desktop / UAC prompts.
+  - `wakeword/`: OpenWakeWord detection logic ("Hey Pixie").
+  - `runtime/`: Bootstrap and service glue for packaged binaries.
 - `backend/`: FastAPI auth, Google OAuth, OCR services, rate limits, Live relay.
 - `web/`: landing site, hosted auth pages, public docs.
 
@@ -137,11 +162,15 @@ npm run build
 
 # Python diagnostics
 python src/main.py doctor
+
+# Build packaged runtime binaries
+python scripts/build_runtime.py
 ```
 
 ## Troubleshooting
 
 - No login-free startup: check `PIXELPILOT_MODEL_PROVIDER` and the matching provider key or `OLLAMA_BASE_URL`.
+- Ollama local live mode: install `gemma4:e2b-it-bf16`, keep `OLLAMA_BASE_URL=http://localhost:11434`, and install `faster-whisper` from `requirements.txt`.
 - Hosted sign-in issues: check `BACKEND_URL`, `WEB_URL`, MongoDB, Redis, and Google OAuth config.
 - Runtime issues: check `logs/pixelpilot.log`.
 - UAC issues: reinstall from the MSI as Administrator.

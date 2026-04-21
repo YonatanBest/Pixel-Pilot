@@ -4,39 +4,44 @@ import './Features.css';
 
 const features = [
   {
-    title: 'Vision-First Automation',
-    desc: 'Understands on-screen context with Gemini Robotics-ER and local OCR fallback.',
+    title: 'Multi-Provider Live',
+    desc: 'High-frequency Live sessions powered by native Realtime models and LiteLLM fallbacks for omni-provider coverage.',
     id: '01'
   },
   {
-    title: 'Gemini Live Sessions',
-    desc: 'Default-on live voice and text runtime with reconnect continuity and stop safety.',
+    title: 'Automated Perception',
+    desc: 'Understands on-screen context via high-performance Vision Foundation models and local OCR foundations.',
     id: '02'
   },
   {
-    title: 'UI Automation Core',
-    desc: 'Blind-first snapshots, window focus, UI element targeting, and text extraction.',
+    title: 'Isolated Workspaces',
+    desc: 'Execution takes place in an isolated desktop sandbox (Agent Desktop) for surgical, reliable automation.',
     id: '03'
   },
   {
-    title: 'Adaptive Safety Modes',
-    desc: 'Guidance, Safe, and Auto execution designed for different trust levels.',
+    title: 'Secure Desktop Agency',
+    desc: 'A robust UAC orchestrator extends control into elevated prompts and protected OS surfaces.',
     id: '04'
   },
   {
-    title: 'Live Decision Loop',
-    desc: 'Plans, verifies, and corrects actions while tasks are still in motion.',
+    title: 'Adaptive Safety Protocols',
+    desc: 'Autonomous execution with granular logic layers: Guidance, Safe, and Full Autonomy modes.',
     id: '05'
   },
   {
-    title: 'Agent Desktop',
-    desc: 'Runs in an isolated desktop workspace for clean, reliable automation.',
+    title: 'Native Wake Word',
+    desc: 'Near-instant command activation via privacy-first, local "Hey Pixie" wake word detection.',
     id: '06'
   },
   {
-    title: 'Secure Desktop Coverage',
-    desc: 'UAC orchestration extends control into elevated and protected prompts.',
+    title: 'Biometric Voice ID',
+    desc: 'Verify authorized operator presence through secure, local voiceprint enrollment and verification.',
     id: '07'
+  },
+  {
+    title: 'Live Decision Loop',
+    desc: 'The agent plans, verifies, and self-corrects in real-time as tasks evolve dynamically on screen.',
+    id: '08'
   }
 ];
 

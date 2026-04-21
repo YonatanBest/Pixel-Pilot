@@ -1,7 +1,34 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared.provider_catalog import (
+    PROVIDER_BASE_URL_ENVS,
+    PROVIDER_DISPLAY_NAMES,
+    PROVIDER_KEY_ENVS,
+    api_key_for as _catalog_api_key_for,
+    base_url_for as _catalog_base_url_for,
+    litellm_model_name,
+    normalize_provider_id,
+)
+
+__all__ = [
+    "ModelCapabilities",
+    "ProviderConfig",
+    "PROVIDER_KEY_ENVS",
+    "normalize_provider_id",
+    "litellm_model_name",
+    "resolve_request_provider",
+    "resolve_live_provider",
+    "get_request_provider_config",
+    "get_live_provider_config",
+    "live_provider_is_direct",
+    "provider_catalog_payload",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,46 +69,6 @@ class ProviderConfig:
         return payload
 
 
-def normalize_provider_id(value: Any, *, default: str = "gemini") -> str:
-    key = str(value or "").strip().lower()
-    aliases = {
-        "": default,
-        "google": "gemini",
-        "google-gemini": "gemini",
-        "claude": "anthropic",
-        "anthropic-claude": "anthropic",
-        "grok": "xai",
-        "x.ai": "xai",
-        "openai-compatible": "openai_compatible",
-        "compatible": "openai_compatible",
-        "vercel": "vercel_ai_gateway",
-        "vercel-ai-gateway": "vercel_ai_gateway",
-        "ai-gateway": "vercel_ai_gateway",
-    }
-    key = aliases.get(key, key)
-    return key if key in _PROVIDER_DISPLAY_NAMES else default
-
-
-def litellm_model_name(provider_id: str, model: str) -> str:
-    provider = normalize_provider_id(provider_id)
-    clean_model = str(model or "").strip()
-    if "/" in clean_model:
-        return clean_model
-    if provider == "gemini":
-        return f"gemini/{clean_model}"
-    if provider == "anthropic":
-        return f"anthropic/{clean_model}"
-    if provider == "xai":
-        return f"xai/{clean_model}"
-    if provider == "openrouter":
-        return f"openrouter/{clean_model}"
-    if provider == "ollama":
-        return f"ollama/{clean_model}"
-    if provider == "vercel_ai_gateway":
-        return clean_model
-    return clean_model
-
-
 def get_request_provider_config(
     *,
     provider_id: str | None = None,
@@ -99,6 +86,9 @@ def get_request_provider_config(
         model=selected_model,
         config=Config,
     )
+
+
+resolve_request_provider = get_request_provider_config
 
 
 def get_live_provider_config(
@@ -133,6 +123,9 @@ def get_live_provider_config(
     )
 
 
+resolve_live_provider = get_live_provider_config
+
+
 def live_provider_is_direct() -> bool:
     provider = get_live_provider_config()
     if provider.provider_id == "gemini":
@@ -142,16 +135,31 @@ def live_provider_is_direct() -> bool:
     return bool(provider.mode_kind == "request" and (provider.api_key or provider.is_local))
 
 
+def provider_catalog_payload() -> list[dict[str, Any]]:
+    result = []
+    for pid, display in PROVIDER_DISPLAY_NAMES.items():
+        result.append({
+            "provider_id": pid,
+            "display_name": display,
+            "api_key_env": PROVIDER_KEY_ENVS.get(pid, ""),
+            "has_base_url": pid in PROVIDER_BASE_URL_ENVS,
+            "is_local": pid == "ollama",
+        })
+    return result
+
+
 def _build_provider_config(*, provider_id: str, mode_kind: str, model: str, config: Any) -> ProviderConfig:
-    api_key_env = _PROVIDER_KEY_ENVS.get(provider_id, "")
+    import os
+    api_key_env = PROVIDER_KEY_ENVS.get(provider_id, "")
     api_key = str(getattr(config, api_key_env, "") or "") if api_key_env else ""
-    base_url_attr = _PROVIDER_BASE_URL_ATTRS.get(provider_id, "")
-    base_url = str(getattr(config, base_url_attr, "") or "") if base_url_attr else ""
     if provider_id == "gemini" and not api_key:
         api_key = str(getattr(config, "GEMINI_API_KEY", "") or "")
+    base_url_env = PROVIDER_BASE_URL_ENVS.get(provider_id, "")
+    base_url_attr = base_url_env
+    base_url = str(getattr(config, base_url_attr, "") or "") if base_url_attr else ""
     return ProviderConfig(
         provider_id=provider_id,
-        display_name=_PROVIDER_DISPLAY_NAMES[provider_id],
+        display_name=PROVIDER_DISPLAY_NAMES[provider_id],
         mode_kind=mode_kind,
         model=model,
         api_key_env=api_key_env,
@@ -183,40 +191,10 @@ def _capabilities_for(provider_id: str, *, mode_kind: str) -> ModelCapabilities:
             audio_output=True,
             tool_calling=True,
         )
-    if provider == "ollama":
-        return ModelCapabilities(request=True, image_input=True, tool_calling=True)
     return ModelCapabilities(request=True, image_input=True, tool_calling=True)
 
 
-_PROVIDER_DISPLAY_NAMES = {
-    "gemini": "Google Gemini",
-    "openai": "OpenAI",
-    "anthropic": "Anthropic Claude",
-    "xai": "xAI",
-    "openrouter": "OpenRouter",
-    "ollama": "Ollama",
-    "openai_compatible": "OpenAI-compatible",
-    "vercel_ai_gateway": "Vercel AI Gateway",
-}
-
-_PROVIDER_KEY_ENVS = {
-    "gemini": "GEMINI_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "xai": "XAI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "ollama": "",
-    "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
-    "vercel_ai_gateway": "VERCEL_AI_GATEWAY_API_KEY",
-}
-
-_PROVIDER_BASE_URL_ATTRS = {
-    "openai_compatible": "OPENAI_COMPATIBLE_BASE_URL",
-    "ollama": "OLLAMA_BASE_URL",
-    "vercel_ai_gateway": "VERCEL_AI_GATEWAY_BASE_URL",
-}
-
-_DEFAULT_REQUEST_MODELS = {
+_DEFAULT_REQUEST_MODELS: dict[str, str] = {
     "gemini": "gemini-3-flash-preview",
     "openai": "gpt-5.4",
     "anthropic": "claude-sonnet-4-5",
@@ -227,7 +205,7 @@ _DEFAULT_REQUEST_MODELS = {
     "vercel_ai_gateway": "openai/gpt-5.4",
 }
 
-_DEFAULT_LIVE_MODELS = {
+_DEFAULT_LIVE_MODELS: dict[str, str] = {
     "gemini": "gemini-3.1-flash-live-preview",
     "openai": "gpt-realtime",
 }

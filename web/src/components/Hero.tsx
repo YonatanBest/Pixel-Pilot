@@ -1,18 +1,38 @@
+import { useState, useEffect } from 'react';
 import { motion, useScroll, useTransform } from 'framer-motion';
 import { Magnetic } from './Magnetic';
 import './Hero.css';
+
+const missionLogs = [
+    "Initializing hardware bridge...",
+    "Scanning desktop for UI depth...",
+    "Provider handshake established.",
+    "Bypassing runtime gate via direct key...",
+    "Securing UAC orchestrator handoff...",
+    "Deploying vision foundation model...",
+    "Isolated Agent Desktop: STANDBY.",
+    "Ready for mission commands."
+];
 
 export const Hero = () => {
     const { scrollY } = useScroll();
     const y1 = useTransform(scrollY, [0, 500], [0, 200]);
     const y2 = useTransform(scrollY, [0, 500], [0, -100]);
+    const [logIndex, setLogIndex] = useState(0);
+
+    useEffect(() => {
+        const timer = setInterval(() => {
+            setLogIndex(prev => (prev + 1) % missionLogs.length);
+        }, 2400);
+        return () => clearInterval(timer);
+    }, []);
 
     const scrollToQuickStart = () => {
         document.getElementById('quickstart')?.scrollIntoView({ behavior: 'smooth' });
     };
 
     return (
-        <section className="hero-container">
+        <section className="hero-container mission-gradient">
             <div className="hero-content">
                 <motion.div style={{ y: y1 }} className="hero-header">
                     <motion.h1
@@ -40,16 +60,27 @@ export const Hero = () => {
                     transition={{ delay: 0.5, duration: 1 }}
                     className="hero-description-wrapper"
                 >
+                    <div className="mission-log glass-panel">
+                        <span className="log-prompt">&gt;</span>
+                        <motion.span 
+                            key={logIndex}
+                            initial={{ opacity: 0, x: 5 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            className="log-text"
+                        >
+                            {missionLogs[logIndex]}
+                        </motion.span>
+                    </div>
+
                     <p className="hero-desc">
-                        A cinematic control surface for desktop automation, powered by Gemini Live.
-                        <br />
-                        Explore the runtime, browser-first account flow, and operator model in one sharp interface.
+                        A cinematic command room for desktop autonomy.
+                        Orchestrate native Live sessions, isolated workspaces, and secure desktop coverage in one sharp interface.
                     </p>
 
                     <div className="hero-actions">
                         <Magnetic strength={0.3}>
-                            <button className="btn-mag-primary" onClick={scrollToQuickStart}>
-                                Enter The Launch Path
+                            <button className="btn-mag-primary glow-primary" onClick={scrollToQuickStart}>
+                                Initiate Launch Sequence
                             </button>
                         </Magnetic>
                     </div>

@@ -58,10 +58,32 @@
     line-height: 1.5;
 }
 
+.mission-log {
+    display: inline-flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1.5rem;
+    border-radius: 12px;
+    margin-bottom: 2rem;
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    letter-spacing: 0.02em;
+}
+
+.log-prompt {
+    color: var(--color-primary);
+    font-weight: 700;
+}
+
+.log-text {
+    color: var(--color-text);
+    opacity: 0.9;
+}
+
 .btn-mag-primary {
     background: rgba(255, 255, 255, 0.03);
     color: var(--color-text);
-    border: 1px solid rgba(124, 182, 240, 0.22);
+    border: 1px solid rgba(0, 240, 255, 0.22);
     padding: 1.25rem 3rem;
     border-radius: 999px;
     font-size: 1rem;
@@ -69,13 +91,17 @@
     cursor: pointer;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+    transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .btn-mag-primary:hover {
     transform: scale(1.05);
-    background: rgba(124, 182, 240, 0.08);
-    border-color: rgba(124, 182, 240, 0.35);
+    background: rgba(0, 240, 255, 0.08);
+    border-color: rgba(0, 240, 255, 0.35);
+}
+
+.btn-mag-primary.glow-primary:hover {
+    box-shadow: 0 0 30px rgba(0, 240, 255, 0.2);
 }
 
 .scroll-indicator {

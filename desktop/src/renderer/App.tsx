@@ -17,7 +17,6 @@ import {
   Monitor,
   PanelTop,
   Search,
-  Settings2,
   Shield,
   X
 } from 'lucide-react';
@@ -34,6 +33,7 @@ import type {
   SessionContextSummary,
   SidecarFrame,
   StartupDefaultsSnapshot,
+  UiPreferences,
   VoiceprintStatus,
   WindowKind
 } from '@shared/types.js';
@@ -2577,7 +2577,7 @@ function BehaviorSettingsPanel({
     }
   };
 
-  const updatePreference = async (action: string, payload: Partial<typeof defaultUiPreferences>): Promise<void> => {
+  const updatePreference = async (action: string, payload: Partial<UiPreferences>): Promise<void> => {
     if (disabled || busyAction) {
       return;
     }
