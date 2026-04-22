@@ -667,19 +667,28 @@ export class WindowManager {
 
     const activeStatus = statusSurfaceIsActive(this.currentSnapshot) || this.hasTransientGlow();
     const commandHidden = Boolean(this.currentSnapshot.backgroundHidden) && this.pendingConfirmations.size === 0;
+    const notchShouldShow =
+      this.uiPreferences.statusNotchEnabled
+      && !this.trayOnly
+      && this.notchSurfaceIsVisible(this.currentSnapshot);
     if (commandHidden) {
       this.overlayWindow?.hide();
-      if (this.uiPreferences.statusNotchEnabled && !this.trayOnly) {
+      if (notchShouldShow) {
         this.anchorWindow('notch');
         this.notchWindow?.showInactive();
       } else {
         this.notchWindow?.hide();
       }
     } else {
-      this.notchWindow?.hide();
       this.anchorWindow('overlay');
       this.overlayWindow?.setAlwaysOnTop(false);
       this.overlayWindow?.show();
+      if (notchShouldShow) {
+        this.anchorWindow('notch');
+        this.notchWindow?.showInactive();
+      } else {
+        this.notchWindow?.hide();
+      }
     }
 
     if (activeStatus && this.uiPreferences.cornerGlowEnabled) {
