@@ -1,4 +1,14 @@
 {
   "pythonVersion": "3.12",
-  "extraPaths": ["."]
+  "include": [
+    "src",
+    "backend",
+    "shared",
+    "scripts"
+  ],
+  "extraPaths": [
+    "."
+  ],
+  "typeCheckingMode": "basic"
 }
+
