@@ -381,7 +381,7 @@ export class WindowManager {
     }
     if (isClickThroughSurface) {
       window.setIgnoreMouseEvents(true, { forward: true });
-      window.setAlwaysOnTop(true, 'screen-saver');
+      this.elevateStatusSurface(window);
     }
     this.kinds.set(window.webContents.id, kind);
     window.on('moved', () => {
@@ -675,6 +675,7 @@ export class WindowManager {
       this.overlayWindow?.hide();
       if (notchShouldShow) {
         this.anchorWindow('notch');
+        this.elevateStatusSurface(this.notchWindow);
         this.notchWindow?.showInactive();
       } else {
         this.notchWindow?.hide();
@@ -685,6 +686,7 @@ export class WindowManager {
       this.overlayWindow?.show();
       if (notchShouldShow) {
         this.anchorWindow('notch');
+        this.elevateStatusSurface(this.notchWindow);
         this.notchWindow?.showInactive();
       } else {
         this.notchWindow?.hide();
@@ -693,6 +695,7 @@ export class WindowManager {
 
     if (activeStatus && this.uiPreferences.cornerGlowEnabled) {
       this.anchorWindow('glow');
+      this.elevateStatusSurface(this.glowWindow);
       this.glowWindow?.showInactive();
     } else {
       this.glowWindow?.hide();
@@ -859,10 +862,22 @@ export class WindowManager {
       return;
     }
     if (visible) {
+      const kind = this.kinds.get(window.webContents.id);
+      if (kind === 'notch' || kind === 'glow') {
+        this.elevateStatusSurface(window);
+      }
       window.showInactive();
       return;
     }
     window.hide();
+  }
+
+  private elevateStatusSurface(window: BrowserWindowType | null): void {
+    if (!window || window.isDestroyed()) {
+      return;
+    }
+    window.setAlwaysOnTop(true, 'screen-saver', 1);
+    window.moveTop();
   }
 
   private async toggleBackground(): Promise<void> {
@@ -1131,7 +1146,7 @@ export class WindowManager {
     }
     const bounds = window.getBounds();
     const display = screen.getDisplayMatching(bounds);
-    const anchorArea = kind === 'glow' ? display.bounds : display.workArea;
+    const anchorArea = kind === 'glow' || kind === 'notch' ? display.bounds : display.workArea;
     const anchored = getAnchoredWindowBounds(kind, anchorArea, {
       width: bounds.width,
       height: bounds.height
@@ -1147,7 +1162,7 @@ export class WindowManager {
     }
 
     const display = screen.getDisplayMatching(window.getBounds());
-    const anchorArea = kind === 'glow' ? display.bounds : display.workArea;
+    const anchorArea = kind === 'glow' || kind === 'notch' ? display.bounds : display.workArea;
     const normalized = normalizeWindowSize(kind, anchorArea, {
       width: Number(payload.width) || window.getBounds().width,
       height: Number(payload.height) || window.getBounds().height
