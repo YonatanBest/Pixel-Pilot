@@ -1,9 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Optional
@@ -18,6 +20,14 @@ from backend_client import (
 )
 from config import Config
 from model_providers import get_live_provider_config, litellm_model_name
+from .ollama_local import (
+    KokoroTtsSynthesizer,
+    LocalAsrTranscriber,
+    OllamaChatClient,
+    extract_native_tool_calls as _extract_ollama_native_tool_calls,
+    extract_tool_calls_from_content as _extract_ollama_tool_calls_from_content,
+    build_user_message as _build_ollama_user_message,
+)
 from .request_mode_adapter import (
     assistant_tool_message as _assistant_tool_message,
     extract_choice_message as _extract_choice_message,
@@ -273,6 +283,22 @@ class BaseLiveTransport:
     @classmethod
     def unavailable_reason(cls) -> str:
         return ""
+
+    @classmethod
+    def supports_local_audio_input(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_local_audio_output(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_image_input(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_continuous_visual_loop(cls) -> bool:
+        return False
 
     async def connect(self, *, model: str, config: dict[str, Any]) -> None:
         raise NotImplementedError
@@ -739,6 +765,343 @@ class OpenAIRealtimeTransport(BaseLiveTransport):
             message = str(error.get("message") if isinstance(error, dict) else error)
             raise RuntimeError(message or "OpenAI Realtime session failed.")
         return {}
+
+
+class OllamaLocalLiveTransport(BaseLiveTransport):
+    should_rotate_sessions = False
+
+    def __init__(self) -> None:
+        self._provider = get_live_provider_config(provider_id="ollama")
+        self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._messages: list[dict[str, Any]] = []
+        self._tools: list[dict[str, Any]] = []
+        self._model = ""
+        self._closed = False
+        self._pending_tool_future: Optional[asyncio.Future[list[dict[str, Any]]]] = None
+        self._chat_client: OllamaChatClient | None = None
+        self._pending_audio = bytearray()
+        self._pending_audio_sample_rate = Config.LIVE_AUDIO_INPUT_RATE
+        self._latest_image_b64: Optional[str] = None
+        self._latest_image_digest = ""
+        self._run_lock = asyncio.Lock()
+
+    @classmethod
+    def is_supported(cls) -> bool:
+        return bool(str(Config.OLLAMA_BASE_URL or "").strip())
+
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        if not str(Config.OLLAMA_BASE_URL or "").strip():
+            return "Ollama base URL is not configured."
+        return ""
+
+    @classmethod
+    def supports_local_audio_input(cls) -> bool:
+        available, _message = LocalAsrTranscriber.availability(
+            model_name=Config.LOCAL_ASR_MODEL
+        )
+        return available
+
+    @classmethod
+    def supports_local_audio_output(cls) -> bool:
+        available, _message = KokoroTtsSynthesizer.availability(
+            enabled=Config.LOCAL_TTS_ENABLED,
+            model_path=Config.resolve_local_tts_model_path(),
+            voices_path=Config.resolve_local_tts_voices_path(),
+        )
+        return available
+
+    @classmethod
+    def supports_image_input(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_continuous_visual_loop(cls) -> bool:
+        return bool(Config.OLLAMA_LIVE_FRAME_LOOP_ENABLED)
+
+    async def connect(self, *, model: str, config: dict[str, Any]) -> None:
+        self._provider = get_live_provider_config(provider_id="ollama")
+        self._model = str(model or self._provider.model).strip()
+        instructions = str(config.get("system_instruction") or "").strip()
+        instructions = f"{instructions}\n\n{REQUEST_MODE_SYSTEM_APPENDIX}".strip()
+        self._messages = [{"role": "system", "content": instructions}] if instructions else []
+        declarations = ((config.get("tools") or [{}])[0] or {}).get("function_declarations") or []
+        self._tools = openai_tools_from_declarations(declarations)
+        self._closed = False
+        self._pending_audio.clear()
+        self._pending_audio_sample_rate = Config.LIVE_AUDIO_INPUT_RATE
+        self._chat_client = OllamaChatClient(
+            self._provider.base_url or Config.OLLAMA_BASE_URL,
+            self._model,
+        )
+
+    async def send_text(self, text: str) -> None:
+        payload = str(text or "").strip()
+        if not payload:
+            return
+        asyncio.create_task(self._run_turn(payload))
+
+    async def send_audio(self, data: bytes, mime_type: str) -> None:
+        if not data:
+            return
+        self._pending_audio.extend(data)
+        self._pending_audio_sample_rate = self._extract_audio_rate(mime_type)
+
+    async def send_video(self, data: bytes, mime_type: str) -> None:
+        del mime_type
+        if not data:
+            return
+        digest = hashlib.sha1(data).hexdigest()
+        if digest == self._latest_image_digest:
+            return
+        self._latest_image_digest = digest
+        self._latest_image_b64 = base64.b64encode(data).decode("ascii")
+
+    async def send_audio_stream_end(self) -> None:
+        if not self._pending_audio:
+            return
+        audio_bytes = bytes(self._pending_audio)
+        sample_rate = self._pending_audio_sample_rate
+        self._pending_audio.clear()
+        asyncio.create_task(
+            self._transcribe_and_run(audio_bytes, sample_rate=sample_rate)
+        )
+
+    async def send_tool_responses(self, responses: list[dict[str, Any]]) -> None:
+        if self._pending_tool_future is not None and not self._pending_tool_future.done():
+            self._pending_tool_future.set_result(list(responses or []))
+
+    async def events(self) -> AsyncIterator[dict[str, Any]]:
+        while not self._closed:
+            event = await self._events.get()
+            if event.get("type") == "__closed__":
+                return
+            yield event
+
+    async def close(self, *, close_client: bool = False) -> None:
+        del close_client
+        self._closed = True
+        if self._pending_tool_future is not None and not self._pending_tool_future.done():
+            self._pending_tool_future.cancel()
+        await self._events.put({"type": "__closed__"})
+
+    async def _transcribe_and_run(self, audio_bytes: bytes, *, sample_rate: int) -> None:
+        try:
+            transcript = await LocalAsrTranscriber.transcribe_pcm16_async(
+                audio_bytes,
+                sample_rate=sample_rate,
+                model_name=Config.LOCAL_ASR_MODEL,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._events.put(
+                {
+                    "server_content": {
+                        "model_turn": {"parts": [{"text": f"Local transcription failed: {exc}"}]},
+                        "generation_complete": True,
+                        "turn_complete": True,
+                    }
+                }
+            )
+            return
+
+        transcript = str(transcript or "").strip()
+        if not transcript:
+            await self._events.put(
+                {
+                    "server_content": {
+                        "model_turn": {"parts": [{"text": "No speech was detected."}]},
+                        "generation_complete": True,
+                        "turn_complete": True,
+                    }
+                }
+            )
+            return
+
+        await self._events.put(
+            {"server_content": {"input_transcription": {"text": transcript}}}
+        )
+        await self._run_turn(transcript)
+
+    async def _run_turn(self, text: str) -> None:
+        if self._chat_client is None:
+            await self._events.put(
+                {
+                    "server_content": {
+                        "model_turn": {"parts": [{"text": "Ollama transport is not connected."}]},
+                        "generation_complete": True,
+                        "turn_complete": True,
+                    }
+                }
+            )
+            return
+
+        async with self._run_lock:
+            image_for_turn = self._latest_image_b64
+            self._latest_image_b64 = None
+            self._latest_image_digest = ""
+            self._messages.append(_build_ollama_user_message(text, image_for_turn))
+
+            while not self._closed:
+                try:
+                    assistant_text = ""
+                    buffered = ""
+                    stream_visible = False
+                    native_calls: list[dict[str, Any]] = []
+                    async for chunk in self._chat_client.chat_stream(
+                        messages=self._messages,
+                        tools=self._tools,
+                    ):
+                        native_calls.extend(_extract_ollama_native_tool_calls(chunk))
+                        content = str((chunk.get("message") or {}).get("content") or "")
+                        if not content:
+                            continue
+
+                        assistant_text += content
+                        if stream_visible:
+                            await self._emit_text_delta(content)
+                            continue
+
+                        buffered += content
+                        probe = buffered.lstrip()
+                        if probe.startswith("{") or probe.startswith("```"):
+                            continue
+
+                        stream_visible = True
+                        await self._emit_text_delta(buffered)
+                        buffered = ""
+
+                    fallback_calls = _extract_ollama_tool_calls_from_content(assistant_text)
+                    tool_calls = native_calls or fallback_calls
+                    tool_json_only = bool(fallback_calls and not stream_visible)
+
+                    if not tool_calls and buffered:
+                        await self._emit_text_delta(buffered)
+
+                    if tool_calls:
+                        self._messages.append(
+                            {
+                                "role": "assistant",
+                                "content": "" if tool_json_only else assistant_text,
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": call["name"],
+                                            "arguments": call["args"],
+                                        }
+                                    }
+                                    for call in tool_calls
+                                ],
+                            }
+                        )
+                        function_calls = [
+                            {
+                                "id": item["id"],
+                                "name": item["name"],
+                                "args": item["args"],
+                            }
+                            for item in tool_calls
+                        ]
+                        loop = asyncio.get_running_loop()
+                        self._pending_tool_future = loop.create_future()
+                        await self._events.put({"tool_call": {"function_calls": function_calls}})
+                        try:
+                            responses = await asyncio.wait_for(self._pending_tool_future, timeout=60.0)
+                        except Exception as exc:  # noqa: BLE001
+                            await self._events.put(
+                                {
+                                    "server_content": {
+                                        "model_turn": {"parts": [{"text": f"Tool response failed: {exc}"}]},
+                                        "generation_complete": True,
+                                        "turn_complete": True,
+                                    }
+                                }
+                            )
+                            return
+                        finally:
+                            self._pending_tool_future = None
+                        for item in responses or []:
+                            self._messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": str(item.get("id") or ""),
+                                    "name": str(item.get("name") or ""),
+                                    "content": json.dumps(item.get("response") or {}),
+                                }
+                            )
+                        continue
+
+                    if assistant_text:
+                        self._messages.append({"role": "assistant", "content": assistant_text})
+                    await self._emit_tts_audio(assistant_text)
+                    await self._events.put(
+                        {"server_content": {"generation_complete": True, "turn_complete": True}}
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    await self._events.put(
+                        {
+                            "server_content": {
+                                "model_turn": {"parts": [{"text": f"Model request failed: {exc}"}]},
+                                "generation_complete": True,
+                                "turn_complete": True,
+                            }
+                        }
+                    )
+                    return
+
+    async def _emit_text_delta(self, text: str) -> None:
+        if not text:
+            return
+        await self._events.put(
+            {"server_content": {"model_turn": {"parts": [{"text": text}]}}}
+        )
+
+    async def _emit_tts_audio(self, text: str) -> None:
+        if not text or not Config.LOCAL_TTS_ENABLED:
+            return
+        available, _message = KokoroTtsSynthesizer.availability(
+            enabled=Config.LOCAL_TTS_ENABLED,
+            model_path=Config.resolve_local_tts_model_path(),
+            voices_path=Config.resolve_local_tts_voices_path(),
+        )
+        if not available:
+            return
+        try:
+            audio_chunks = await KokoroTtsSynthesizer.synthesize_text_async(text)
+        except Exception:
+            logger.debug("Ollama local TTS synthesis failed", exc_info=True)
+            return
+        for payload, sample_rate in audio_chunks:
+            if not payload:
+                continue
+            await self._events.put(
+                {
+                    "server_content": {
+                        "model_turn": {
+                            "parts": [
+                                {
+                                    "inline_data": {
+                                        "data": payload,
+                                        "mime_type": f"audio/pcm;rate={sample_rate}",
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            )
+
+    @staticmethod
+    def _extract_audio_rate(mime_type: str) -> int:
+        text = str(mime_type or "").lower()
+        match = re.search(r"(?:rate|sample_rate)\s*=\s*(\d{4,6})", text)
+        if not match:
+            return Config.LIVE_AUDIO_INPUT_RATE
+        try:
+            parsed = int(match.group(1))
+        except ValueError:
+            return Config.LIVE_AUDIO_INPUT_RATE
+        return parsed if 8_000 <= parsed <= 96_000 else Config.LIVE_AUDIO_INPUT_RATE
 
 
 class LiteLLMRequestLiveTransport(BaseLiveTransport):

@@ -47,11 +47,11 @@ const backendUrl = String(process.env.BACKEND_URL || envFile.BACKEND_URL || '').
 const webUrl = String(process.env.WEB_URL || envFile.WEB_URL || '').trim();
 
 if (!backendUrl) {
-  throw new Error('BACKEND_URL is required to create a production-ready MSI release config.');
+  throw new Error('BACKEND_URL is required to create a production-ready packaged release config.');
 }
 
 if (!webUrl) {
-  throw new Error('WEB_URL is required to create a production-ready MSI release config.');
+  throw new Error('WEB_URL is required to create a production-ready packaged release config.');
 }
 
 const releaseConfig = {

@@ -8,6 +8,8 @@ from auth_manager import get_auth_manager
 from config import Config
 from model_providers import (
     PROVIDER_KEY_ENVS as _PROVIDER_KEY_ENV,
+    default_live_model,
+    default_request_model,
     get_live_provider_config,
     get_request_provider_config,
     normalize_provider_id,
@@ -59,13 +61,19 @@ def save_api_key(
 
     base_url = str(base_url or "").strip()
     model = str(model or "").strip()
+    live_model = ""
     env_updates: dict[str, str] = {
         "PIXELPILOT_MODEL_PROVIDER": provider,
         "PIXELPILOT_LIVE_PROVIDER": provider,
     }
     if key_env:
         env_updates[key_env] = api_key
-    if model:
+    if provider == "ollama":
+        selected_model = model or default_request_model(provider)
+        live_model = default_live_model(provider)
+        env_updates["PIXELPILOT_MODEL"] = selected_model
+        env_updates["PIXELPILOT_LIVE_MODEL"] = live_model
+    elif model:
         env_updates["PIXELPILOT_MODEL"] = model
     if provider == "ollama" and base_url:
         env_updates["OLLAMA_BASE_URL"] = base_url
@@ -94,7 +102,10 @@ def save_api_key(
     Config.LIVE_PROVIDER = provider
     if key_env:
         setattr(Config, key_env, api_key)
-    if model:
+    if provider == "ollama":
+        Config.MODEL_NAME = env_updates["PIXELPILOT_MODEL"]
+        Config.LIVE_MODEL = env_updates["PIXELPILOT_LIVE_MODEL"]
+    elif model:
         Config.MODEL_NAME = model
     if provider == "ollama" and base_url:
         Config.OLLAMA_BASE_URL = base_url

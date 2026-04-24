@@ -96,15 +96,11 @@ class LiveSessionManager(QObject):
         self._audio_output_suppressed_until = 0.0
         self._reconnect_in_progress = False
         self._last_invalid_request_recovery_at = 0.0
-        provider_config = get_live_provider_config()
-        self._provider_config = provider_config
-        self._voice_supported = bool(provider_config.capabilities.audio_input and provider_config.capabilities.audio_output)
-        self._image_input_enabled = bool(Config.LIVE_ENABLE_IMAGE_INPUT and provider_config.capabilities.image_input)
-        self._video_stream_enabled = bool(
-            Config.LIVE_ENABLE_VIDEO_STREAM
-            and self._image_input_enabled
-            and provider_config.capabilities.video_input
-        )
+        self._provider_config = get_live_provider_config()
+        self._voice_supported = False
+        self._image_input_enabled = False
+        self._video_stream_enabled = False
+        self._refresh_transport_capabilities()
         self._speaker_drop_logged_at = 0.0
         self._speaker_backlog_logged_at = 0.0
         self._speaker_backpressure_logged_at = 0.0
@@ -469,7 +465,7 @@ class LiveSessionManager(QObject):
         }
 
     def _transport_cls(self):
-        self._provider_config = get_live_provider_config()
+        self._refresh_transport_capabilities()
         from .transport_factory import resolve_transport_cls
         return resolve_transport_cls(
             self._provider_config.provider_id,
@@ -481,6 +477,42 @@ class LiveSessionManager(QObject):
         if self._transport is not None and isinstance(self._transport, cls):
             return self._transport
         return cls()
+
+    def _refresh_transport_capabilities(self) -> None:
+        self._provider_config = get_live_provider_config()
+        from .transport_factory import resolve_transport_cls
+
+        transport_cls = resolve_transport_cls(
+            self._provider_config.provider_id,
+            self._provider_config.mode_kind,
+        )
+        provider_caps = self._provider_config.capabilities
+        self._voice_supported = bool(
+            (
+                provider_caps.audio_input
+                and provider_caps.audio_output
+            )
+            or transport_cls.supports_local_audio_input()
+        )
+        self._image_input_enabled = bool(
+            Config.LIVE_ENABLE_IMAGE_INPUT
+            and (
+                provider_caps.image_input
+                or transport_cls.supports_image_input()
+            )
+        )
+        self._video_stream_enabled = bool(
+            self._image_input_enabled
+            and (
+                provider_caps.video_input
+                or transport_cls.supports_continuous_visual_loop()
+            )
+            and (
+                Config.LIVE_ENABLE_VIDEO_STREAM
+                if provider_caps.video_input
+                else Config.OLLAMA_LIVE_FRAME_LOOP_ENABLED
+            )
+        )
 
     @property
     def is_connection_pending(self) -> bool:
@@ -2741,7 +2773,10 @@ class LiveSessionManager(QObject):
         transport = await self._ensure_session_with_retry()
         if not self._video_stream_enabled:
             return
-        interval = max(0.5, 1.0 / max(1, Config.LIVE_VIDEO_FPS))
+        if self._provider_config.capabilities.video_input:
+            interval = max(0.5, 1.0 / max(1, Config.LIVE_VIDEO_FPS))
+        else:
+            interval = max(0.5, 1.0 / max(0.1, float(Config.OLLAMA_LIVE_FRAME_LOOP_FPS or 1.0)))
         try:
             while True:
                 try:
@@ -3609,16 +3644,32 @@ class LiveSessionManager(QObject):
         image = self.agent.screen_capture._capture_raw_image()
         if image is None:
             return None
-        return self._image_to_bytes(image, max_size=(640, 360), fmt="JPEG")
+        if self._provider_config.capabilities.video_input:
+            return self._image_to_bytes(image, max_size=(640, 360), fmt="JPEG")
+        max_width = int(Config.OLLAMA_LIVE_FRAME_MAX_WIDTH or 960)
+        aspect_ratio = image.height / max(1, image.width)
+        max_height = max(180, int(max_width * aspect_ratio))
+        return self._image_to_bytes(
+            image,
+            max_size=(max_width, max_height),
+            fmt="JPEG",
+            jpeg_quality=int(Config.OLLAMA_LIVE_FRAME_JPEG_QUALITY or 60),
+        )
 
     @staticmethod
-    def _image_to_bytes(image: Image.Image, *, max_size: tuple[int, int], fmt: str) -> bytes:
+    def _image_to_bytes(
+        image: Image.Image,
+        *,
+        max_size: tuple[int, int],
+        fmt: str,
+        jpeg_quality: int = 72,
+    ) -> bytes:
         working = image.convert("RGB")
         working.thumbnail(max_size, Image.Resampling.LANCZOS)
         buffer = io.BytesIO()
         save_kwargs: dict[str, Any] = {}
         if fmt.upper() == "JPEG":
-            save_kwargs["quality"] = 72
+            save_kwargs["quality"] = jpeg_quality
         working.save(buffer, format=fmt, **save_kwargs)
         return buffer.getvalue()
 

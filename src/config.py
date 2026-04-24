@@ -35,6 +35,16 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return int(default)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
@@ -135,6 +145,19 @@ class Config:
     LIVE_AUDIO_QUEUE_DROP_LOG_COOLDOWN_SECONDS = 2.0
     LIVE_AUDIO_RESAMPLE_LOG_COOLDOWN_SECONDS = 5.0
     LIVE_VIDEO_MAX_SECONDS_BEFORE_ROTATE = 105
+    LOCAL_ASR_MODEL = _env_str("LOCAL_ASR_MODEL", "base.en")
+    LOCAL_TTS_ENABLED = _env_bool("LOCAL_TTS_ENABLED", True)
+    LOCAL_TTS_MODEL = _env_str("LOCAL_TTS_MODEL")
+    LOCAL_TTS_VOICES_PATH = _env_str("LOCAL_TTS_VOICES_PATH")
+    LOCAL_TTS_VOICE = _env_str("LOCAL_TTS_VOICE", "af_sarah")
+    LOCAL_TTS_SPEED = _env_float("LOCAL_TTS_SPEED", 1.0)
+    OLLAMA_LIVE_FRAME_LOOP_ENABLED = _env_bool("OLLAMA_LIVE_FRAME_LOOP_ENABLED", True)
+    OLLAMA_LIVE_FRAME_LOOP_FPS = _env_float("OLLAMA_LIVE_FRAME_LOOP_FPS", 1.0)
+    OLLAMA_LIVE_FRAME_MAX_WIDTH = max(320, _env_int("OLLAMA_LIVE_FRAME_MAX_WIDTH", 960))
+    OLLAMA_LIVE_FRAME_JPEG_QUALITY = max(
+        30,
+        min(95, _env_int("OLLAMA_LIVE_FRAME_JPEG_QUALITY", 60)),
+    )
     ENABLE_WAKE_WORD = True
     WAKE_WORD_PHRASE = _env_str("WAKE_WORD_PHRASE", "Hey Pixie")
     WAKE_WORD_OPENWAKEWORD_MODEL_PATH = _env_str("WAKE_WORD_OPENWAKEWORD_MODEL_PATH")
@@ -325,6 +348,71 @@ class Config:
                 cls.runtime_resource_dir() / "speaker" / "speaker-embedding.onnx",
             ]
         )
+        seen: set[str] = set()
+        deduped: list[Path] = []
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        for candidate in deduped:
+            if candidate.exists():
+                return candidate
+        return deduped[0] if deduped else None
+
+    @classmethod
+    def resolve_local_tts_model_path(cls) -> Optional[Path]:
+        configured = str(cls.LOCAL_TTS_MODEL or "").strip()
+        candidates: list[Path] = []
+        if configured:
+            raw = Path(os.path.expandvars(os.path.expanduser(configured)))
+            if raw.is_absolute():
+                candidates.append(raw)
+            else:
+                candidates.extend(
+                    [
+                        cls.PROJECT_ROOT / raw,
+                        cls.APP_DATA_DIR / "models" / raw.name,
+                        cls.runtime_resource_dir() / raw,
+                    ]
+                )
+        candidates.extend(
+            [
+                cls.PROJECT_ROOT / "models" / "kokoro-v1.0.onnx",
+                cls.APP_DATA_DIR / "models" / "kokoro-v1.0.onnx",
+                cls.runtime_resource_dir() / "models" / "kokoro-v1.0.onnx",
+            ]
+        )
+        return cls._first_existing_or_candidate(candidates)
+
+    @classmethod
+    def resolve_local_tts_voices_path(cls) -> Optional[Path]:
+        configured = str(cls.LOCAL_TTS_VOICES_PATH or "").strip()
+        candidates: list[Path] = []
+        if configured:
+            raw = Path(os.path.expandvars(os.path.expanduser(configured)))
+            if raw.is_absolute():
+                candidates.append(raw)
+            else:
+                candidates.extend(
+                    [
+                        cls.PROJECT_ROOT / raw,
+                        cls.APP_DATA_DIR / "models" / raw.name,
+                        cls.runtime_resource_dir() / raw,
+                    ]
+                )
+        candidates.extend(
+            [
+                cls.PROJECT_ROOT / "models" / "voices-v1.0.bin",
+                cls.APP_DATA_DIR / "models" / "voices-v1.0.bin",
+                cls.runtime_resource_dir() / "models" / "voices-v1.0.bin",
+            ]
+        )
+        return cls._first_existing_or_candidate(candidates)
+
+    @staticmethod
+    def _first_existing_or_candidate(candidates: list[Path]) -> Optional[Path]:
         seen: set[str] = set()
         deduped: list[Path] = []
         for candidate in candidates:

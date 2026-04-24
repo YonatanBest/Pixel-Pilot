@@ -14,10 +14,12 @@ def resolve_transport_cls(provider_id: str, mode_kind: str) -> type[BaseLiveTran
         BackendGeminiLiveTransport,
         DirectGeminiLiveTransport,
         LiteLLMRequestLiveTransport,
+        OllamaLocalLiveTransport,
         OpenAIRealtimeTransport,
     )
 
     _REGISTRY: dict[tuple[str, str], type[BaseLiveTransport]] = {
+        ("ollama", "realtime"): OllamaLocalLiveTransport,
         ("openai", "realtime"): OpenAIRealtimeTransport,
     }
 

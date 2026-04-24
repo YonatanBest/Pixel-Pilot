@@ -24,3 +24,5 @@ imagehash==4.3.2
 uiautomation==2.0.29
 pytest==9.0.2
 websockets==16.0
+faster-whisper==1.2.1
+kokoro-onnx==0.5.0

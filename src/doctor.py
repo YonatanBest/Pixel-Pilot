@@ -11,7 +11,8 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from config import Config
-from model_providers import get_request_provider_config
+from live.ollama_local import diagnose_ollama_runtime
+from model_providers import get_live_provider_config, get_request_provider_config
 
 
 @dataclass(slots=True)
@@ -60,6 +61,7 @@ def run_doctor(
     )
     checks = [
         _check_direct_mode(),
+        _check_ollama_local_runtime(),
         _check_backend(),
         _check_settings(agent=agent or getattr(controller, "agent", None)),
         _check_wakeword_assets(),
@@ -147,6 +149,72 @@ def _check_backend() -> DoctorCheck:
             summary=f"Backend health check failed: {exc}",
             details={"url": target},
         )
+
+
+def _check_ollama_local_runtime() -> DoctorCheck:
+    request_provider = get_request_provider_config()
+    live_provider = get_live_provider_config()
+    if request_provider.provider_id != "ollama" and live_provider.provider_id != "ollama":
+        return DoctorCheck(
+            name="ollama_local_runtime",
+            status="ok",
+            summary="Ollama local live is not the active provider.",
+        )
+
+    status = diagnose_ollama_runtime(
+        base_url=live_provider.base_url or Config.OLLAMA_BASE_URL,
+        model=live_provider.model,
+        require_local_asr=True,
+        asr_model=Config.LOCAL_ASR_MODEL,
+        require_local_tts=False,
+        tts_enabled=Config.LOCAL_TTS_ENABLED,
+        model_path=Config.resolve_local_tts_model_path(),
+        voices_path=Config.resolve_local_tts_voices_path(),
+        frame_loop_enabled=Config.OLLAMA_LIVE_FRAME_LOOP_ENABLED,
+    )
+    details = {
+        "baseUrl": status.base_url,
+        "model": status.model,
+        "reachable": status.reachable,
+        "modelAvailable": status.model_available,
+        "availableModels": list(status.available_models),
+        "pullCommand": status.pull_command,
+        "localAsrModel": Config.LOCAL_ASR_MODEL,
+        "localAsrAvailable": status.asr_available,
+        "localAsrMessage": status.asr_message,
+        "localTtsEnabled": Config.LOCAL_TTS_ENABLED,
+        "localTtsAvailable": status.tts_available,
+        "localTtsMessage": status.tts_message,
+        "localTtsModelPath": str(Config.resolve_local_tts_model_path() or ""),
+        "localTtsVoicesPath": str(Config.resolve_local_tts_voices_path() or ""),
+        "frameLoopEnabled": status.frame_loop_enabled,
+        "frameLoopFps": Config.OLLAMA_LIVE_FRAME_LOOP_FPS,
+    }
+    if not status.reachable or not status.model_available:
+        return DoctorCheck(
+            name="ollama_local_runtime",
+            status="error",
+            summary=status.message,
+            details=details,
+        )
+    if not status.asr_available or (Config.LOCAL_TTS_ENABLED and not status.tts_available):
+        return DoctorCheck(
+            name="ollama_local_runtime",
+            status="warn",
+            summary=status.message,
+            details=details,
+        )
+    summary = (
+        f"Ollama local live is ready for {status.model}."
+        if Config.LOCAL_TTS_ENABLED
+        else f"Ollama local live is ready for {status.model} (local TTS disabled)."
+    )
+    return DoctorCheck(
+        name="ollama_local_runtime",
+        status="ok",
+        summary=summary,
+        details=details,
+    )
 
 
 def _check_settings(*, agent: Any = None) -> DoctorCheck:

@@ -18,7 +18,7 @@ PixelPilot is a Windows desktop AI agent for real computer work. It combines a d
 ## What PixelPilot Does
 
 - Runs as a Windows desktop agent with a compact overlay UI.
-- Uses PixelPilot Live for typed and voice-driven interaction with native realtime providers (Gemini, OpenAI) plus local Ollama live mode with local ASR input and text replies.
+- Uses PixelPilot Live for typed and voice-driven interaction with native realtime providers (Gemini, OpenAI) plus local Ollama live mode with local ASR, Kokoro ONNX speech output, and low-FPS visual context refresh.
 - Automates desktop tasks with keyboard, mouse, UI Automation, OCR, and vision fallbacks.
 - Supports "Hey Pixie" Wake Word detection for hands-free interaction.
 - Supports Speaker Identification (Voiceprint) for personalized/secure control.
@@ -78,6 +78,23 @@ Use the Windows installer and launch PixelPilot.
    BACKEND_URL=http://localhost:8000
    WEB_URL=http://localhost:5173
    ```
+
+   For local Ollama live mode:
+   ```env
+   PIXELPILOT_MODEL_PROVIDER=ollama
+   PIXELPILOT_LIVE_PROVIDER=ollama
+   PIXELPILOT_MODEL=gemma4:e2b-it-bf16
+   PIXELPILOT_LIVE_MODEL=gemma4:e2b-it-bf16
+   OLLAMA_BASE_URL=http://localhost:11434
+   LOCAL_ASR_MODEL=base.en
+   LOCAL_TTS_ENABLED=true
+   OLLAMA_LIVE_FRAME_LOOP_ENABLED=true
+   OLLAMA_LIVE_FRAME_LOOP_FPS=1.0
+   ```
+
+   Download the Kokoro model assets to the `models/` directory:
+   - [kokoro-v1.0.onnx](https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/kokoro-v1.0.onnx)
+   - [voices-v1.0.bin](https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/voices-v1.0.bin)
 
 2. **Setup Python Runtime**
    The desktop app requires a local Python virtual environment in the root directory:
@@ -162,15 +179,12 @@ npm run build
 
 # Python diagnostics
 python src/main.py doctor
-
-# Build packaged runtime binaries
-python scripts/build_runtime.py
 ```
 
 ## Troubleshooting
 
 - No login-free startup: check `PIXELPILOT_MODEL_PROVIDER` and the matching provider key or `OLLAMA_BASE_URL`.
-- Ollama local live mode: install `gemma4:e2b-it-bf16`, keep `OLLAMA_BASE_URL=http://localhost:11434`, and install `faster-whisper` from `requirements.txt`.
+- Ollama local live mode: install `gemma4:e2b-it-bf16`, keep `OLLAMA_BASE_URL=http://localhost:11434`, install `faster-whisper` and `kokoro-onnx` from `requirements.txt`. Ensure `kokoro-v1.0.onnx` and `voices-v1.0.bin` are in the `models/` directory. If audio input fails on GPU systems, ensure you have the required CUDA/cuDNN DLLs (e.g., `cublas64_12.dll`); the app will automatically fallback to CPU mode if they are missing. Run `python src/main.py doctor` to verify.
 - Hosted sign-in issues: check `BACKEND_URL`, `WEB_URL`, MongoDB, Redis, and Google OAuth config.
 - Runtime issues: check `logs/pixelpilot.log`.
 - UAC issues: reinstall from the MSI as Administrator.

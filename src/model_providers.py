@@ -18,6 +18,8 @@ __all__ = [
     "ModelCapabilities",
     "ProviderConfig",
     "PROVIDER_KEY_ENVS",
+    "default_request_model",
+    "default_live_model",
     "normalize_provider_id",
     "litellm_model_name",
     "resolve_request_provider",
@@ -75,9 +77,9 @@ def get_request_provider_config(
     from config import Config
 
     provider = normalize_provider_id(provider_id or Config.MODEL_PROVIDER)
-    selected_model = str(model or Config.MODEL_NAME or _DEFAULT_REQUEST_MODELS[provider]).strip()
-    if provider != "gemini" and selected_model == _DEFAULT_REQUEST_MODELS["gemini"]:
-        selected_model = _DEFAULT_REQUEST_MODELS[provider]
+    selected_model = str(model or Config.MODEL_NAME or default_request_model(provider)).strip()
+    if provider != "gemini" and selected_model == default_request_model("gemini"):
+        selected_model = default_request_model(provider)
     return _build_provider_config(
         provider_id=provider,
         mode_kind="request",
@@ -100,22 +102,22 @@ def get_live_provider_config(
     explicit_live_model = str(model or "").strip()
     if not explicit_live_model:
         live_model = str(Config.LIVE_MODEL or "").strip()
-        if provider in {"gemini", "openai"}:
-            explicit_live_model = live_model or _DEFAULT_LIVE_MODELS.get(provider, "")
+        if provider in {"gemini", "openai", "ollama"}:
+            explicit_live_model = live_model or default_live_model(provider)
         else:
             explicit_live_model = str(Config.MODEL_NAME or "").strip()
-            if not explicit_live_model or explicit_live_model == _DEFAULT_REQUEST_MODELS["gemini"]:
-                explicit_live_model = _DEFAULT_REQUEST_MODELS.get(provider, "")
+            if not explicit_live_model or explicit_live_model == default_request_model("gemini"):
+                explicit_live_model = default_request_model(provider)
     selected_model = explicit_live_model
-    if provider == "openai" and selected_model == _DEFAULT_LIVE_MODELS["gemini"]:
-        selected_model = _DEFAULT_LIVE_MODELS["openai"]
-    if provider not in {"gemini", "openai"} and selected_model == _DEFAULT_LIVE_MODELS["gemini"]:
-        selected_model = str(Config.MODEL_NAME or "").strip() or _DEFAULT_REQUEST_MODELS.get(provider, selected_model)
+    if provider == "openai" and selected_model == default_live_model("gemini"):
+        selected_model = default_live_model("openai")
+    if provider not in {"gemini", "openai", "ollama"} and selected_model == default_live_model("gemini"):
+        selected_model = str(Config.MODEL_NAME or "").strip() or default_request_model(provider)
     if not selected_model:
-        selected_model = _DEFAULT_REQUEST_MODELS.get(provider, "")
+        selected_model = default_live_model(provider)
     return _build_provider_config(
         provider_id=provider,
-        mode_kind="realtime" if provider in {"gemini", "openai"} else "request",
+        mode_kind="realtime" if provider in {"gemini", "openai", "ollama"} else "request",
         model=selected_model,
         config=Config,
     )
@@ -126,11 +128,9 @@ resolve_live_provider = get_live_provider_config
 
 def live_provider_is_direct() -> bool:
     provider = get_live_provider_config()
-    if provider.provider_id == "gemini":
+    if provider.provider_id in {"gemini", "openai"}:
         return bool(provider.api_key)
-    if provider.provider_id == "openai":
-        return bool(provider.api_key)
-    return bool(provider.mode_kind == "request" and (provider.api_key or provider.is_local))
+    return bool(provider.api_key or provider.is_local)
 
 
 def provider_catalog_payload() -> list[dict[str, Any]]:
@@ -189,7 +189,28 @@ def _capabilities_for(provider_id: str, *, mode_kind: str) -> ModelCapabilities:
             audio_output=True,
             tool_calling=True,
         )
+    if mode_kind == "realtime" and provider == "ollama":
+        return ModelCapabilities(
+            realtime=True,
+            request=True,
+            image_input=True,
+            audio_input=True,
+            video_input=False,
+            text_output=True,
+            audio_output=False,
+            tool_calling=True,
+        )
     return ModelCapabilities(request=True, image_input=True, tool_calling=True)
+
+
+def default_request_model(provider_id: str) -> str:
+    provider = normalize_provider_id(provider_id)
+    return _DEFAULT_REQUEST_MODELS.get(provider, _DEFAULT_REQUEST_MODELS["gemini"])
+
+
+def default_live_model(provider_id: str) -> str:
+    provider = normalize_provider_id(provider_id)
+    return _DEFAULT_LIVE_MODELS.get(provider, default_request_model(provider))
 
 
 _DEFAULT_REQUEST_MODELS: dict[str, str] = {
@@ -198,7 +219,7 @@ _DEFAULT_REQUEST_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-5",
     "xai": "grok-4",
     "openrouter": "openai/gpt-5.4",
-    "ollama": "llama3.2",
+    "ollama": "gemma4:e2b-it-bf16",
     "openai_compatible": "gpt-oss-20b",
     "vercel_ai_gateway": "openai/gpt-5.4",
 }
@@ -206,4 +227,5 @@ _DEFAULT_REQUEST_MODELS: dict[str, str] = {
 _DEFAULT_LIVE_MODELS: dict[str, str] = {
     "gemini": "gemini-3.1-flash-live-preview",
     "openai": "gpt-realtime",
+    "ollama": "gemma4:e2b-it-bf16",
 }
